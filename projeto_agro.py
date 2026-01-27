@@ -11,6 +11,26 @@ import os
 # --- CONFIGURAÇÃO DE TELA ---
 st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica", page_icon="🌱")
 
+# --- DICIONÁRIO DE TRADUÇÃO (Para nomes ficarem bonitos no relatório) ---
+TRADUCAO_NOMES = {
+    'Argila': 'Teor de Argila',
+    'pH': 'Acidez do Solo (pH)',
+    'P': 'Fósforo',
+    'K': 'Potássio',
+    'Ca': 'Cálcio',
+    'Mg': 'Magnésio',
+    'Al': 'Alumínio',
+    'H+Al': 'Acidez Potencial',
+    'V%': 'Saturação por Bases',
+    'S': 'Enxofre',
+    'B': 'Boro',
+    'Cu': 'Cobre',
+    'Fe': 'Ferro',
+    'Mn': 'Manganês',
+    'Zn': 'Zinco',
+    'CTC': 'Capacidade de Troca Catiônica (CTC)'
+}
+
 # --- LOGIN ---
 def check_password():
     def password_entered():
@@ -28,117 +48,102 @@ def check_password():
 if check_password():
     with st.sidebar:
         st.image("LogoTriadeInceres.png", width=180)
-        st.markdown("### 👤 Usuário: Danilo")
+        st.markdown(f"### 👤 Usuário: Danilo")
         if st.button("Sair"):
             st.session_state["password_correct"] = False
             st.rerun()
 
-    st.title("Gerador de Relatórios v43")
+    st.title("Plataforma de Gestão Estratégica")
     
-    tab_inicio, tab_visualizacao, tab_pdf = st.tabs(["🏠 Upload", "🔍 Ver Mapas", "📄 Gerar Relatório Full"])
+    tab_inicio, tab_visualizacao, tab_pdf = st.tabs(["🏠 Upload", "🔍 Visualizar Todos os Mapas", "📄 Gerar Relatório Completo"])
 
     with tab_inicio:
         u1, u2 = st.columns(2)
-        up_geo = u1.file_uploader("GeoJSON do Talhão", type=["json", "geojson"])
-        up_ex = u2.file_uploader("Planilha de Solo (Excel)", type=["xlsx"])
+        up_geo = u1.file_uploader("Contorno do Talhão (GeoJSON)", type=["json", "geojson"])
+        up_ex = u2.file_uploader("Dados de Solo (Excel)", type=["xlsx"])
 
     if up_geo and up_ex:
         data_geo = json.load(up_geo)
         poligono = shape(data_geo['features'][0]['geometry'] if 'features' in data_geo else data_geo)
-        df = pd.read_excel(up_ex).apply(pd.to_numeric, errors='coerce').fillna(0)
+        df = pd.read_excel(up_ex)
         
-        # Mapeamento de Colunas (Padrão v43)
+        # Identifica coordenadas (assumindo que são as duas primeiras colunas)
         lat, lon = df.iloc[:,0], df.iloc[:,1]
-        arg, p_rem, p_solo = df.iloc[:,4], df.iloc[:,5], df.iloc[:,6]
-        ca, mg, k = df.iloc[:,7], df.iloc[:,8], df.iloc[:,9]
-        ctc = df.iloc[:,20]
+        
+        # Seleciona apenas colunas numéricas que não sejam Lat/Lon
+        colunas_dados = df.select_dtypes(include=[np.number]).columns[2:]
 
-        # Função de Plotagem
-        def plot_para_pdf(data, titulo, cmap='Spectral_r'):
+        def plot_fidedigno(data, titulo):
             b = poligono.bounds
             gx, gy = np.mgrid[b[0]-0.0006:b[2]+0.0006:200j, b[1]-0.0006:b[3]+0.0006:200j]
             rbf = Rbf(lon, lat, data, function='multiquadric', smooth=0.1)
             z = np.ma.masked_array(rbf(gx, gy), mask=np.array([[not poligono.contains(Point(x, y)) for y in gy[0,:]] for x in gx[:,0]]))
-            fig, ax = plt.subplots(figsize=(8, 5))
-            cp = ax.contourf(gx, gy, z, levels=6, cmap=cmap)
+            fig, ax = plt.subplots(figsize=(8, 8))
+            cp = ax.contourf(gx, gy, z, levels=6, cmap='Spectral_r')
             ax.plot(*poligono.exterior.xy, color='black', linewidth=2)
-            plt.colorbar(cp)
-            ax.set_title(titulo)
+            ax.set_aspect('equal')
+            plt.colorbar(cp, fraction=0.046, pad=0.04)
             ax.axis('off')
             return fig
 
-        # Cálculos de Recomendação
-        rec_calc = (np.maximum(((60/100*ctc)-ca)*0.56*(100/36), (18/100*ctc-mg)*0.40*(100/9)) * 1000 * (100/80)).clip(lower=0)
-        rec_gesso = ((arg / 10) * 15.0).clip(lower=0)
-        rec_k = (((3.2/100 * ctc) - k).clip(lower=0) * 1200 + 100) / 0.60
-
-        # Lista de Mapas para o Relatório
-        mapas_trabalho = [
-            (ctc, "Mapa de CTC (cmolc/dm³)", "Diagnóstico"),
-            (arg, "Mapa de Argila (g/kg)", "Diagnóstico"),
-            (p_solo, "Fósforo no Solo (mg/dm³)", "Diagnóstico"),
-            (ca, "Cálcio (cmolc/dm³)", "Diagnóstico"),
-            (mg, "Magnésio (cmolc/dm³)", "Diagnóstico"),
-            (k, "Potássio (cmolc/dm³)", "Diagnóstico"),
-            (rec_calc, "Recomendação de Calcário (kg/ha)", "Recomendação"),
-            (rec_gesso, "Recomendação de Gesso (kg/ha)", "Recomendação"),
-            (rec_k, "Recomendação de Potássio (kg/ha)", "Recomendação")
-        ]
+        # Gerar lista dinâmica de mapas
+        mapas_para_gerar = []
+        for col in colunas_dados:
+            nome_amigavel = TRADUCAO_NOMES.get(col, col)
+            mapas_para_gerar.append((df[col], nome_amigavel))
 
         with tab_visualizacao:
-            st.write("Confira os mapas processados antes de exportar:")
-            col1, col2 = st.columns(2)
-            for i, (dados, tit, tipo) in enumerate(mapas_trabalho):
-                with (col1 if i % 2 == 0 else col2):
-                    st.pyplot(plot_para_pdf(dados, tit))
+            st.info(f"Foram detectados {len(mapas_para_gerar)} atributos na sua planilha.")
+            cols = st.columns(2)
+            for idx, (dados, nome) in enumerate(mapas_para_gerar):
+                with cols[idx % 2]:
+                    st.pyplot(plot_fidedigno(dados, nome))
 
         with tab_pdf:
-            if st.button("🚀 Gerar Dossiê Completo (PDF)"):
+            if st.button("🚀 Gerar Relatório Com Todos os Atributos"):
                 try:
                     pdf = FPDF(orientation='P', unit='mm', format='A4')
+                    pdf.set_auto_page_break(auto=True, margin=15)
                     
                     # Capa
                     pdf.add_page()
-                    try: 
-                        pdf.image("LogoTriadeInceres.png", x=70, y=50, w=70)
-                    except: 
-                        st.warning("Logo não encontrada para o PDF, continuando sem ela...")
-                    
+                    try: pdf.image("LogoTriadeInceres.png", x=75, y=50, w=60)
+                    except: pass
                     pdf.ln(100)
-                    pdf.set_font("Arial", 'B', 24)
-                    pdf.cell(0, 20, "RELATORIO TECNICO AGROESTRATEGICO", ln=True, align='C')
+                    pdf.set_font("Arial", 'B', 22)
+                    pdf.cell(0, 15, "RELATÓRIO TÉCNICO ESTRATÉGICO", ln=True, align='C')
+                    pdf.set_font("Arial", '', 12)
+                    pdf.cell(0, 10, f"Total de Atributos Mapeados: {len(mapas_para_gerar)}", ln=True, align='C')
                     
-                    # Loop para cada mapa
-                    for i, (dados, tit, tipo) in enumerate(mapas_trabalho):
+                    for i, (dados, nome) in enumerate(mapas_para_gerar):
                         pdf.add_page()
-                        
-                        # Título da página
                         pdf.set_font("Arial", 'B', 14)
-                        pdf.cell(0, 10, f"{tipo}: {tit}", ln=True, align='C')
-                        pdf.line(10, 25, 200, 25)
+                        pdf.cell(0, 10, f"Mapa de {nome}", ln=True, align='L')
+                        pdf.line(10, 22, 200, 22)
                         
-                        # CAMINHO SEGURO PARA O SERVIDOR:
-                        # Usamos um nome simples sem espaços e na pasta /tmp/
-                        img_name = f"/tmp/mapa_{i}.png"
-                        
-                        fig_temp = plot_para_pdf(dados, tit)
-                        fig_temp.savefig(img_name, bbox_inches='tight', dpi=100) # DPI menor para ser mais rápido
+                        img_name = f"/tmp/mapa_dinamico_{i}.png"
+                        fig_temp = plot_fidedigno(dados, nome)
+                        fig_temp.savefig(img_name, bbox_inches='tight', dpi=150)
                         plt.close(fig_temp)
                         
-                        # Insere no PDF e depois remove o arquivo
-                        pdf.image(img_name, x=20, y=40, w=170)
+                        pdf.image(img_name, x=25, y=35, w=160)
                         
-                        pdf.set_y(160)
+                        pdf.set_y(190)
+                        pdf.set_font("Arial", 'B', 12)
+                        pdf.set_text_color(46, 125, 50)
+                        pdf.cell(0, 10, "Observação Técnica:", ln=True)
                         pdf.set_font("Arial", '', 11)
-                        pdf.multi_cell(0, 7, f"Analise tecnica v43 referente ao {tit}. Gerado por Triade Agro.")
+                        pdf.set_text_color(0, 0, 0)
+                        pdf.multi_cell(0, 7, f"Análise da variabilidade espacial do atributo {nome} no talhão selecionado, visando o equilíbrio nutricional e a otimização de recursos.")
                         
-                        # Remove o arquivo temporário para não encher o servidor
-                        if os.path.exists(img_name):
-                            os.remove(img_name)
+                        pdf.set_y(-20)
+                        pdf.set_font("Arial", 'I', 8)
+                        pdf.cell(0, 10, "Tríade Agro Estratégica - Relatório Gerado Automaticamente", align='C')
+                        
+                        if os.path.exists(img_name): os.remove(img_name)
 
                     pdf_out = pdf.output(dest='S').encode('latin-1')
-                    st.download_button("📥 Baixar Relatório Full", data=pdf_out, file_name="Relatorio_Triade_Total.pdf")
-                    st.success("Relatório gerado com sucesso!")
-                
+                    st.download_button("📥 Baixar Relatório Completo", data=pdf_out, file_name="Relatorio_Completo_Triade.pdf")
+                    st.success("Relatório pronto com todos os dados detectados!")
                 except Exception as e:
-                    st.error(f"Erro ao gerar PDF: {e}")
+                    st.error(f"Erro ao processar todos os mapas: {e}")
