@@ -94,49 +94,51 @@ if check_password():
 
         with tab_pdf:
             if st.button("🚀 Gerar Dossiê Completo (PDF)"):
-                pdf = FPDF(orientation='P', unit='mm', format='A4')
-                
-                # Capa
-                pdf.add_page()
-                try: pdf.image("LogoTriadeInceres.png", x=70, y=50, w=70)
-                except: pass
-                pdf.set_font("Arial", 'B', 24)
-                pdf.ln(100)
-                pdf.cell(0, 20, "RELATÓRIO TÉCNICO AGROESTRATÉGICO", ln=True, align='C')
-                pdf.set_font("Arial", '', 14)
-                pdf.cell(0, 10, "Metodologia de Precisão v43", ln=True, align='C')
-                
-                # Loop para cada mapa
-                for dados, tit, tipo in mapas_trabalho:
+                try:
+                    pdf = FPDF(orientation='P', unit='mm', format='A4')
+                    
+                    # Capa
                     pdf.add_page()
-                    # Cabeçalho pequeno
-                    try: pdf.image("LogoTriadeInceres.png", x=10, y=10, w=30)
-                    except: pass
-                    pdf.set_font("Arial", 'B', 14)
-                    pdf.set_y(15)
-                    pdf.cell(0, 10, f"{tipo}: {tit}", ln=True, align='R')
-                    pdf.line(10, 25, 200, 25)
+                    try: 
+                        pdf.image("LogoTriadeInceres.png", x=70, y=50, w=70)
+                    except: 
+                        st.warning("Logo não encontrada para o PDF, continuando sem ela...")
                     
-                    # Gera e salva imagem temporária
-                    fig_temp = plot_para_pdf(dados, tit)
-                    img_name = f"temp_{tit.replace(' ', '_')}.png"
-                    fig_temp.savefig(img_name, bbox_inches='tight', dpi=150)
-                    plt.close(fig_temp)
+                    pdf.ln(100)
+                    pdf.set_font("Arial", 'B', 24)
+                    pdf.cell(0, 20, "RELATORIO TECNICO AGROESTRATEGICO", ln=True, align='C')
                     
-                    pdf.image(img_name, x=20, y=40, w=170)
-                    
-                    # Argumentação Técnica baseada no tipo
-                    pdf.set_y(160)
-                    pdf.set_font("Arial", 'B', 12)
-                    pdf.cell(0, 10, "Análise Técnica:", ln=True)
-                    pdf.set_font("Arial", '', 11)
-                    if tipo == "Diagnóstico":
-                        texto = "Mapeamento da variabilidade espacial dos nutrientes para identificação de zonas de manejo."
-                    else:
-                        texto = "Cálculo de taxa variável v43 focado no equilíbrio de bases e otimização de custos."
-                    pdf.multi_cell(0, 7, texto)
-                    
-                    os.remove(img_name) # Limpa a imagem após usar
+                    # Loop para cada mapa
+                    for i, (dados, tit, tipo) in enumerate(mapas_trabalho):
+                        pdf.add_page()
+                        
+                        # Título da página
+                        pdf.set_font("Arial", 'B', 14)
+                        pdf.cell(0, 10, f"{tipo}: {tit}", ln=True, align='C')
+                        pdf.line(10, 25, 200, 25)
+                        
+                        # CAMINHO SEGURO PARA O SERVIDOR:
+                        # Usamos um nome simples sem espaços e na pasta /tmp/
+                        img_name = f"/tmp/mapa_{i}.png"
+                        
+                        fig_temp = plot_para_pdf(dados, tit)
+                        fig_temp.savefig(img_name, bbox_inches='tight', dpi=100) # DPI menor para ser mais rápido
+                        plt.close(fig_temp)
+                        
+                        # Insere no PDF e depois remove o arquivo
+                        pdf.image(img_name, x=20, y=40, w=170)
+                        
+                        pdf.set_y(160)
+                        pdf.set_font("Arial", '', 11)
+                        pdf.multi_cell(0, 7, f"Analise tecnica v43 referente ao {tit}. Gerado por Triade Agro.")
+                        
+                        # Remove o arquivo temporário para não encher o servidor
+                        if os.path.exists(img_name):
+                            os.remove(img_name)
 
-                pdf_out = pdf.output(dest='S').encode('latin-1')
-                st.download_button("📥 Baixar Relatório Full", data=pdf_out, file_name="Relatorio_Total_Triade.pdf")
+                    pdf_out = pdf.output(dest='S').encode('latin-1')
+                    st.download_button("📥 Baixar Relatório Full", data=pdf_out, file_name="Relatorio_Triade_Total.pdf")
+                    st.success("Relatório gerado com sucesso!")
+                
+                except Exception as e:
+                    st.error(f"Erro ao gerar PDF: {e}")
