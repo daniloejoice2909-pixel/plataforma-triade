@@ -30,9 +30,9 @@ if check_password():
     with st.sidebar:
         st.image("LogoTriadeInceres.png", width=180)
         st.markdown("---")
-        st.subheader("Configurações do Relatório")
-        produtor = st.text_input("Nome do Produtor", "Danilo")
-        fazenda = st.text_input("Nome da Fazenda", "Fazenda Exemplo")
+        st.subheader("Informações do Projeto")
+        produtor = st.text_input("Produtor", "Danilo")
+        fazenda = st.text_input("Fazenda", "Nome da Fazenda")
         municipio = st.text_input("Município", "Uberlândia - MG")
         logo_fazenda_file = st.file_uploader("Logo da Fazenda", type=["png", "jpg", "jpeg"])
         st.markdown("---")
@@ -60,28 +60,23 @@ if check_password():
             st.metric("Área Calculada", f"{area_ha:.2f} ha")
 
     if up_geo and up_ex:
-        # LIMPEZA PESADA DE DADOS PARA EVITAR O ERRO
         df_raw = pd.read_excel(up_ex)
         df = df_raw.copy()
-        # Converte lat/lon e remove nulos
         df.iloc[:, 0] = pd.to_numeric(df.iloc[:, 0], errors='coerce')
         df.iloc[:, 1] = pd.to_numeric(df.iloc[:, 1], errors='coerce')
         df = df.dropna(subset=[df.columns[0], df.columns[1]])
         
-        # Identifica colunas numéricas de dados
         colunas_dados = []
         for c in df.columns[2:]:
             df[c] = pd.to_numeric(df[c], errors='coerce')
             if not df[c].isnull().all():
-                df[c] = df[c].fillna(df[c].mean()) # Preenche buracos com a média
+                df[c] = df[c].fillna(df[c].mean())
                 colunas_dados.append(c)
 
         def plot_fidedigno(data_series):
-            # Filtro final antes do Rbf para garantir que não existam NaNs
             lon_clean = df.iloc[:, 1].values
             lat_clean = df.iloc[:, 0].values
             val_clean = data_series.values
-            
             b = poligono.bounds
             gx, gy = np.mgrid[b[0]-0.0006:b[2]+0.0006:200j, b[1]-0.0006:b[3]+0.0006:200j]
             rbf = Rbf(lon_clean, lat_clean, val_clean, function='multiquadric', smooth=0.1)
@@ -108,7 +103,7 @@ if check_password():
             if st.button("🚀 Gerar Dossiê Estratégico"):
                 logo_faz_path = None
                 if logo_fazenda_file:
-                    logo_faz_path = "/tmp/fazenda_logo.png"
+                    logo_faz_path = "/tmp/faz_logo.png"
                     Image.open(logo_fazenda_file).save(logo_faz_path)
 
                 pdf = FPDF()
@@ -116,79 +111,13 @@ if check_password():
                 
                 # --- PÁGINA 1: CAPA E TABELA DE INSUMOS ---
                 pdf.add_page()
-                try: pdf.image("LogoTriadeInceres.png", x=90, y=10, w=30)
+                try: pdf.image("LogoTriadeInceres.png", x=85, y=15, w=40)
                 except: pass
                 
-                pdf.set_y(45)
+                pdf.set_y(60)
                 pdf.set_font("Arial", 'B', 16)
                 pdf.cell(0, 10, u"RELATÓRIO TÉCNICO ESTRATÉGICO".encode('latin-1','replace').decode('latin-1'), ln=True, align='C')
                 
                 pdf.set_font("Arial", '', 11)
-                pdf.set_text_color(150, 150, 150) # Tom apagado
-                pdf.cell(0, 7, f"Produtor: {produtor} | Fazenda: {fazenda} | Municipio: {municipio}", ln=True, align='C')
-                pdf.cell(0, 7, f"Area Total: {area_ha:.2f} ha", ln=True, align='C')
-                
-                pdf.ln(10)
-                pdf.set_text_color(0, 0, 0)
-                pdf.set_font("Arial", 'B', 14)
-                pdf.cell(0, 10, u"Insumo / Concentração / Volume Total".encode('latin-1','replace').decode('latin-1'), ln=True)
-                
-                # TABELA DE INSUMOS
-                pdf.set_font("Arial", 'B', 12)
-                pdf.cell(75, 10, "Insumo", 1, 0, 'C')
-                pdf.cell(75, 10, u"Concentração".encode('latin-1','replace').decode('latin-1'), 1, 0, 'C')
-                pdf.cell(30, 10, "Volume", 1, 1, 'C')
-                
-                pdf.set_font("Arial", '', 12)
-                insumos = [
-                    ["Calcario", "(36% CaO 9% MgO 80% PRNT)", "ton"],
-                    ["Gesso Agricola", "(15% S 18% Ca)", "ton"],
-                    ["Super Simples", "(21% de P2O5)", "ton"],
-                    ["Cloreto Potassio", "(60% K2O)", "ton"]
-                ]
-                for item in insumos:
-                    # Cálculo fictício baseado na média da primeira coluna de dados disponível
-                    media = df[colunas_dados[0]].mean()
-                    total = (media * area_ha) / 10 if "ton" in item[2] else (media * area_ha)
-                    pdf.cell(75, 10, item[0], 1)
-                    pdf.cell(75, 10, item[1], 1)
-                    pdf.cell(30, 10, f"{total:.1f}", 1, 1, 'C')
-
-                # --- PÁGINAS DE MAPAS ---
-                metodologias = {
-                    "Calcario": "Metodologia: Saturacao por Bases (V%). Vantagem: Corrige a acidez e fornece Ca e Mg.",
-                    "Fosforo": "Metodologia: Disponibilidade por Argila. Vantagem: Melhora o enraizamento e arranque.",
-                    "Potassio": "Metodologia: Reposicao na CTC. Vantagem: Melhora o enchimento de graos e resistencia.",
-                    "Gesso": "Metodologia: Saturacao de Al em profundidade. Vantagem: Maior resistencia a seca."
-                }
-
-                for i, col in enumerate(colunas_dados):
-                    pdf.add_page()
-                    # TIMBRE
-                    try: pdf.image("LogoTriadeInceres.png", x=30, y=10, w=10)
-                    except: pass
-                    pdf.set_xy(42, 12); pdf.set_font("Arial", '', 8)
-                    pdf.cell(0, 5, "Tríade Agro Estratégica | (WA) 34 998670919")
-                    try: pdf.image("LogoTriadeInceres.png", x=170, y=10, w=10)
-                    except: pass
-                    if logo_faz_path: pdf.image(logo_faz_path, x=170, y=25, w=20)
-
-                    pdf.set_y(35); pdf.set_font("Arial", 'B', 14)
-                    pdf.cell(0, 10, f"Mapa de {col}", ln=True)
-                    
-                    fig, v_min, v_med, v_max = plot_fidedigno(df[col])
-                    img_p = f"/tmp/mapa_{i}.png"
-                    fig.savefig(img_p, bbox_inches='tight', dpi=120)
-                    plt.close(fig)
-                    
-                    pdf.image(img_p, x=45, y=55, w=120)
-                    pdf.set_y(175); pdf.set_font("Arial", '', 9)
-                    pdf.cell(0, 10, f"Min: {v_min:.2f} | Med: {v_med:.2f} | Max: {v_max:.2f}", ln=True, align='C')
-                    
-                    # Metodologia
-                    pdf.set_font("Arial", '', 12)
-                    m_text = metodologias.get(col, "Metodologia: Variabilidade Espacial. Vantagem: Otimizacao de custos e precisao.")
-                    pdf.multi_cell(0, 8, m_text.encode('latin-1','replace').decode('latin-1'))
-                    if os.path.exists(img_p): os.remove(img_p)
-
-                pdf_res = pdf.output(dest='
+                pdf.set_text_color(150, 150, 150)
+                pdf.cell(0,
