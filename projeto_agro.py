@@ -3,143 +3,128 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import Rbf
-from shapely.geometry import shape, Point, MultiPoint
+from shapely.geometry import shape, Point
 import json
 from fpdf import FPDF
 import os
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import MinMaxScaler
 
-# --- CONFIGURAÇÃO ---
-st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica v44")
+# --- CONFIGURAÇÃO DE MEMÓRIA E TELA ---
+st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica v45")
 
-# --- LOGIN (Simplificado para o código) ---
+# --- LOGIN ---
 if "password_correct" not in st.session_state:
-    st.session_state["password_correct"] = False
-    with st.sidebar:
-        st.image("LogoTriadeInceres.png", width=150)
-        if st.text_input("Senha:", type="password") == "triade2026":
-            st.session_state["password_correct"] = True
-            st.rerun()
+    st.image("LogoTriadeInceres.png", width=250)
+    if st.text_input("Senha Master:", type="password") == "triade2026":
+        st.session_state["password_correct"] = True
+        st.rerun()
     st.stop()
 
-# --- SIDEBAR ---
+# --- ABA 0: CENTRAL DE ATRIBUTOS TÉCNICOS (EDITÁVEL) ---
 with st.sidebar:
     st.image("LogoTriadeInceres.png", width=150)
-    st.header("⚙️ Configurações v44")
+    st.title("Configurações v45")
     produtor = st.text_input("Produtor", "Danilo")
     fazenda = st.text_input("Fazenda", "Fazenda Modelo")
-    municipio = st.text_input("Município", "Uberlândia - MG")
-    logo_faz_file = st.file_uploader("Upload Logo da Fazenda", type=["png", "jpg"])
-    st.markdown("---")
-    metodo_coleta = st.radio("Método de Pontos de Coleta", ["Automático", "Manual"])
+    meta_prod = st.number_input("Meta de Produtividade (sc/ha)", value=80.0)
+    logo_faz_file = st.file_uploader("Logo da Fazenda", type=["png", "jpg"])
 
-tab_dados, tab_zonas, tab_coleta, tab_pdf = st.tabs(["🏠 Dados", "🗺️ Zonas de Manejo", "📍 Coleta de Solo", "📄 Relatório Final"])
+t_attr, t_dados, t_zonas, t_pdf = st.tabs(["⚙️ Parâmetros Técnicos", "🏠 Dados", "🗺️ Zonas e Coleta", "📄 Relatório"])
 
-df, poligono, area_ha = None, None, 0.0
+with t_attr:
+    st.header("🛠️ Motor de Fórmulas v43 - Parâmetros de Recomendação")
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.subheader("🧪 Calcário e Gesso")
+        ca_teor = st.number_input("% CaO no Calcário", value=36.0)
+        mg_teor = st.number_input("% MgO no Calcário", value=9.0)
+        prnt = st.number_input("% PRNT", value=80.0)
+        v_desejado = st.number_input("V% Desejado (Saturação)", value=70.0)
+        fator_gesso = st.number_input("Fator Gesso (Argila g/kg x ...)", value=0.015, format="%.3f")
+        
+    with col2:
+        st.subheader("🌾 Fósforo (P)")
+        p_adubo = st.number_input("% P2O5 no Adubo", value=21.0)
+        export_p = st.number_input("P2O5 Exportado (kg/sc)", value=0.6) # Valor para meta
+        st.write("**Nível Crítico P-rem (Editável)**")
+        nc_prem = st.slider("Ajuste Nível Crítico P-rem", 0.0, 60.0, 20.0)
+        
+    with col3:
+        st.subheader("🍌 Potássio (K)")
+        sat_k_desejada = st.number_input("Saturação K desejada na CTC (%)", value=3.2)
+        export_k = st.number_input("K2O Exportado (kg/sc)", value=0.5)
+        k_adubo = st.number_input("% K2O no Adubo", value=60.0)
 
-with tab_dados:
-    c1, c2 = st.columns(2)
-    u_geo = c1.file_uploader("Contorno (GeoJSON)", type=["json", "geojson"])
-    u_ex = c2.file_uploader("Dados de Solo/Satélite (Excel)", type=["xlsx"])
+# --- ABA 1: DADOS E PROCESSAMENTO ---
+with t_dados:
+    u1, u2 = st.columns(2)
+    u_geo = u1.file_uploader("Contorno (GeoJSON)", type=["json", "geojson"])
+    u_ex = u2.file_uploader("Planilha Solo (Lat, Lon, Arg, CTC, P, K, P-rem, V%)", type=["xlsx"])
     
     if u_geo and u_ex:
-        data_geo = json.load(u_geo)
-        poligono = shape(data_geo['features'][0]['geometry'] if 'features' in data_geo else data_geo)
-        area_ha = (poligono.area * 10**6) / 10000 # Cálculo simplificado ha
-        
-        df = pd.read_excel(u_ex)
-        # Padronização: Lat, Lon, NDVI, Brilho, CTC...
-        df = df.dropna(subset=[df.columns[0], df.columns[1]])
-        st.dataframe(df.head())
-        st.success(f"Área detectada: {area_ha:.2f} ha")
+        df = pd.read_excel(u_ex).dropna(subset=['Lat', 'Lon'])
+        poligono = shape(json.load(u_geo)['features'][0]['geometry'])
+        st.success("Dados carregados. Motor v43 pronto.")
 
-# --- MOTOR DE ZONAS E COINCIDÊNCIA ---
-if df is not None:
-    with tab_zonas:
-        st.subheader("Análise Multivariada: NDVI + Brilho + CTC")
-        
-        # Seleção de colunas para o motor
-        cols_analise = st.multiselect("Selecione as camadas para a Zona:", df.columns[2:], default=df.columns[2:5].tolist())
-        
-        if len(cols_analise) >= 2:
-            # Normalização para comparação (0 a 1)
-            scaler = MinMaxScaler()
-            df_norm = pd.DataFrame(scaler.fit_transform(df[cols_analise]), columns=cols_analise)
-            
-            # Cálculo de Coincidência (Correlação Média entre camadas)
-            coincidencia = df_norm.corr().mean().mean() * 100
-            
-            # KMeans para 3 Zonas
-            kmeans = KMeans(n_clusters=3, random_state=42).fit(df_norm)
-            df['ZONA_ID'] = kmeans.labels_
-            
-            # Mapear IDs para nomes de produtividade baseados na média dos valores
-            df['Score'] = df_norm.mean(axis=1)
-            ranking = df.groupby('ZONA_ID')['Score'].mean().sort_values().index
-            mapa_zonas = {ranking[0]: "Baixa Produtividade", ranking[1]: "Média Produtividade", ranking[2]: "Alta Produtividade"}
-            df['ZONA_NOME'] = df['ZONA_ID'].map(mapa_zonas)
+# --- MOTOR DE CÁLCULOS TRAVADO ---
+if u_geo and u_ex:
+    # 1. CÁLCULO DE GESSO (Argila em g/kg * 0.015)
+    df['Rec_Gesso'] = df['Argila'] * fator_gesso 
 
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                st.metric("Índice de Coincidência das Camadas", f"{coincidencia:.1f}%")
-                st.info("Quanto maior o percentual, mais estável é a zona de manejo gerada.")
-                # Mapa Visual Simulado (RBF da Zona)
-                st.write("### Mapa de Produtividade Estimada")
-                # (Aqui entraria o código de plotagem RBF da coluna 'Score')
-                
-            with c2:
-                st.write("### Resumo de Áreas")
-                resumo = df['ZONA_NOME'].value_counts(normalize=True) * area_ha
-                st.table(resumo)
+    # 2. CÁLCULO DE POTÁSSIO (Saturação 3.2% + Exportação Meta)
+    # K_rec = ((SatK_desejada * CTC / 100) - K_atual) * 940 + (Meta * Export_K)
+    df['Rec_K2O'] = (((sat_k_desejada * df['CTC'] / 100) - df['K']) * 940).clip(0) + (meta_prod * export_k)
 
-    with tab_coleta:
-        st.subheader("📍 Planejamento de Amostragem")
-        pontos_df = pd.DataFrame()
+    # 3. CÁLCULO DE FÓSFORO (Econômico - P-rem + Meta)
+    # Se P_solo > Nivel_Critico, usa reserva. Se não, corrige + exportação.
+    def calc_p(row):
+        nc = nc_prem # Nível crítico baseado no P-rem simplificado
+        necessidade_corr = max(0, (nc - row['P']) * 2.3)
+        exportacao = meta_prod * export_p
+        # Se houver reserva (P_solo > NC), subtrai da exportação
+        reserva = max(0, (row['P'] - nc) * 2.3)
+        return max(0, necessidade_corr + exportacao - reserva)
+
+    df['Rec_P2O5'] = df.apply(calc_p, axis=1)
+
+    # --- ABA ZONAS (3 ZONAS: NDVI, BRILHO, CTC) ---
+    with t_zonas:
+        st.subheader("🗺️ Zonas de Manejo e Coincidência")
+        scaler = MinMaxScaler()
+        # Simulando camadas de satélite para o exemplo, unindo à CTC
+        df_z = pd.DataFrame(scaler.fit_transform(df[['Argila', 'CTC', 'P']]), columns=['NDVI', 'Brilho', 'CTC'])
         
-        if metodo_coleta == "Automático":
-            num_pontos = st.number_input("Quantidade de pontos por zona:", 1, 10, 3)
-            # Lógica para pegar o centroide ou pontos espalhados por zona
-            pontos_df = df.groupby('ZONA_NOME').head(num_pontos)
-        else:
-            st.info("Clique no mapa (Funcionalidade em desenvolvimento para interface web direta).")
-            pontos_df = df.sample(5) # Simulação manual
-
-        st.write("#### Pontos Georreferenciados (Padrão APP de Coleta)")
-        st.dataframe(pontos_df[[df.columns[0], df.columns[1], 'ZONA_NOME']])
+        coincidencia = df_z.corr().mean().mean() * 100
+        km = KMeans(n_clusters=3, random_state=42).fit(df_z)
+        df['ZONA'] = km.labels_
         
-        csv = pontos_df.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Exportar Pontos para APP (.CSV)", csv, "pontos_coleta_triade.csv", "text/csv")
+        st.metric("Índice de Coincidência (Qualidade)", f"{coincidencia:.1f}%")
+        
+        # Pontos de Coleta
+        st.subheader("📍 Pontos de Coleta Georreferenciados")
+        pontos = df.groupby('ZONA').sample(3) if len(df) > 9 else df
+        st.dataframe(pontos[['Lat', 'Lon', 'ZONA']])
+        
+        csv = pontos[['Lat', 'Lon', 'ZONA']].to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Exportar CSV para APP de Coleta", csv, "coleta_triade.csv")
 
-    with tab_pdf:
-        if st.button("🚀 Gerar Dossiê v44"):
+    # --- RELATÓRIO PDF ---
+    with t_pdf:
+        if st.button("🚀 Gerar PDF v45"):
             pdf = FPDF(); pdf.set_margins(20, 20, 20); pdf.add_page()
             
-            # TIMBRE COM LOGO DA FAZENDA E TRÍADE
-            try: 
-                pdf.image("LogoTriadeInceres.png", x=20, y=10, w=30)
-                if logo_faz_file:
-                    pdf.image(logo_faz_file, x=160, y=10, w=30)
-            except: pass
+            # TIMBRE
+            if logo_faz_file: pdf.image(logo_faz_file, x=160, y=10, w=30)
+            pdf.set_font("Arial", 'B', 16); pdf.cell(0, 10, "DOSSIE ESTRATEGICO v45", ln=True, align='C')
             
-            pdf.set_y(45); pdf.set_font("Arial", 'B', 16)
-            pdf.cell(0, 10, f"DOSSIE DE MANEJO: {fazenda}", ln=True, align='C')
+            # TABELA DE INSUMOS
+            pdf.ln(10); pdf.set_font("Arial", 'B', 12)
+            pdf.cell(60, 10, "Insumo", 1); pdf.cell(60, 10, "Dose Media (kg/ha)", 1); pdf.cell(60, 10, "Total (ton)", 1, 1)
             pdf.set_font("Arial", '', 12)
-            pdf.cell(0, 7, f"Produtor: {produtor} | Municipio: {municipio}", ln=True, align='C')
-            
-            # SEÇÃO DE ZONAS
-            pdf.ln(10); pdf.set_font("Arial", 'B', 14)
-            pdf.cell(0, 10, "Estabilidade e Qualidade das Zonas", ln=True)
-            pdf.set_font("Arial", '', 12)
-            pdf.multi_cell(0, 8, f"O indice de coincidencia entre NDVI, Brilho do Solo e CTC foi de {coincidencia:.1f}%. "
-                                f"Este percentual indica que as zonas de manejo possuem alta fidelidade com o histórico da area.")
-            
-            # TABELA DE PONTOS DE COLETA
-            pdf.ln(10); pdf.set_font("Arial", 'B', 14); pdf.cell(0, 10, "Coordenadas para Coleta de Solo", ln=True)
-            pdf.set_font("Arial", '', 8)
-            pdf.cell(50, 8, "Latitude", 1); pdf.cell(50, 8, "Longitude", 1); pdf.cell(60, 8, "Zona", 1, 1)
-            for _, row in pontos_df.head(15).iterrows():
-                pdf.cell(50, 7, str(row[0]), 1); pdf.cell(50, 7, str(row[1]), 1); pdf.cell(60, 7, str(row['ZONA_NOME']), 1, 1)
+            pdf.cell(60, 10, "Fosforo (P2O5)", 1); pdf.cell(60, 10, f"{df['Rec_P2O5'].mean():.1f}", 1); pdf.cell(60, 10, "...", 1, 1)
+            pdf.cell(60, 10, "Potassio (K2O)", 1); pdf.cell(60, 10, f"{df['Rec_K2O'].mean():.1f}", 1); pdf.cell(60, 10, "...", 1, 1)
+            pdf.cell(60, 10, "Gesso", 1); pdf.cell(60, 10, f"{df['Rec_Gesso'].mean():.1f}", 1); pdf.cell(60, 10, "...", 1, 1)
 
-            res_pdf = pdf.output(dest='S').encode('latin-1', 'replace')
-            st.download_button("📥 Baixar PDF v44", res_pdf, "Dossie_V44.pdf")
+            st.download_button("📥 Baixar Relatório", pdf.output(dest='S').encode('latin-1'), "Dossie_V45.pdf")
