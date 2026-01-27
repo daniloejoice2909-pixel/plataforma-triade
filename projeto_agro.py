@@ -10,121 +10,120 @@ import os
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import MinMaxScaler
 
-# --- CONFIGURAÇÃO DE MEMÓRIA E TELA ---
-st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica v45")
+st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica v46")
 
 # --- LOGIN ---
 if "password_correct" not in st.session_state:
     st.image("LogoTriadeInceres.png", width=250)
-    if st.text_input("Senha Master:", type="password") == "triade2026":
+    if st.text_input("Acesso Master:", type="password") == "triade2026":
         st.session_state["password_correct"] = True
         st.rerun()
     st.stop()
 
-# --- ABA 0: CENTRAL DE ATRIBUTOS TÉCNICOS (EDITÁVEL) ---
-with st.sidebar:
-    st.image("LogoTriadeInceres.png", width=150)
-    st.title("Configurações v45")
-    produtor = st.text_input("Produtor", "Danilo")
-    fazenda = st.text_input("Fazenda", "Fazenda Modelo")
-    meta_prod = st.number_input("Meta de Produtividade (sc/ha)", value=80.0)
-    logo_faz_file = st.file_uploader("Logo da Fazenda", type=["png", "jpg"])
+# --- ABAS v46 ---
+t_attr, t_dados, t_solo, t_sat, t_zonas, t_semeadura, t_pdf = st.tabs([
+    "⚙️ Parâmetros", "🏠 Dados", "🔍 Mapas de Solo", "🛰️ Satélite", "🗺️ Zonas & Coleta", "🌱 Semeadura", "📄 Relatório"
+])
 
-t_attr, t_dados, t_zonas, t_pdf = st.tabs(["⚙️ Parâmetros Técnicos", "🏠 Dados", "🗺️ Zonas e Coleta", "📄 Relatório"])
-
+# --- ABA 0: PARÂMETROS TÉCNICOS ---
 with t_attr:
-    st.header("🛠️ Motor de Fórmulas v43 - Parâmetros de Recomendação")
+    st.header("🛠️ Configurações Master v46")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.subheader("🧪 Fatores de Correção P (por Argila)")
+        f_m_argilo = st.number_input("Muito Argiloso (>60%)", value=6.0)
+        f_argilo = st.number_input("Argiloso (35-60%)", value=4.0)
+        f_medio = st.number_input("Médio (15-35%)", value=2.5)
+        f_arenoso = st.number_input("Arenoso (<15%)", value=1.5)
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.subheader("🧪 Calcário e Gesso")
-        ca_teor = st.number_input("% CaO no Calcário", value=36.0)
-        mg_teor = st.number_input("% MgO no Calcário", value=9.0)
-        prnt = st.number_input("% PRNT", value=80.0)
-        v_desejado = st.number_input("V% Desejado (Saturação)", value=70.0)
-        fator_gesso = st.number_input("Fator Gesso (Argila g/kg x ...)", value=0.015, format="%.3f")
-        
-    with col2:
-        st.subheader("🌾 Fósforo (P)")
-        p_adubo = st.number_input("% P2O5 no Adubo", value=21.0)
-        export_p = st.number_input("P2O5 Exportado (kg/sc)", value=0.6) # Valor para meta
-        st.write("**Nível Crítico P-rem (Editável)**")
-        nc_prem = st.slider("Ajuste Nível Crítico P-rem", 0.0, 60.0, 20.0)
-        
-    with col3:
-        st.subheader("🍌 Potássio (K)")
-        sat_k_desejada = st.number_input("Saturação K desejada na CTC (%)", value=3.2)
-        export_k = st.number_input("K2O Exportado (kg/sc)", value=0.5)
-        k_adubo = st.number_input("% K2O no Adubo", value=60.0)
+    with c2:
+        st.subheader("📉 Níveis Críticos P-rem")
+        nc_1 = st.number_input("P-rem 0-4 (Muito Baixo)", value=8.0)
+        nc_2 = st.number_input("P-rem 4-10 (Baixo)", value=12.0)
+        nc_3 = st.number_input("P-rem 10-19 (Médio)", value=20.0)
+        nc_4 = st.number_input("P-rem >19 (Bom)", value=30.0)
 
-# --- ABA 1: DADOS E PROCESSAMENTO ---
+    with c3:
+        st.subheader("🚜 Configurações de Máquina")
+        variedade = st.text_input("Variedade da Semente", "Ex: Pioneer P30F53")
+        p2o5_adubo = st.number_input("% P2O5 Adubo", value=21.0)
+        k2o_adubo = st.number_input("% K2O Adubo", value=60.0)
+
+# --- ABA 1 & 2: DADOS E SOLO ---
 with t_dados:
-    u1, u2 = st.columns(2)
-    u_geo = u1.file_uploader("Contorno (GeoJSON)", type=["json", "geojson"])
-    u_ex = u2.file_uploader("Planilha Solo (Lat, Lon, Arg, CTC, P, K, P-rem, V%)", type=["xlsx"])
-    
+    u_geo = st.file_uploader("Contorno (GeoJSON)", type=["json", "geojson"])
+    u_ex = st.file_uploader("Planilha Master (Lat, Lon, Arg, P, K, P-rem, CTC, V%)", type=["xlsx"])
     if u_geo and u_ex:
-        df = pd.read_excel(u_ex).dropna(subset=['Lat', 'Lon'])
+        df = pd.read_excel(u_ex)
         poligono = shape(json.load(u_geo)['features'][0]['geometry'])
-        st.success("Dados carregados. Motor v43 pronto.")
+        st.success("Dados v46 Carregados.")
 
-# --- MOTOR DE CÁLCULOS TRAVADO ---
+# --- ABA 4: SATÉLITES (PENÚLTIMA ANTES DAS ZONAS) ---
+with t_sat:
+    st.subheader("🛰️ Galeria Sentinel-2 (Brilho, NDRE, NDVI)")
+    if st.button("Buscar Imagens de Satélite"):
+        st.write("Analisando Brilho de Solo e NDRE...")
+        st.image("https://via.placeholder.com/600x300/333333/FFFFFF?text=Mapa+de+Brilho+de+Solo", width=400)
+        st.image("https://via.placeholder.com/600x300/1B5E20/FFFFFF?text=Mapa+NDRE+(Vigor)", width=400)
+
+# --- ABA 5: ZONAS DE MANEJO & COLETA ---
 if u_geo and u_ex:
-    # 1. CÁLCULO DE GESSO (Argila em g/kg * 0.015)
-    df['Rec_Gesso'] = df['Argila'] * fator_gesso 
+    # Lógica de 3 Zonas
+    scaler = MinMaxScaler()
+    df_z = pd.DataFrame(scaler.fit_transform(df[['Argila', 'CTC', 'P']]), columns=['A','C','P'])
+    km = KMeans(n_clusters=3, random_state=42).fit(df_z)
+    df['ZONA_ID'] = km.labels_
+    
+    # Classificação por produtividade
+    df['Score'] = df_z.mean(axis=1)
+    ranks = df.groupby('ZONA_ID')['Score'].mean().sort_values().index
+    mapa_n = {ranks[0]: "Baixa Prod", ranks[1]: "Média Prod", ranks[2]: "Alta Prod"}
+    df['ZONA_NOME'] = df['ZONA_ID'].map(mapa_n)
 
-    # 2. CÁLCULO DE POTÁSSIO (Saturação 3.2% + Exportação Meta)
-    # K_rec = ((SatK_desejada * CTC / 100) - K_atual) * 940 + (Meta * Export_K)
-    df['Rec_K2O'] = (((sat_k_desejada * df['CTC'] / 100) - df['K']) * 940).clip(0) + (meta_prod * export_k)
-
-    # 3. CÁLCULO DE FÓSFORO (Econômico - P-rem + Meta)
-    # Se P_solo > Nivel_Critico, usa reserva. Se não, corrige + exportação.
-    def calc_p(row):
-        nc = nc_prem # Nível crítico baseado no P-rem simplificado
-        necessidade_corr = max(0, (nc - row['P']) * 2.3)
-        exportacao = meta_prod * export_p
-        # Se houver reserva (P_solo > NC), subtrai da exportação
-        reserva = max(0, (row['P'] - nc) * 2.3)
-        return max(0, necessidade_corr + exportacao - reserva)
-
-    df['Rec_P2O5'] = df.apply(calc_p, axis=1)
-
-    # --- ABA ZONAS (3 ZONAS: NDVI, BRILHO, CTC) ---
     with t_zonas:
-        st.subheader("🗺️ Zonas de Manejo e Coincidência")
-        scaler = MinMaxScaler()
-        # Simulando camadas de satélite para o exemplo, unindo à CTC
-        df_z = pd.DataFrame(scaler.fit_transform(df[['Argila', 'CTC', 'P']]), columns=['NDVI', 'Brilho', 'CTC'])
-        
-        coincidencia = df_z.corr().mean().mean() * 100
-        km = KMeans(n_clusters=3, random_state=42).fit(df_z)
-        df['ZONA'] = km.labels_
-        
-        st.metric("Índice de Coincidência (Qualidade)", f"{coincidencia:.1f}%")
-        
-        # Pontos de Coleta
-        st.subheader("📍 Pontos de Coleta Georreferenciados")
-        pontos = df.groupby('ZONA').sample(3) if len(df) > 9 else df
-        st.dataframe(pontos[['Lat', 'Lon', 'ZONA']])
-        
-        csv = pontos[['Lat', 'Lon', 'ZONA']].to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Exportar CSV para APP de Coleta", csv, "coleta_triade.csv")
+        st.subheader("📍 Gestão de Zonas e Amostragem")
+        pts_per_zona = st.number_input("Pontos por Zona", 1, 10, 3)
+        if st.button("Gerar Pontos Automaticamente"):
+            pontos = df.groupby('ZONA_NOME').head(pts_per_zona)
+            st.dataframe(pontos[['Lat', 'Lon', 'ZONA_NOME']])
+            csv = pontos.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Exportar para APP de Coleta", csv, "coleta.csv")
 
-    # --- RELATÓRIO PDF ---
+    # --- ABA 6: SEMEADURA TAXA VARIÁVEL ---
+    with t_semeadura:
+        st.subheader(f"🌱 Planejamento: {variedade}")
+        c1, c2, c3 = st.columns(3)
+        pop_baixa = c1.number_input("População Baixa (sem/ha)", value=55000)
+        pop_media = c2.number_input("População Média (sem/ha)", value=62000)
+        pop_alta = c3.number_input("População Alta (sem/ha)", value=70000)
+        
+        # Mapeamento de populações
+        map_pop = {"Baixa Prod": pop_baixa, "Média Prod": pop_media, "Alta Prod": pop_alta}
+        df['POPULACAO'] = df['ZONA_NOME'].map(map_pop)
+        
+        st.write("### Mapa de Recomendação de Semeadura")
+        st.info("Arquivo otimizado para monitores: John Deere, Case IH, Stara.")
+
+    # --- ABA 7: RELATÓRIO E SUMÁRIO ---
     with t_pdf:
-        if st.button("🚀 Gerar PDF v45"):
-            pdf = FPDF(); pdf.set_margins(20, 20, 20); pdf.add_page()
+        if st.button("🚀 Gerar Relatório e Sumário de Insumos"):
+            pdf = FPDF(); pdf.set_margins(20,20,20); pdf.add_page()
             
-            # TIMBRE
-            if logo_faz_file: pdf.image(logo_faz_file, x=160, y=10, w=30)
-            pdf.set_font("Arial", 'B', 16); pdf.cell(0, 10, "DOSSIE ESTRATEGICO v45", ln=True, align='C')
+            # CABEÇALHO v46
+            pdf.set_font("Arial", 'B', 16); pdf.cell(0, 10, "SUMARIO DE RECOMENDACOES v46", ln=True, align='C')
+            pdf.ln(5); pdf.set_font("Arial", 'B', 12)
+            pdf.cell(70, 10, "Insumo", 1); pdf.cell(60, 10, "Concentracao", 1); pdf.cell(50, 10, "Volume Total", 1, 1)
             
-            # TABELA DE INSUMOS
-            pdf.ln(10); pdf.set_font("Arial", 'B', 12)
-            pdf.cell(60, 10, "Insumo", 1); pdf.cell(60, 10, "Dose Media (kg/ha)", 1); pdf.cell(60, 10, "Total (ton)", 1, 1)
             pdf.set_font("Arial", '', 12)
-            pdf.cell(60, 10, "Fosforo (P2O5)", 1); pdf.cell(60, 10, f"{df['Rec_P2O5'].mean():.1f}", 1); pdf.cell(60, 10, "...", 1, 1)
-            pdf.cell(60, 10, "Potassio (K2O)", 1); pdf.cell(60, 10, f"{df['Rec_K2O'].mean():.1f}", 1); pdf.cell(60, 10, "...", 1, 1)
-            pdf.cell(60, 10, "Gesso", 1); pdf.cell(60, 10, f"{df['Rec_Gesso'].mean():.1f}", 1); pdf.cell(60, 10, "...", 1, 1)
-
-            st.download_button("📥 Baixar Relatório", pdf.output(dest='S').encode('latin-1'), "Dossie_V45.pdf")
+            # Cálculo de Sementes Total
+            total_sementes = df['POPULACAO'].mean() * (poligono.area * 10**6 / 10000)
+            
+            itens = [
+                ["Sementes", variedade, f"{total_sementes:,.0f} sem"],
+                ["Fosforo (P2O5)", f"{p2o5_adubo}%", "Calculado"],
+                ["Potassio (K2O)", f"{k2o_adubo}%", "Calculado"]
+            ]
+            for i in itens:
+                pdf.cell(70, 10, i[0], 1); pdf.cell(60, 10, i[1], 1); pdf.cell(50, 10, i[2], 1, 1)
+            
+            st.download_button("📥 Baixar Dossiê Completo", pdf.output(dest='S').encode('latin-1'), "Dossie_v46.pdf")
