@@ -6,7 +6,7 @@ from scipy.interpolate import Rbf
 from shapely.geometry import shape, Point
 import json
 from fpdf import FPDF
-import base64
+import os
 
 # --- CONFIGURAÇÃO DE TELA ---
 st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica", page_icon="🌱")
@@ -26,7 +26,6 @@ def check_password():
     return st.session_state["password_correct"]
 
 if check_password():
-    # BARRA LATERAL
     with st.sidebar:
         st.image("LogoTriadeInceres.png", width=180)
         st.markdown("### 👤 Usuário: Danilo")
@@ -34,9 +33,9 @@ if check_password():
             st.session_state["password_correct"] = False
             st.rerun()
 
-    st.title("Plataforma Estratégica v43")
+    st.title("Gerador de Relatórios v43")
     
-    tab_inicio, tab_diagnostico, tab_recomendacao = st.tabs(["🏠 Início", "🔍 Diagnóstico", "🚜 Recomendação & PDF"])
+    tab_inicio, tab_visualizacao, tab_pdf = st.tabs(["🏠 Upload", "🔍 Ver Mapas", "📄 Gerar Relatório Full"])
 
     with tab_inicio:
         u1, u2 = st.columns(2)
@@ -44,77 +43,100 @@ if check_password():
         up_ex = u2.file_uploader("Planilha de Solo (Excel)", type=["xlsx"])
 
     if up_geo and up_ex:
-        # Processamento
         data_geo = json.load(up_geo)
         poligono = shape(data_geo['features'][0]['geometry'] if 'features' in data_geo else data_geo)
         df = pd.read_excel(up_ex).apply(pd.to_numeric, errors='coerce').fillna(0)
         
+        # Mapeamento de Colunas (Padrão v43)
         lat, lon = df.iloc[:,0], df.iloc[:,1]
-        ctc = df.iloc[:,20] # Coluna U
-        ca = df.iloc[:,7]
-        mg = df.iloc[:,8]
-        
-        def plot_mapa_global(data, titulo):
+        arg, p_rem, p_solo = df.iloc[:,4], df.iloc[:,5], df.iloc[:,6]
+        ca, mg, k = df.iloc[:,7], df.iloc[:,8], df.iloc[:,9]
+        ctc = df.iloc[:,20]
+
+        # Função de Plotagem
+        def plot_para_pdf(data, titulo, cmap='Spectral_r'):
             b = poligono.bounds
             gx, gy = np.mgrid[b[0]-0.0006:b[2]+0.0006:200j, b[1]-0.0006:b[3]+0.0006:200j]
             rbf = Rbf(lon, lat, data, function='multiquadric', smooth=0.1)
             z = np.ma.masked_array(rbf(gx, gy), mask=np.array([[not poligono.contains(Point(x, y)) for y in gy[0,:]] for x in gx[:,0]]))
             fig, ax = plt.subplots(figsize=(8, 5))
-            cp = ax.contourf(gx, gy, z, levels=6, cmap='Spectral_r')
+            cp = ax.contourf(gx, gy, z, levels=6, cmap=cmap)
             ax.plot(*poligono.exterior.xy, color='black', linewidth=2)
             plt.colorbar(cp)
+            ax.set_title(titulo)
             ax.axis('off')
             return fig
 
-        with tab_diagnostico:
-            st.subheader("Mapa de CTC")
-            fig_ctc = plot_mapa_global(ctc, "CTC")
-            st.pyplot(fig_ctc)
+        # Cálculos de Recomendação
+        rec_calc = (np.maximum(((60/100*ctc)-ca)*0.56*(100/36), (18/100*ctc-mg)*0.40*(100/9)) * 1000 * (100/80)).clip(lower=0)
+        rec_gesso = ((arg / 10) * 15.0).clip(lower=0)
+        rec_k = (((3.2/100 * ctc) - k).clip(lower=0) * 1200 + 100) / 0.60
 
-        with tab_recomendacao:
-            st.subheader("Gerar Relatório Final")
-            # Cálculo de Calcário v43
-            rec_calc = (np.maximum(((60/100*ctc)-ca)*0.56*(100/36), (18/100*ctc-mg)*0.40*(100/9)) * 1000 * (100/80)).clip(lower=0)
-            
-            fig_rec = plot_mapa_global(rec_calc, "Calcário")
-            st.pyplot(fig_rec)
+        # Lista de Mapas para o Relatório
+        mapas_trabalho = [
+            (ctc, "Mapa de CTC (cmolc/dm³)", "Diagnóstico"),
+            (arg, "Mapa de Argila (g/kg)", "Diagnóstico"),
+            (p_solo, "Fósforo no Solo (mg/dm³)", "Diagnóstico"),
+            (ca, "Cálcio (cmolc/dm³)", "Diagnóstico"),
+            (mg, "Magnésio (cmolc/dm³)", "Diagnóstico"),
+            (k, "Potássio (cmolc/dm³)", "Diagnóstico"),
+            (rec_calc, "Recomendação de Calcário (kg/ha)", "Recomendação"),
+            (rec_gesso, "Recomendação de Gesso (kg/ha)", "Recomendação"),
+            (rec_k, "Recomendação de Potássio (kg/ha)", "Recomendação")
+        ]
 
-            # --- FUNÇÃO GERADORA DE PDF ---
-            if st.button("Preparar Download do PDF"):
-                fig_rec.savefig("temp_mapa.png", bbox_inches='tight', dpi=150)
-                
+        with tab_visualizacao:
+            st.write("Confira os mapas processados antes de exportar:")
+            col1, col2 = st.columns(2)
+            for i, (dados, tit, tipo) in enumerate(mapas_trabalho):
+                with (col1 if i % 2 == 0 else col2):
+                    st.pyplot(plot_para_pdf(dados, tit))
+
+        with tab_pdf:
+            if st.button("🚀 Gerar Dossiê Completo (PDF)"):
                 pdf = FPDF(orientation='P', unit='mm', format='A4')
+                
+                # Capa
                 pdf.add_page()
-                pdf.set_margins(20, 20, 20)
-                
-                # Cabeçalho
-                try: pdf.image("LogoTriadeInceres.png", x=80, y=10, w=50)
+                try: pdf.image("LogoTriadeInceres.png", x=70, y=50, w=70)
                 except: pass
+                pdf.set_font("Arial", 'B', 24)
+                pdf.ln(100)
+                pdf.cell(0, 20, "RELATÓRIO TÉCNICO AGROESTRATÉGICO", ln=True, align='C')
+                pdf.set_font("Arial", '', 14)
+                pdf.cell(0, 10, "Metodologia de Precisão v43", ln=True, align='C')
                 
-                pdf.ln(35)
-                pdf.set_font("Arial", 'B', 16)
-                pdf.cell(0, 10, "RELATÓRIO DE RECOMENDAÇÃO TÉCNICA", ln=True, align='C')
-                
-                # Texto Técnico
-                pdf.ln(10)
-                pdf.set_font("Arial", 'B', 12)
-                pdf.cell(0, 10, "Metodologia v43 - Tríade Agro Estratégica", ln=True)
-                pdf.set_font("Arial", '', 11)
-                texto = ("A tecnologia de taxa variável permite a correção precisa do solo, "
-                         "aplicando apenas o necessário onde a planta realmente precisa. "
-                         "Diferente do método convencional, aqui equilibramos as bases (Ca, Mg, K) "
-                         "ponto a ponto, garantindo maior eficiência econômica e produtiva.")
-                pdf.multi_cell(0, 7, texto)
-                
-                # Inserir Mapa
-                pdf.ln(10)
-                pdf.image("temp_mapa.png", x=30, w=150)
-                
-                pdf_output = pdf.output(dest='S').encode('latin-1')
-                
-                st.download_button(
-                    label="📥 Baixar PDF Agora",
-                    data=pdf_output,
-                    file_name="Relatorio_Triade_Agro.pdf",
-                    mime="application/pdf"
-                )
+                # Loop para cada mapa
+                for dados, tit, tipo in mapas_trabalho:
+                    pdf.add_page()
+                    # Cabeçalho pequeno
+                    try: pdf.image("LogoTriadeInceres.png", x=10, y=10, w=30)
+                    except: pass
+                    pdf.set_font("Arial", 'B', 14)
+                    pdf.set_y(15)
+                    pdf.cell(0, 10, f"{tipo}: {tit}", ln=True, align='R')
+                    pdf.line(10, 25, 200, 25)
+                    
+                    # Gera e salva imagem temporária
+                    fig_temp = plot_para_pdf(dados, tit)
+                    img_name = f"temp_{tit.replace(' ', '_')}.png"
+                    fig_temp.savefig(img_name, bbox_inches='tight', dpi=150)
+                    plt.close(fig_temp)
+                    
+                    pdf.image(img_name, x=20, y=40, w=170)
+                    
+                    # Argumentação Técnica baseada no tipo
+                    pdf.set_y(160)
+                    pdf.set_font("Arial", 'B', 12)
+                    pdf.cell(0, 10, "Análise Técnica:", ln=True)
+                    pdf.set_font("Arial", '', 11)
+                    if tipo == "Diagnóstico":
+                        texto = "Mapeamento da variabilidade espacial dos nutrientes para identificação de zonas de manejo."
+                    else:
+                        texto = "Cálculo de taxa variável v43 focado no equilíbrio de bases e otimização de custos."
+                    pdf.multi_cell(0, 7, texto)
+                    
+                    os.remove(img_name) # Limpa a imagem após usar
+
+                pdf_out = pdf.output(dest='S').encode('latin-1')
+                st.download_button("📥 Baixar Relatório Full", data=pdf_out, file_name="Relatorio_Total_Triade.pdf")
