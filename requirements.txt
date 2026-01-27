@@ -4,6 +4,7 @@ numpy
 matplotlib
 scipy
 shapely
+fpdf2
+Pillow
 openpyxl
-fpdf
-pyproj
+scikit-learn
