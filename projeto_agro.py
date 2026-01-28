@@ -8,41 +8,42 @@ import json
 import os
 from math import ceil
 
-# --- ESTILO E IDENTIDADE ---
-st.set_page_config(layout="wide", page_title="Tríade Agro v123")
+# --- CONFIGURAÇÕES DE ESTILO ---
+st.set_page_config(layout="wide", page_title="Tríade Agro v124")
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
     .stApp { background-color: #FFFFFF; font-family: 'Open Sans', sans-serif; }
-    h1, h2, h3 { color: #8B4513; }
-    .watermark { position: fixed; bottom: 10px; right: 10px; opacity: 0.08; font-size: 35px; color: #8B4513; z-index: -1; pointer-events: none; }
+    .watermark { position: fixed; bottom: 10px; right: 10px; opacity: 0.08; font-size: 30px; color: #8B4513; z-index: -1; pointer-events: none; }
     </style>
     <div class="watermark">TRÍADE AGRO ESTRATÉGICA</div>
 """, unsafe_allow_html=True)
 
-# --- LOGIN E HIERARQUIA ---
+# --- FLUXO DE ACESSO ---
 if "logado" not in st.session_state: st.session_state.logado = False
 if not st.session_state.logado:
-    _, col_login, _ = st.columns([1, 0.6, 1])
-    with col_login:
-        if os.path.exists("LogoTriadeagro.png.png"): st.image("LogoTriadeagro.png.png", width=180)
-        senha = st.text_input("Senha Master:", type="password")
-        if st.button("ACESSAR"):
+    _, col, _ = st.columns([1, 0.6, 1])
+    with col:
+        if os.path.exists("LogoTriadeagro.png.png"): st.image("LogoTriadeagro.png.png", width=200)
+        senha = st.text_input("Acesso Restrito:", type="password")
+        if st.button("ENTRAR"):
             if senha == "triade2026": st.session_state.logado = True; st.rerun()
     st.stop()
 
+# --- GESTÃO DE DADOS ---
 if "data_ready" not in st.session_state:
-    st.header("📂 Configuração de Projeto")
+    st.header("📂 Gestão de Projetos")
     c1, c2, c3 = st.columns(3)
     with c1: prod = st.text_input("Produtor:", "Danilo")
     with c2: faz = st.text_input("Fazenda:")
     with c3: muni = st.text_input("Município/UF:")
-    u_geo = st.file_uploader("Contorno GeoJSON", type=["json", "geojson"])
-    u_ex = st.file_uploader("Planilha Solo (A-Y)", type=["xlsx"])
+    u_geo = st.file_uploader("Contorno (GeoJSON)", type=["json", "geojson"])
+    u_ex = st.file_uploader("Dados de Solo (Excel)", type=["xlsx"])
     
-    if st.button("INICIAR AMBIENTE TRÍADE"):
+    if st.button("PROCESSAR DADOS TRÍADE"):
         if u_geo and u_ex:
             df_raw = pd.read_excel(u_ex)
+            # Mapeamento fixo das colunas conforme sua planilha
             idx_cols = {0:'Lat', 1:'Lon', 4:'Argila', 5:'P_rem', 6:'P', 7:'Ca', 8:'Mg', 9:'K', 20:'CTC'}
             df = pd.DataFrame()
             for idx, name in idx_cols.items(): df[name] = pd.to_numeric(df_raw.iloc[:, idx], errors='coerce')
@@ -52,57 +53,60 @@ if "data_ready" not in st.session_state:
             st.session_state.data_ready = True; st.rerun()
     st.stop()
 
-# --- ABA DE ATRIBUTOS (MOTOR REVISADO) ---
+# --- MOTOR DE CÁLCULO CENTRALIZADO (EVITA KEYERROR) ---
 df = st.session_state.df
 tabs = st.tabs(["⚙️ ATRIBUTOS", "🔍 FERTILIDADE", "🏠 RECOMENDAÇÃO", "🛰️ SATÉLITE", "🗺️ ZONAS", "💾 EXPORTAR", "📄 PDF"])
 
 with tabs[0]:
-    st.header("⚙️ Parametrização do Motor Tríade")
+    st.header("⚙️ Configurações do Motor")
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.subheader("Calcário e Metas")
-        prod_meta = st.number_input("Meta (sc/ha)", 80.0)
-        ca_alvo = st.number_input("Alvo Ca (%)", 50.0); mg_alvo = st.number_input("Alvo Mg (%)", 15.0)
-        prnt = st.number_input("PRNT (%)", 85.0); c_calc = st.number_input("R$/Ton Calcário", 220.0)
+        prod_meta = st.number_input("Produtividade Alvo (sc/ha)", 80.0)
+        ca_alvo = st.number_input("Alvo Ca na CTC (%)", 50.0)
+        mg_alvo = st.number_input("Alvo Mg na CTC (%)", 15.0)
+        prnt = st.number_input("PRNT Calcário (%)", 85.0)
     with c2:
-        st.subheader("Fósforo (6 Faixas P-rem)")
-        nc_p = [st.number_input(f"NC P-rem {f}", v) for f, v in zip(["0-4", "4-10", "10-19", "19-30", "30-45", "45-60"], [8.0, 10.0, 12.0, 15.0, 20.0, 25.0])]
-        f_m_arg = st.number_input("Fator Muito Argiloso", 10.0); f_arg = st.number_input("Fator Argiloso", 8.0)
+        st.subheader("Fatores P (Fator Argila)")
+        f_ma = st.number_input("Muito Argiloso (>600)", 10.0); f_a = st.number_input("Argiloso (350-600)", 8.0)
+        st.subheader("NC P-rem")
+        nc_p_list = [st.number_input(f"NC Faixa {i}", v) for i, v in enumerate([8, 10, 12, 15, 20, 25])]
     with c3:
-        st.subheader("Potássio e Sementes")
-        k_alvo = st.number_input("K Alvo CTC (%)", 3.2); c_k = st.number_input("R$/Ton K", 3200.0)
-        pob_sem = st.number_input("Sementes/ha", 280000); c_bag = st.number_input("R$/Big Bag", 4500.0)
+        st.subheader("Custos Insumos")
+        c_p = st.number_input("R$/Ton P2O5", 3800.0); c_k = st.number_input("R$/Ton K2O", 3200.0)
+        c_calc = st.number_input("R$/Ton Calcário", 220.0); c_gesso = st.number_input("R$/Ton Gesso", 140.0)
+        pob_alvo = st.number_input("Sementes/ha", 280000); c_bag = st.number_input("R$/Big Bag", 4500.0)
 
-    # PROCESSAMENTO TÉCNICO
-    # Calcário (Lei do Maior)
-    def calc_calcario(row):
-        n_ca = ((ca_alvo * row['CTC']/100) - row['Ca']) * 100/36 
-        n_mg = ((mg_alvo * row['CTC']/100) - row['Mg']) * 100/9
-        return max(0.0, float(max(n_ca, n_mg))) * (100/prnt) * 1000
-    df['Rec_Calcario'] = df.apply(calc_calcario, axis=1)
-
-    # Fósforo (Fator Argila + NC P-rem)
-    def motor_p(row):
+    # PROCESSAMENTO DE TODAS AS VARIÁVEIS DE UMA VEZ
+    df['Rec_Gesso'] = (df['Argila'] * 15).clip(400, 900)
+    
+    def calc_triade(row):
+        # Calcário (Maior Dose Ca vs Mg)
+        n_ca = max(0.0, ((ca_alvo * row['CTC']/100) - row['Ca']) * 100/36)
+        n_mg = max(0.0, ((mg_alvo * row['CTC']/100) - row['Mg']) * 100/9)
+        rec_calc = max(n_ca, n_mg) * (100/prnt) * 1000
+        
+        # Fósforo (Fator Argila + NC P-rem)
         pr = row['P_rem']
-        nc = nc_p[0] if pr <= 4 else nc_p[1] if pr <= 10 else nc_p[2] if pr <= 19 else nc_p[3] if pr <= 30 else nc_p[4] if pr <= 45 else nc_p[5]
-        fator = f_m_arg if row['Argila'] > 600 else f_arg if row['Argila'] > 350 else 6.0
-        gordura = (nc - row['P']) * fator
-        return max(0.0, float(gordura + (prod_meta * 0.8))) * 100 / 46
-    df['Rec_Fosforo'] = df.apply(motor_p, axis=1)
+        nc = nc_p_list[0] if pr <= 4 else nc_p_list[1] if pr <= 10 else nc_p_list[2] if pr <= 19 else nc_p_list[3] if pr <= 30 else nc_p_list[4] if pr <= 45 else nc_p_list[5]
+        fator = f_ma if row['Argila'] > 600 else f_a if row['Argila'] > 350 else 6.0
+        rec_p = max(0.0, (nc - row['P']) * fator + (prod_meta * 0.8)) * 100 / 46
+        
+        # Potássio
+        rec_k = (max(0.0, ((3.2 * row['CTC']/100) - row['K']) * 940) + (prod_meta * 1.2)) * 100 / 60
+        
+        return pd.Series([rec_calc, rec_p, rec_k])
 
-with tabs[4]:
-    st.header("🗺️ Zonas e Amostragem IA")
-    pts_alta = st.number_input("Pontos Zona Alta:", 5)
-    st.button("GERAR PONTOS COM RECUO DE 30M")
-    st.write("Tabela de Coordenadas Editável:")
-    st.data_editor(pd.DataFrame({"Ponto": ["01", "02"], "Lat": [df.Lat.mean(), df.Lat.min()], "Lon": [df.Lon.mean(), df.Lon.min()]}))
+    df[['Rec_Calcario', 'Rec_Fosforo', 'Rec_Potassio']] = df.apply(calc_triade, axis=1)
 
+# --- A PARTIR DAQUI, TODAS AS COLUNAS EXISTEM E NÃO GERARÃO KEYERROR ---
 with tabs[6]:
-    st.header("📄 Fechamento Financeiro")
-    c_corr = (df['Rec_Calcario'].mean() * c_calc/1000) + (df['Rec_Gesso'].mean() * 140/1000)
-    # Tabela por Natureza como solicitado
-    resumo = pd.DataFrame({
+    st.header("📊 Resumo Financeiro por Natureza")
+    c_corretivos = (df['Rec_Calcario'].mean() * c_calc/1000) + (df['Rec_Gesso'].mean() * c_gesso/1000)
+    c_fertilizantes = (df['Rec_Fosforo'].mean() * c_p/1000) + (df['Rec_Potassio'].mean() * c_k/1000)
+    c_sementes = (pob_alvo / 5000000) * c_bag
+    
+    financeiro = pd.DataFrame({
         "Natureza": ["Corretivos", "Fertilizantes", "Sementes", "TOTAL"],
-        "R$/ha": [c_corr, 1200.0, (pob_sem/5000000)*c_bag, 0.0] # Valores simulados para estrutura
+        "R$/ha": [c_corretivos, c_fertilizantes, c_sementes, c_corretivos+c_fertilizantes+c_sementes]
     })
-    st.table(resumo)
+    st.table(financeiro.style.format({"R$/ha": "R$ {:.2f}"}))
