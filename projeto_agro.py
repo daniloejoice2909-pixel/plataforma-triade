@@ -5,13 +5,14 @@ import base64
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica 1.0")
 
-# --- 2. FUNÇÃO PARA CARREGAR IMAGEM DE FUNDO ---
+# --- 2. FUNÇÃO PARA CONVERSÃO DE IMAGEM ---
 def get_base64(bin_file):
     with open(bin_file, 'rb') as f:
         data = f.read()
     return base64.b64encode(data).decode()
 
-def configurar_layout_sem_rolagem():
+# --- 3. CSS PARA TRAVAR TELA E POSICIONAR ---
+def configurar_layout_estatico():
     img_fundo = "imagemaptriadefundo.png"
     img_logo = "logoTriadetransparente.png"
     
@@ -19,86 +20,101 @@ def configurar_layout_sem_rolagem():
         bin_str = get_base64(img_fundo)
         st.markdown(f"""
         <style>
-        /* Remove rolagem e fixa o fundo */
+        /* Bloqueio Total de Rolagem */
+        html, body, [data-testid="stAppViewContainer"] {{
+            height: 100vh;
+            overflow: hidden !important;
+        }}
+        
         .stApp {{
             background-image: url("data:image/png;base64,{bin_str}");
             background-size: cover;
             background-position: center;
-            background-attachment: fixed;
             height: 100vh;
-            overflow: hidden;
         }}
-        
-        /* Container Principal posicionado na metade inferior */
-        .main-container {{
+
+        /* Container que inicia no MEIO e vai para BAIXO */
+        .triade-login-container {{
             position: absolute;
-            bottom: 5vh; /* Distância do fundo da tela */
+            top: 55%; /* Começa um pouco abaixo do meio */
             left: 50%;
             transform: translateX(-50%);
-            width: 400px;
+            width: 450px;
             text-align: center;
             display: flex;
             flex-direction: column;
             align-items: center;
+            z-index: 1000;
         }}
 
-        /* Estilo da Logo para destaque em fundo claro */
+        /* Logo maior conforme solicitado */
         .logo-triade {{
-            width: 280px;
-            margin-bottom: 20px;
-            filter: drop-shadow(0px 4px 6px rgba(0,0,0,0.2)); /* Leve sombra para dar contraste caso o fundo seja muito claro */
+            width: 380px; /* Aumentado */
+            margin-bottom: 10px;
+            filter: drop-shadow(0px 4px 8px rgba(0,0,0,0.3));
         }}
 
-        /* Caixa de Login Translúcida */
-        .login-box {{
-            background-color: rgba(0, 0, 0, 0.4); /* Escurecido para ler o input branco */
-            padding: 25px;
+        /* Caixa de Login */
+        .login-box-final {{
+            background-color: rgba(255, 255, 255, 0.1);
+            padding: 20px;
             border-radius: 15px;
-            backdrop-filter: blur(10px);
+            backdrop-filter: blur(15px);
             border: 1px solid rgba(255, 255, 255, 0.2);
             width: 100%;
         }}
 
-        /* Esconder cabeçalhos padrão do Streamlit para ganhar espaço */
-        header {{visibility: hidden;}}
-        #MainMenu {{visibility: hidden;}}
-        footer {{visibility: hidden;}}
+        /* Estilo do Botão */
+        div.stButton > button {{
+            background-color: #D4AF37;
+            color: #4B3621;
+            font-weight: bold;
+            width: 100%;
+            border: none;
+            border-radius: 8px;
+        }}
+
+        /* Esconder Elementos do Streamlit */
+        header, footer {{visibility: hidden !important;}}
+        [data-testid="stHeader"] {{display: none !important;}}
         </style>
         """, unsafe_allow_html=True)
     
     return img_logo
 
-# --- 3. EXECUÇÃO DA TELA ---
+# --- 4. EXECUÇÃO DA INTERFACE ---
 if "logado" not in st.session_state:
     st.session_state.logado = False
 
 if not st.session_state.logado:
-    logo_path = configurar_layout_sem_rolagem()
+    logo_path = configurar_layout_estatico()
     
-    # Criando o container HTML na metade inferior
-    st.markdown('<div class="main-container">', unsafe_allow_html=True)
+    # Montagem do Layout em HTML
+    st.markdown('<div class="triade-login-container">', unsafe_allow_html=True)
     
-    # Exibe o logo (se existir)
+    # Exibe o logo ampliado
     if os.path.exists(logo_path):
-        # Usamos HTML direto para o logo para controle total de posição no container customizado
-        logo_base64 = get_base64(logo_path)
-        st.markdown(f'<img src="data:image/png;base64,{logo_base64}" class="logo-triade">', unsafe_allow_html=True)
+        logo_64 = get_base64(logo_path)
+        st.markdown(f'<img src="data:image/png;base64,{logo_64}" class="logo-triade">', unsafe_allow_html=True)
     
-    # Caixa de login
-    st.markdown('<div class="login-box">', unsafe_allow_html=True)
-    st.markdown("<h2 style='color: #FFD700; margin-top:0;'>ESTRATÉGICA 1.0</h2>", unsafe_allow_html=True)
+    # Caixa de senha
+    st.markdown('<div class="login-box-final">', unsafe_allow_html=True)
+    st.markdown("<h3 style='color: #FFD700; margin-bottom: 15px;'>ACESSO ESTRATÉGICO 1.0</h3>", unsafe_allow_html=True)
     
-    # Inputs do Streamlit (dentro da div)
-    senha = st.text_input("Chave de Acesso", type="password", label_visibility="collapsed", placeholder="Senha de Acesso")
-    if st.button("DESBLOQUEAR"):
+    senha = st.text_input("Chave", type="password", label_visibility="collapsed", placeholder="Digite sua senha")
+    if st.button("DESBLOQUEAR PLATAFORMA"):
         if senha == "triade2026":
             st.session_state.logado = True
             st.rerun()
         else:
-            st.error("Incorreto")
+            st.error("Chave Inválida")
             
-    st.markdown('</div>', unsafe_allow_html=True) # Fecha login-box
-    st.markdown('</div>', unsafe_allow_html=True) # Fecha main-container
+    st.markdown('</div>', unsafe_allow_html=True) # Fim login-box
+    st.markdown('</div>', unsafe_allow_html=True) # Fim container
 
 else:
-    st.info("Acesso liberado. Aguardando a Segunda Página...")
+    # Se já logou, entramos na Segunda Página
+    st.markdown("<h1 style='color: white; text-align: center; margin-top: 10vh;'>Acesso Autorizado.</h1>", unsafe_allow_html=True)
+    if st.button("IR PARA CONFIGURAÇÃO DE DADOS"):
+        st.session_state.pagina_atual = "config_dados"
+        st.rerun()
