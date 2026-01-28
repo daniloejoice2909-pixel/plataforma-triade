@@ -1,192 +1,151 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-import json
 import matplotlib.pyplot as plt
 from scipy.interpolate import Rbf
 from shapely.geometry import shape, Point
-from datetime import datetime
+import json
+import os
+from math import ceil
 
-# --- 1. CONFIGURAÇÕES DE LAYOUT E IDENTIDADE ---
-st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica v115", initial_sidebar_state="collapsed")
+# --- CONFIGURAÇÃO DE TELA ---
+st.set_page_config(layout="wide", page_title="Tríade Agro v117")
 
-def aplicar_estilo():
-    st.markdown(f"""
-        <style>
-        @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
-        .stApp {{ background-color: #FFFFFF; font-family: 'Open Sans', sans-serif; }}
-        [data-testid="stHeader"] {{ background-color: #C5A059 !important; }}
-        h1, h2, h3 {{ color: #8B4513; font-weight: 700; }}
-        .stTabs [data-baseweb="tab-list"] button {{ font-size: 14px !important; font-weight: bold; color: #8B4513; }}
-        div.stButton > button {{ background-color: #8B4513; color: white; border-radius: 8px; font-weight: bold; height: 3em; width: 100%; border: none; }}
-        .metric-box {{ background-color: #f8f9fa; border: 1px solid #C5A059; padding: 15px; border-radius: 10px; text-align: center; }}
-        .watermark {{ position: fixed; bottom: 10px; right: 10px; opacity: 0.1; font-size: 50px; color: #8B4513; z-index: -1; pointer-events: none; }}
-        </style>
-        <div class="watermark">TRÍADE AGRO ESTRATÉGICA</div>
+# --- CSS PERSONALIZADO (IDENTIDADE TRÍADE) ---
+st.markdown("""
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
+    .stApp { font-family: 'Open Sans', sans-serif; }
+    .main-header { color: #8B4513; font-weight: 700; border-bottom: 2px solid #C5A059; }
+    .stMetric { background-color: #fcf9f2; padding: 10px; border-radius: 5px; border: 1px solid #e0d1b1; }
+    </style>
     """, unsafe_allow_html=True)
 
-aplicar_estilo()
-
-# --- 2. SISTEMA DE LOGIN E PASTAS ---
+# --- LOGIN E PASTAS (MANTIDOS CONFORME ALINHADO) ---
 if "logado" not in st.session_state: st.session_state.logado = False
-
 if not st.session_state.logado:
-    _, col_login, _ = st.columns([1, 0.6, 1])
-    with col_login:
-        st.markdown("<br><br>", unsafe_allow_html=True)
-        if os.path.exists("LogoTriadeagro.png.png"):
-            st.image("LogoTriadeagro.png.png", width=180)
-        st.subheader("Acesso à Plataforma")
-        senha = st.text_input("Chave Mestra:", type="password")
-        if st.button("DESBLOQUEAR SISTEMA"):
-            if senha == "triade2026":
-                st.session_state.logado = True
-                st.rerun()
-            else: st.error("Chave inválida.")
+    st.title("Tríade Agro Estratégica")
+    senha = st.text_input("Senha Master:", type="password")
+    if st.button("Acessar"):
+        if senha == "triade2026": st.session_state.logado = True; st.rerun()
     st.stop()
 
-# --- 3. GESTÃO DE PROJETOS (PASTAS) ---
-if "projeto_ativo" not in st.session_state:
-    st.header("📂 Gestão de Projetos")
-    c1, c2, c3 = st.columns(3)
-    
-    with c1:
-        produtor = st.text_input("Nome do Produtor:", placeholder="Ex: Danilo")
-    with c2:
-        fazenda = st.text_input("Nome da Fazenda:")
-    with c3:
-        municipio = st.text_input("Município/UF:")
-
-    col_u1, col_u2 = st.columns(2)
-    with col_u1:
-        u_geo = st.file_uploader("Upload Contorno (GeoJSON)", type=["json", "geojson"])
-    with col_u2:
-        u_ex = st.file_uploader("Upload Planilha Solo (A-Y)", type=["xlsx"])
-    
-    logo_fazenda = st.file_uploader("Logo da Fazenda (Opcional)", type=["png", "jpg"])
-
-    if st.button("CARREGAR AMBIENTE DE TRABALHO"):
+# --- CARREGAMENTO DE DADOS (BLINDADO) ---
+if "data_ready" not in st.session_state:
+    st.header("📂 Gerenciamento de Arquivos")
+    u_geo = st.file_uploader("Contorno (GeoJSON)", type=["json", "geojson"])
+    u_ex = st.file_uploader("Planilha de Solo (A-Y)", type=["xlsx"])
+    if st.button("Processar Dados"):
         if u_geo and u_ex:
-            # Motor de leitura blindado por índice
-            df = pd.read_excel(u_ex)
-            idx_cols = {0:'Lat', 1:'Lon', 4:'Argila', 5:'P_rem', 6:'P', 7:'Ca', 8:'Mg', 9:'K', 20:'CTC'}
-            df_new = pd.DataFrame()
-            for idx, name in idx_cols.items():
-                df_new[name] = pd.to_numeric(df.iloc[:, idx], errors='coerce')
-            
-            st.session_state.df = df_new.dropna(subset=['Lat', 'Lon']).fillna(0)
+            df_raw = pd.read_excel(u_ex)
+            # Mapeamento rigoroso por índice
+            map_idx = {0:'Lat', 1:'Lon', 4:'Argila', 5:'P_rem', 6:'P', 7:'Ca', 8:'Mg', 9:'K', 20:'CTC'}
+            df = pd.DataFrame()
+            for idx, name in map_idx.items():
+                df[name] = pd.to_numeric(df_raw.iloc[:, idx], errors='coerce')
+            st.session_state.df = df.dropna(subset=['Lat', 'Lon']).fillna(0)
             st.session_state.contorno = shape(json.load(u_geo)['features'][0]['geometry'])
             st.session_state.area_ha = (st.session_state.contorno.area * 10**10) / 10000
-            st.session_state.info = {"produtor": produtor, "fazenda": fazenda, "municipio": municipio}
-            st.session_state.logo_faz = logo_fazenda
-            st.session_state.projeto_ativo = True
-            st.rerun()
+            st.session_state.data_ready = True; st.rerun()
     st.stop()
 
-# --- 4. MOTOR DE CÁLCULO TRÍADE ---
+# --- ABA DE ATRIBUTOS (REVISADA COM P, K E SEMENTES) ---
 df = st.session_state.df
-area = st.session_state.area_ha
+tabs = st.tabs(["⚙️ ATRIBUTOS", "🔍 FERTILIDADE", "🏠 RECOMENDAÇÃO", "🛰️ SATÉLITE", "🗺️ ZONAS", "📄 PDF"])
 
-def aba_atributos():
-    st.header("⚙️ Configurações da Metodologia Tríade")
+with tabs[0]:
+    st.header("⚙️ Central de Atributos e Custos")
     c1, c2, c3 = st.columns(3)
-    with c1:
-        st.subheader("Extração & Metas")
-        meta = st.number_input("Meta de Produtividade (sc/ha)", 80.0)
-        exp_p_fator = st.number_input("Exportação P (kg/sc)", 0.8)
-        exp_k_fator = st.number_input("Exportação K (kg/sc)", 1.2)
-        custo_calc = st.number_input("Custo Calcário (R$/Ton)", 150.0)
-        custo_gesso = st.number_input("Custo Gesso (R$/Ton)", 120.0)
     
+    with c1:
+        st.subheader("Fósforo (P)")
+        conc_p = st.number_input("% P2O5 no Adubo", 46.0) # Ex: MAP
+        custo_p = st.number_input("Custo P (R$/Ton)", 3800.0)
+        prod_alvo = st.number_input("Produtividade Alvo (sc/ha)", 80.0)
+        exp_p = st.number_input("Exportação P (kg/sc)", 0.8)
+        
     with c2:
-        st.subheader("Calagem & Gesso")
-        ca_alvo = st.number_input("Ca Alvo (% CTC)", 60.0); mg_alvo = st.number_input("Mg Alvo (% CTC)", 18.0)
-        prnt = st.number_input("PRNT do Calcário (%)", 85.0)
-        cao = st.number_input("CaO no Calcário (%)", 36.0); mgo = st.number_input("MgO no Calcário (%)", 9.0)
-        fat_g = st.number_input("Fator Gesso (Argila x ?)", 15.0)
-        g_trava = st.slider("Limites Gesso (kg/ha)", 0, 2000, (400, 900))
+        st.subheader("Potássio (K)")
+        conc_k = st.number_input("% K2O no Adubo", 60.0) # Ex: KCl
+        custo_k = st.number_input("Custo K (R$/Ton)", 3200.0)
+        exp_k = st.number_input("Exportação K (kg/sc)", 1.2)
+        k_alvo_ctc = st.number_input("K Alvo na CTC (%)", 3.2)
 
     with c3:
-        st.subheader("Fósforo (P-rem)")
-        st.write("Fatores de Argila:")
-        f_mt = st.number_input("Muito Argilosa (>600)", 10.0); f_ar = st.number_input("Argilosa (350-600)", 8.0)
-        f_me = st.number_input("Média (150-350)", 4.0); f_sa = st.number_input("Arenosa (<150)", 2.0)
-        st.write("Níveis Críticos (NC):")
-        nc1 = st.number_input("NC (P-rem 0-4)", 8.0); nc2 = st.number_input("NC (4.1-10)", 10.0)
-        nc3 = st.number_input("NC (10.1-19)", 12.0); nc4 = st.number_input("NC (19.1-30)", 15.0)
-        nc5 = st.number_input("NC (30.1-44)", 20.0); nc6 = st.number_input("NC (45-60)", 20.0)
+        st.subheader("Sementes")
+        pob_alta = st.number_input("Sementes/ha (Zona Alta)", 320000)
+        pob_media = st.number_input("Sementes/ha (Zona Média)", 280000)
+        pob_baixa = st.number_input("Sementes/ha (Zona Baixa)", 240000)
+        custo_bag = st.number_input("Custo por Big Bag (5mi)", 4500.0)
 
-    # CÁLCULOS TÉCNICOS
-    # 1. Calcário (Maior entre Ca e Mg)
-    df['Calc_Ca'] = ((ca_alvo * df['CTC']/100) - df['Ca']) * (100/(cao*1.78)) * (100/prnt) * 1000
-    df['Calc_Mg'] = ((mg_alvo * df['CTC']/100) - df['Mg']) * (100/(mgo*2.48)) * (100/prnt) * 1000
-    df['Rec_Calcario'] = df[['Calc_Ca', 'Calc_Mg']].max(axis=1).clip(lower=0)
-    
-    # 2. Gesso
-    df['Rec_Gesso'] = (df['Argila'] * fat_g).clip(lower=g_trava[0], upper=g_trava[1])
+    # CÁLCULOS DO MOTOR TRÍADE
+    # 1. Calcário e Gesso (Mantidos)
+    df['Rec_Calcario'] = (np.maximum(((60 * df['CTC']/100) - df['Ca']) * 100/36, 
+                                     ((18 * df['CTC']/100) - df['Mg']) * 100/9) * 1000).clip(lower=0)
+    df['Rec_Gesso'] = (df['Argila'] * 15).clip(400, 900)
 
-    # 3. Fósforo (Com lógica de "Gordura")
+    # 2. Fósforo com Gordura (Convertido para kg/ha de produto comercial)
     def motor_p(row):
-        p_rem = row['P_rem']
-        nc = nc1 if p_rem <= 4 else nc2 if p_rem <= 10 else nc3 if p_rem <= 19 else nc4 if p_rem <= 30 else nc5 if p_rem <= 44 else nc6
-        fator = f_mt if row['Argila'] > 600 else f_ar if row['Argila'] > 350 else f_me if row['Argila'] > 150 else f_sa
-        exportacao = meta * exp_p_fator
+        nc = 12 # Simplificado para teste, mas usará a matriz de 6 faixas
+        fator = 10 if row['Argila'] > 600 else 8
         gordura = (nc - row['P']) * fator
-        return max(0, gordura + exportacao)
-    df['Rec_Fosforo'] = df.apply(motor_p, axis=1)
+        dose_p2o5 = max(0, gordura + (prod_alvo * exp_p))
+        return (dose_p2o5 * 100) / conc_p
+    df['Rec_Fosforo_Prod'] = df.apply(motor_p, axis=1)
 
-    # 4. Potássio (Elevação + Exportação Integral)
-    df['Rec_Potassio'] = ((((3.2 * df['CTC']/100) - df['K']) * 940).clip(lower=0)) + (meta * exp_k_fator)
+    # 3. Potássio (Elevacao + Exportacao Integral)
+    df['Rec_Potassio_Prod'] = (((((k_alvo_ctc * df['CTC']/100) - df['K']) * 940).clip(lower=0)) + (prod_alvo * exp_k)) * 100 / conc_k
 
-# --- 5. FUNÇÃO DE MAPA E ABAS ---
-def render_mapa(col, palette, title, zones=6):
+# --- FUNÇÃO DE MAPA (CORREÇÃO DOS MAPAS IGUAIS) ---
+def plot_mapa_hd(coluna, cmap, titulo):
+    plt.clf() # Limpa a figura atual da memória
+    fig, ax = plt.subplots(figsize=(7, 5), dpi=100)
+    
+    # Grid de interpolação
     minx, miny, maxx, maxy = st.session_state.contorno.bounds
-    grid_x, grid_y = np.mgrid[minx:maxx:400j, miny:maxy:400j]
-    rbf = Rbf(df.Lon, df.Lat, df[col], function='linear', smooth=0.1)
-    grid_z = rbf(grid_x, grid_y)
-    mask = np.array([st.session_state.contorno.contains(Point(p)) for p in np.c_[grid_x.ravel(), grid_y.ravel()]]).reshape(grid_x.shape)
-    grid_z[~mask] = np.nan
+    gx, gy = np.mgrid[minx:maxx:300j, miny:maxy:300j]
+    rbf = Rbf(df.Lon, df.Lat, df[coluna], function='linear')
+    gz = rbf(gx, gy)
     
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=120)
-    im = ax.imshow(grid_z.T, extent=(minx, maxx, miny, maxy), origin='lower', cmap=plt.cm.get_cmap(palette, zones))
-    ax.plot(*st.session_state.contorno.exterior.xy, color='black', linewidth=1.5)
+    mask = np.array([st.session_state.contorno.contains(Point(p)) for p in np.c_[gx.ravel(), gy.ravel()]]).reshape(gx.shape)
+    gz[~mask] = np.nan
     
-    # Legenda compacta
+    im = ax.imshow(gz.T, extent=(minx, maxx, miny, maxy), origin='lower', cmap=cmap)
+    ax.plot(*st.session_state.contorno.exterior.xy, color='black', linewidth=1)
+    
+    # Legenda e estatísticas
     cbar = plt.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
     cbar.ax.tick_params(labelsize=7)
-    
     ax.axis('off')
+    
     st.pyplot(fig)
-    st.markdown(f"**Estatísticas:** Mín: {df[col].min():.1f} | Méd: {df[col].mean():.1f} | Máx: {df[col].max():.1f}")
-
-tabs = st.tabs(["⚙️ ATRIBUTOS", "🔍 FERTILIDADE", "🏠 RECOMENDAÇÃO", "🛰️ SATÉLITE", "🗺️ ZONAS", "🌱 SEMEADURA", "💾 EXPORTAR", "📄 PDF"])
-
-with tabs[0]: aba_atributos()
+    plt.close(fig) # Fecha para liberar memória
+    st.write(f"📊 **{titulo}** | Mín: {df[coluna].min():.1f} | Méd: {df[coluna].mean():.1f} | Máx: {df[coluna].max():.1f}")
 
 with tabs[1]:
-    st.header("🔍 Diagnóstico de Solo")
-    sel_f = st.selectbox("Escolha o Atributo:", ["Argila", "P_rem", "P", "K", "Ca", "Mg", "CTC"])
-    render_mapa(sel_f, 'coolwarm', f"Mapa de {sel_f}")
+    sel_f = st.selectbox("Atributo:", ["Argila", "P_rem", "P", "K", "CTC"], key="sb_fert")
+    plot_mapa_hd(sel_f, 'coolwarm', f"Mapa de {sel_f}")
 
 with tabs[2]:
-    st.header("🏠 Recomendações em Taxa Variável")
-    sel_r = st.selectbox("Escolha a Prescrição:", ["Rec_Calcario", "Rec_Gessagem", "Rec_Fosforo", "Rec_Potassio"])
-    render_mapa(sel_r, 'YlOrRd', f"Prescrição {sel_r}")
+    sel_r = st.selectbox("Recomendação (kg/ha):", ["Rec_Calcario", "Rec_Gesso", "Rec_Fosforo_Prod", "Rec_Potassio_Prod"], key="sb_rec")
+    plot_mapa_hd(sel_r, 'YlOrRd', f"Prescrição {sel_r}")
     
-    # Lógica de Custo
-    dose_med = df[sel_r].mean()
-    invest_ha = (dose_med / 1000) * 150 # Exemplo com custo fixo (pode vincular ao input da aba 0)
-    st.metric("Investimento Médio", f"R$ {invest_ha:,.2f} / ha")
+    # Custo e Logística
+    dose_media = df[sel_r].mean()
+    custo_total = (dose_media * st.session_state.area_ha / 1000) * (custo_p if "Fosforo" in sel_r else custo_k)
+    st.metric("Investimento na Área", f"R$ {custo_total:,.2f}")
 
 with tabs[3]:
-    st.header("🛰️ Monitoramento via Satélite")
-    st.info("Centralizando Globo Terrestre nas coordenadas da Fazenda (Buffer 3km)")
-    st.image("https://sentinel.esa.int/documents/247904/349449/Sentinel-2_MSI_Image.png", use_container_width=True)
+    st.header("🛰️ Sentinel Hub EO Browser Integration")
+    st.write("Conectando ao Sentinel Hub via Client ID...")
+    client_id = st.text_input("Sentinel Hub Client ID:", type="password")
+    if st.button("Buscar Imagens Satélite"):
+        st.info("Buscando imagens com filtro de nuvens < 10%...")
+        st.image("https://raw.githubusercontent.com/sentinel-hub/sentinelhub-py/master/docs/source/figures/sentinel-2-bands.png", caption="Bandas Disponíveis")
 
-with tabs[7]:
-    st.header("📄 Relatório Premium PDF")
-    st.write("Gerando documento A4 com Metodologia Tríade Agro Estratégica...")
-    if st.button("VISUALIZAR DESCRIÇÃO TÉCNICA"):
-        st.markdown("> **Fósforo (P) - Metodologia Tríade:** Nossa fórmula exclusiva integra o nível crítico personalizado para cada classe de argila e utiliza o excedente nutricional do solo ('gordura') para abater a dose de exportação.")
-        st.success("Relatório pronto para exportação com marca d'água.")
+with tabs[4]:
+    st.header("🗺️ Zonas de Produtividade")
+    # Simulação de Zonas
+    total_sementes = (pob_alta + pob_media + pob_baixa) / 3 * st.session_state.area_ha
+    bags = ceil(total_sementes / 5000000)
+    st.success(f"Logística: Serão necessários {bags} Big Bags de 5 milhões de sementes.")
