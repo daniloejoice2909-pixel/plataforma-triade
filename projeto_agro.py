@@ -3,18 +3,12 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import plotly.express as px
 from shapely.geometry import shape
 
 # --- 1. CONFIGURAÇÃO VISUAL ---
 st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica 1.0")
-st.markdown("""
-    <style>
-    .stApp { background-color: #FFFFFF; }
-    html, body, [class*="css"] { font-family: 'Open Sans', sans-serif; font-size: 16px; } 
-    h1, h2, h3 { color: #8B4513; }
-    .stTabs [data-baseweb="tab-list"] button { font-size: 18px; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
+st.markdown("""<style> .stApp { background-color: #FFFFFF; } html, body { font-family: 'Open Sans', sans-serif; font-size: 16px; } </style>""", unsafe_allow_html=True)
 
 # --- 2. LOGIN ---
 if "password_correct" not in st.session_state:
@@ -22,9 +16,8 @@ if "password_correct" not in st.session_state:
     with col2:
         logo = "LogoTriadeagro.png.png"
         if os.path.exists(logo): st.image(logo, width=200)
-        st.markdown("<h2 style='text-align: center;'>Acesso Master</h2>", unsafe_allow_html=True)
-        senha = st.text_input("Senha:", type="password")
-        if st.button("Entrar"):
+        senha = st.text_input("Senha Master:", type="password")
+        if st.button("Acessar"):
             if senha == "triade2026": st.session_state["password_correct"] = True; st.rerun()
     st.stop()
 
@@ -34,11 +27,10 @@ if "df" not in st.session_state:
     c1, c2 = st.columns(2)
     with c1:
         u_geo = st.file_uploader("Contorno (GeoJSON)", type=["json", "geojson"])
-        u_ex = st.file_uploader("Planilha (A-Y)", type=["xlsx"])
+        u_ex = st.file_uploader("Dados Solo (A-Y)", type=["xlsx"])
     with c2:
-        st.session_state.produtor = st.text_input("Nome do Produtor:")
-        st.session_state.fazenda = st.text_input("Fazenda:")
-        st.session_state.municipio = st.text_input("Município:")
+        st.session_state.prod = st.text_input("Produtor:")
+        st.session_state.faz = st.text_input("Fazenda:")
 
     if u_ex and u_geo:
         df_raw = pd.read_excel(u_ex)
@@ -46,49 +38,48 @@ if "df" not in st.session_state:
         df_raw.rename(columns={df_raw.columns[i]: n for i, n in cols_map.items()}, inplace=True)
         st.session_state.df = df_raw.apply(pd.to_numeric, errors='coerce').fillna(0)
         st.session_state.contorno = shape(json.load(u_geo)['features'][0]['geometry'])
-        st.session_state.area_ha = (st.session_state.contorno.area * 10**10) / 10000 
         st.success("✅ Projeto Carregado!"); st.button("Abrir Plataforma")
     st.stop()
 
-# --- 4. PLATAFORMA ---
+# --- 4. FUNÇÃO DE CLASSIFICAÇÃO (6 CAMADAS) ---
+def categorizar_6_classes(serie):
+    if serie.nunique() <= 1: return serie
+    # Divide em 6 faixas iguais (Quantis) para facilitar a leitura do monitor
+    return pd.qcut(serie, q=6, labels=False, duplicates='drop')
+
+# --- 5. PLATAFORMA ---
 df = st.session_state.df
 tabs = st.tabs(["⚙️ Atributos", "🔍 Mapas Solo", "🏠 Recomendações", "🛰️ Satélite", "🗺️ Zonas", "🌱 RSTV", "🌱 RNTV", "🌱 RDTV", "📄 Relatório"])
 
-with tabs[0]: # ATRIBUTOS
-    st.header("⚙️ Parâmetros Técnicos")
+with tabs[0]: # Atributos
+    st.header("⚙️ Parâmetros")
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.subheader("🧪 Calcário & Gesso")
-        cao = st.number_input("CaO %", 36.0); mgo = st.number_input("MgO %", 9.0)
-        prnt = st.number_input("PRNT %", 80.0); ca_alvo = st.number_input("Ca% desejado", 60.0)
-        mg_alvo = st.number_input("Mg% desejado", 18.0); g_max = st.number_input("Gesso Máx", 900.0)
+        cao = st.number_input("CaO %", 36.0); mgo = st.number_input("MgO %", 9.0); prnt = st.number_input("PRNT %", 80.0)
+        ca_alvo, mg_alvo = st.number_input("Ca% Desejado", 60.0); mg_alvo_val = st.number_input("Mg% Desejado", 18.0)
     with c2:
-        st.subheader("🌾 Fósforo (P-rem)")
-        p2o5_ad = st.number_input("% P2O5 do Adubo", 21.0) # EDITÁVEL
-        fat_p_sc = st.number_input("Fator P (kg/sc)", 0.8)
-        nc1 = st.number_input("NC 0-4", 8.0); nc2 = st.number_input("NC 4.1-10", 10.0)
-        nc3 = st.number_input("NC 10.1-19", 12.0); nc4 = st.number_input("NC 19.1-30", 15.0)
-        nc5 = st.number_input("NC 30.1-45", 20.0); nc6 = st.number_input("NC 45-60", 25.0)
+        p2o5_ad = st.number_input("% P2O5 do Adubo", 21.0); fat_p_sc = st.number_input("Fator P (kg/sc)", 0.8)
     with c3:
-        st.subheader("🍌 Potássio & Metas")
-        k2o_ad = st.number_input("% K2O Adubo", 60.0); k_alvo = st.number_input("K% desejado", 3.2)
-        prod_meta = st.number_input("Meta sc/ha", 80.0); fat_k_sc = st.number_input("Fator K (kg/sc)", 1.2)
+        k_alvo = st.number_input("K% Desejado", 3.2); meta_prod = st.number_input("Meta sc/ha", 80.0)
 
-with tabs[2]: # RECOMENDAÇÕES
-    st.header("🏠 Recomendações")
-    adic_calc = st.number_input("Adicional Calcário (t/ha)", 0.0)
+with tabs[2]: # Recomendações (Com 6 camadas)
+    st.header("🏠 Recomendações (Processado para Monitores)")
+    
+    # Motor de Cálculo Tríade
     df['Rec_Calc'] = (np.maximum(((ca_alvo * df['CTC'] / 100) - df['Ca']) * 100 / (cao * 1.78 * prnt / 100), 
-                                 ((mg_alvo * df['CTC'] / 100) - df['Mg']) * 100 / (mgo * 2.48 * prnt / 100)) + adic_calc).clip(lower=0)
-    df['Rec_Gesso'] = (df['Argila'] * 15).clip(lower=400, upper=g_max)
-    df['Rec_K2O'] = (((k_alvo * df['CTC'] / 100) - df['K']) * 940).clip(lower=0) + (prod_meta * fat_k_sc)
-    st.dataframe(df[['Lat', 'Lon', 'Rec_Calc', 'Rec_Gesso', 'Rec_K2O']].head(20))
+                                 ((mg_alvo_val * df['CTC'] / 100) - df['Mg']) * 100 / (mgo * 2.48 * prnt / 100))).clip(lower=0)
+    df['Rec_Gesso'] = (df['Argila'] * 15).clip(lower=400, upper=900)
+    df['Rec_K2O'] = (((k_alvo * df['CTC'] / 100) - df['K']) * 940).clip(lower=0) + (meta_prod * 1.2)
 
-with tabs[3]: # SATÉLITE
-    st.header("🛰️ Satélite Sentinel-2")
-    st.date_input("Início"); st.date_input("Fim")
-    st.radio("Camada:", ["NDVI", "NDVI Contrastado", "NDRE", "Brilho de Solo"])
-
-with tabs[8]: # RELATÓRIO
-    st.header("📄 Relatório")
-    st.write(f"Área Total: {st.session_state.area_ha:.2f} ha")
-    if st.button("Gerar PDF"): st.success("PDF gerado com sucesso!")
+    mapa_sel = st.selectbox("Escolha o Mapa para Visualizar em 6 Camadas:", ["Rec_Calc", "Rec_Gesso", "Rec_K2O"])
+    
+    # Criando as 6 camadas
+    df['Classe'] = categorizar_6_classes(df[mapa_sel])
+    
+    # Mapa Visual
+    fig = px.scatter_mapbox(df, lat="Lat", lon="Lon", color="Classe", 
+                            title=f"Prescrição {mapa_sel} - Agrupada em 6 Zonas",
+                            color_continuous_scale="RdYlGn_r", zoom=14, mapbox_style="carto-positron")
+    st.plotly_chart(fig, use_container_width=True)
+    
+    st.info("💡 Este formato agrupa as doses em 6 faixas, permitindo que o controlador do trator aplique sem travamentos.")
