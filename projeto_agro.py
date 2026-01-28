@@ -5,18 +5,19 @@ import base64
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(layout="centered", page_title="Tríade Agro Estratégica 1.0", page_icon="🌱")
 
-# --- 2. FUNÇÃO PARA CARREGAR IMAGEM DE FUNDO DO GIT/PASTA ---
+# --- 2. FUNÇÃO PARA CARREGAR IMAGEM DE FUNDO DO GIT ---
 def get_base64(bin_file):
     with open(bin_file, 'rb') as f:
         data = f.read()
     return base64.b64encode(data).decode()
 
-def configurar_fundo_customizado():
-    # Nome exato que você salvou no Git
-    img_arquivo = "imagemaptriadefundo.png"
+def configurar_visual_triade():
+    # Caminho das imagens no seu repositório
+    img_fundo = "imagemaptriadefundo.png"
+    img_logo = "logoTriadetransparente.png" # Nome atualizado conforme você salvou
     
-    if os.path.exists(img_arquivo):
-        bin_str = get_base64(img_arquivo)
+    if os.path.exists(img_fundo):
+        bin_str = get_base64(img_fundo)
         st.markdown(f"""
         <style>
         .stApp {{
@@ -25,15 +26,10 @@ def configurar_fundo_customizado():
             background-position: center;
             background-attachment: fixed;
         }}
-        /* Overlay para escurecer levemente a imagem e dar leitura ao texto */
-        .stApp::before {{
-            content: "";
-            position: absolute;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background-color: rgba(0, 0, 0, 0.4);
-            z-index: -1;
+        /* Estilo para garantir que o logo e containers fiquem limpos */
+        [data-testid="stImage"] img {{
+            background-color: transparent !important;
         }}
-        /* Estilização da caixa de login */
         .login-box {{
             background-color: rgba(255, 255, 255, 0.1);
             padding: 40px;
@@ -42,11 +38,9 @@ def configurar_fundo_customizado():
             border: 1px solid rgba(255, 255, 255, 0.2);
             text-align: center;
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-            margin-top: 50px;
         }}
-        /* Estilo do botão de entrada */
         div.stButton > button {{
-            background-color: #D4AF37; /* Dourado */
+            background-color: #D4AF37;
             color: white;
             font-weight: bold;
             width: 100%;
@@ -56,43 +50,33 @@ def configurar_fundo_customizado():
         }}
         </style>
         """, unsafe_allow_html=True)
-    else:
-        # Reserva caso o arquivo não seja encontrado
-        st.markdown("<style>.stApp {background-color: #2c3e50;}</style>", unsafe_allow_html=True)
-        st.error(f"Erro: Arquivo '{img_arquivo}' não encontrado na pasta do projeto.")
+    
+    return img_logo
 
-# --- 3. LÓGICA DE LOGIN ---
+# --- 3. EXECUÇÃO DA TELA ---
 if "logado" not in st.session_state:
     st.session_state.logado = False
 
 if not st.session_state.logado:
-    configurar_fundo_customizado()
+    logo_path = configurar_visual_triade()
     
     _, col_centro, _ = st.columns([0.5, 1, 0.5])
     
     with col_centro:
-        # Exibe o logo acima da caixa de login
-        if os.path.exists("LogoTriadeagro.png.png"):
-            st.image("LogoTriadeagro.png.png", use_container_width=True)
+        st.write("<br><br>", unsafe_allow_html=True)
+        # Exibe o logo transparente
+        if os.path.exists(logo_path):
+            st.image(logo_path, use_container_width=True)
         
-        # Caixa de login
         st.markdown('<div class="login-box">', unsafe_allow_html=True)
-        st.markdown("<h1 style='color: #FFD700; font-size: 24px;'>ESTRATÉGICA 1.0</h1>", unsafe_allow_html=True)
-        st.markdown("<p style='color: white;'>Sistema de Gestão de Nutrição</p>", unsafe_allow_html=True)
+        st.markdown("<h1 style='color: #FFD700; font-size: 26px;'>ESTRATÉGICA 1.0</h1>", unsafe_allow_html=True)
         
-        senha = st.text_input("Digite sua chave de acesso:", type="password")
+        senha = st.text_input("Chave de Acesso:", type="password")
         
-        if st.button("DESBLOQUEAR ACESSO"):
+        if st.button("DESBLOQUEAR PLATAFORMA"):
             if senha == "triade2026":
                 st.session_state.logado = True
                 st.rerun()
             else:
-                st.error("Chave incorreta. Tente novamente.")
+                st.error("Chave incorreta.")
         st.markdown('</div>', unsafe_allow_html=True)
-
-else:
-    # Se já estiver logado, mostra o botão para prosseguir
-    configurar_fundo_customizado()
-    st.success("Acesso Liberado!")
-    if st.button("PROSSEGUIR PARA CONFIGURAÇÃO DE DADOS"):
-        st.write("Aqui entraremos na Segunda Página (Upload de Arquivos).")
