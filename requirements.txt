@@ -1,10 +1,6 @@
 streamlit
 pandas
 numpy
-matplotlib
-scipy
-shapely
-fpdf2
-Pillow
 openpyxl
-scikit-learn
+shapely
+plotly
