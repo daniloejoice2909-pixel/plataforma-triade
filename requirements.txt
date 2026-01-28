@@ -1,11 +1,8 @@
 streamlit
 pandas
 numpy
+matplotlib
+scipy
 openpyxl
 shapely
-plotly
-geopandas
-scipy
-matplotlib
-requests
 fpdf
