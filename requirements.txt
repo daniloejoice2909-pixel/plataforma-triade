@@ -4,3 +4,8 @@ numpy
 openpyxl
 shapely
 plotly
+geopandas
+scipy
+matplotlib
+requests
+fpdf
