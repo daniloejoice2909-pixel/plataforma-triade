@@ -7,7 +7,7 @@ import base64
 import json
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica 1.0", initial_sidebar_state="collapsed")
+st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica 1.0")
 
 def get_base64(bin_file):
     if os.path.exists(bin_file):
@@ -24,8 +24,7 @@ def aplicar_visual_fixo(nome_imagem):
         <style>
         [data-testid="stAppViewContainer"] {{
             background-image: url("data:image/png;base64,{bin_str}");
-            background-size: 100% 100%;
-            background-repeat: no-repeat;
+            background-size: 100% 100%; background-repeat: no-repeat;
         }}
         .glass-panel {{
             background: rgba(0, 0, 0, 0.85); padding: 25px; border-radius: 15px;
@@ -36,42 +35,39 @@ def aplicar_visual_fixo(nome_imagem):
         </style>
         """, unsafe_allow_html=True)
 
-# --- 3. ABA 1: ATRIBUTOS (LÓGICA V43) ---
+# --- 3. ABA 1: ATRIBUTOS (RESTAURADOS) ---
 def exibir_aba_atributos():
-    st.markdown("## ⚙️ Atributos Estratégicos")
+    st.markdown("## ⚙️ Painel de Atributos Estratégicos")
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.subheader("⚪ Solo")
+        st.subheader("⚪ Solo & Gesso")
         st.number_input("Ca desejado CTC (%)", value=60.0, key='at_ca_ctc')
         st.number_input("Mg desejado CTC (%)", value=18.0, key='at_mg_ctc')
         st.number_input("PRNT Calcário (%)", value=80.0, key='at_prnt')
-        st.number_input("Fator Gesso (Argila * X)", value=15.0, key='at_g_fator')
+        st.number_input("Fator Gesso (Argila g/kg * X)", value=15.0, key='at_g_fator')
+        st.number_input("Preço Calcário (R$/ton)", value=190.0, key='at_ca_preco')
     with c2:
         st.subheader("🟠 Fósforo (P-Rem)")
         st.number_input("NC 0-4", value=8.0, key='p_nc1')
-        st.number_input("NC 4-10", value=10.0, key='p_nc2')
-        st.number_input("NC 10-19", value=12.0, key='p_nc3')
-        st.number_input("NC 19-30", value=15.0, key='p_nc4')
-        st.number_input("NC 30-45", value=20.0, key='p_nc5')
-        st.number_input("NC 45-60", value=25.0, key='p_nc6')
+        st.number_input("NC 4.1-10", value=10.0, key='p_nc2')
+        st.number_input("NC 10.1-19", value=12.0, key='p_nc3')
+        st.number_input("NC 19.1-30", value=15.0, key='p_nc4')
+        st.number_input("NC 30.1-45", value=20.0, key='p_nc5')
+        st.number_input("NC 45.1-60", value=25.0, key='p_nc6')
     with c3:
         st.subheader("💰 Mercado & Metas")
         st.number_input("Produtividade Meta (sc/ha)", value=80.0, key='at_prod')
         st.number_input("Preço Adubo P (R$/ton)", value=2800.0, key='at_p_preco')
+        st.number_input("Preço Adubo K (R$/ton)", value=2800.0, key='at_k_preco')
         st.number_input("Preço Gesso (R$/ton)", value=400.0, key='at_g_preco')
+        st.number_input("% P2O5 no Adubo", value=21.0, key='at_p_perc')
 
-# --- 4. ABA 2: MAPAS (RESOLVENDO O VALUEERROR) ---
+# --- 4. ABA 2: MAPAS (FIX VALUERROR) ---
 def exibir_aba_mapas_fertilidade(df):
     st.markdown("### 🗺️ Mapas de Fertilidade")
     logo_base64 = get_base64("LogoTriadeagro.png.png")
+    palette_manual = [[0, 'blue'], [0.5, 'yellow'], [1, 'red']]
     
-    # Escala de cor robusta (Substitui o nome 'coolwarm' que dá erro)
-    palette_coolwarm = [
-        [0.0, 'rgb(58, 76, 192)'], [0.25, 'rgb(145, 185, 255)'],
-        [0.5, 'rgb(240, 240, 240)'], [0.75, 'rgb(255, 160, 130)'],
-        [1.0, 'rgb(179, 3, 38)']
-    ]
-
     colunas = [c for c in df.columns if c not in ['LATITUDE', 'LONGITUDE', 'CAMPO', 'PONTO']]
     
     for col in colunas:
@@ -79,11 +75,22 @@ def exibir_aba_mapas_fertilidade(df):
         if df_clean.empty: continue
         
         st.markdown(f"#### Atributo: {col}")
-        fig = go.Figure(go.Histogram2dContour(
-            x=df_clean['LONGITUDE'], y=df_clean['LATITUDE'], z=df_clean[col],
-            colorscale=palette_coolwarm, # Usando a escala definida acima
-            ncontours=6, line_width=0, connectgaps=True
+        
+        # Estratégia de Injeção Direta para evitar Erro de Validação
+        fig = go.Figure()
+        fig.add_trace(go.Histogram2dContour(
+            x=df_clean['LONGITUDE'],
+            y=df_clean['LATITUDE'],
+            z=df_clean[col]
         ))
+        
+        fig.update_traces(
+            colorscale=palette_manual,
+            ncontours=6,
+            line_width=0,
+            connectgaps=True,
+            selector=dict(type='histogram2dcontour')
+        )
         
         if logo_base64:
             fig.add_layout_image(dict(source=f"data:image/png;base64,{logo_base64}", xref="paper", yref="paper", 
@@ -102,8 +109,8 @@ if not st.session_state.logado:
     st.markdown('<div class="glass-panel" style="width: 400px; text-align: center;">', unsafe_allow_html=True)
     logo = get_base64("logoTriadetransparente.png")
     if logo: st.markdown(f'<img src="data:image/png;base64,{logo}" style="width: 300px;">', unsafe_allow_html=True)
-    senha = st.text_input("Senha", type="password", placeholder="Acesso", label_visibility="collapsed")
-    if st.button("ENTRAR"):
+    senha = st.text_input("Acesso", type="password", key="login_pass")
+    if st.button("DESBLOQUEAR"):
         if senha == "triade2026": st.session_state.logado = True; st.session_state.pagina = "dados"; st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -112,21 +119,22 @@ elif st.session_state.pagina == "dados":
     st.markdown('<div style="height: 20vh;"></div>', unsafe_allow_html=True)
     with st.container():
         st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-        st.markdown("<h2 style='color:#FFD700; text-align:center;'>CONFIGURAÇÃO DO PROJETO</h2>", unsafe_allow_html=True)
+        st.markdown("<h2 style='color:#FFD700; text-align:center;'>⚙️ CONFIGURAÇÃO</h2>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
-        with c1: st.text_input("Produtor", key='prod')
-        with c2: st.text_input("Fazenda", key='faz')
-        with c3: st.text_input("Município", key='mun')
+        with c1: st.text_input("Produtor", key='v_prod')
+        with c2: st.text_input("Fazenda", key='v_faz')
+        with c3: st.text_input("Município", key='v_mun')
         
-        up_geo = st.file_uploader("Contorno (.GEOJSON)", type=["geojson", "json"])
-        up_xlsx = st.file_uploader("Dados (.XLSX)", type=["xlsx"])
+        col_u1, col_u2 = st.columns(2)
+        with col_u1: up_geo = st.file_uploader("Contorno (.GEOJSON)", type=["geojson", "json"])
+        with col_u2: up_xlsx = st.file_uploader("Planilha (.XLSX)", type=["xlsx"])
         
         if st.button("🚀 ABRIR PLATAFORMA"):
             if up_xlsx and up_geo:
                 st.session_state.dados_excel = pd.read_excel(up_xlsx)
                 st.session_state.contorno_json = json.load(up_geo)
                 st.session_state.pagina = "plataforma"; st.rerun()
-            else: st.error("Carregue o Contorno e a Planilha.")
+            else: st.warning("Atenção: Carregue o Contorno e a Planilha.")
         st.markdown('</div>', unsafe_allow_html=True)
 
 elif st.session_state.pagina == "plataforma":
@@ -135,10 +143,11 @@ elif st.session_state.pagina == "plataforma":
     with tab1: exibir_aba_atributos()
     with tab2: exibir_aba_mapas_fertilidade(st.session_state.dados_excel)
     with tab3: 
-        st.subheader("💰 Recomendações e Custos")
-        # Exemplo da recomendação de gesso baseada na argila * fator
-        df = st.session_state.dados_excel.copy()
-        df['Recomendacao_Gesso'] = (df['ARGILA'] * st.session_state.at_g_fator).clip(lower=400, upper=900)
-        st.write("Resumo por Pontos:")
-        st.dataframe(df[['PONTO', 'ARGILA', 'Recomendacao_Gesso']].head())
-    with tab4: st.write("Sentinel Hub - NDVI")
+        st.subheader("💰 Resumo de Investimento por Zona")
+        df_rec = st.session_state.dados_excel.copy()
+        df_rec['Gesso_kg'] = (df_rec['ARGILA'] * st.session_state.at_g_fator).clip(lower=400, upper=900)
+        st.dataframe(df_rec[['PONTO', 'ARGILA', 'Gesso_kg']].head(10))
+    with tab4:
+        st.subheader("🛰️ Sentinel Hub")
+        st.text_input("Client ID", type="password")
+        st.text_input("Client Secret", type="password")
