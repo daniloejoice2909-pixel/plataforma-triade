@@ -28,15 +28,31 @@ def aplicar_estilo_por_pagina(nome_imagem, trava_rolagem=True):
             background-repeat: no-repeat;
             background-position: center;
         }}
-        /* Container de vidro para a segunda página */
+        
+        /* Painel de vidro da segunda página */
         .glass-panel {{
-            background: rgba(0, 0, 0, 0.7);
-            padding: 30px;
+            background: rgba(0, 0, 0, 0.75);
+            padding: 40px;
             border-radius: 20px;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: white;
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }}
+
+        /* FORÇAR TEXTOS EM BRANCO E NEGRITO */
+        .glass-panel h2, .glass-panel h3, .glass-panel p, .glass-panel span, label {{
+            color: white !important;
+            font-weight: bold !important;
+            font-size: 1.05rem !important;
+        }}
+
+        /* Título em Dourado Negrito */
+        .titulo-dourado {{
+            color: #FFD700 !important;
+            font-weight: 800 !important;
+            font-size: 2rem !important;
+            margin-bottom: 20px;
+        }}
+
         header, footer, [data-testid="stHeader"] {{ display: none !important; }}
         </style>
         """, unsafe_allow_html=True)
@@ -48,19 +64,16 @@ if "pagina" not in st.session_state:
     st.session_state.pagina = "login"
 
 # ==========================================
-# PÁGINA 1: LOGIN (Fundo OI_AGRISHOW)
+# PÁGINA 1: LOGIN (Mantém o estilo anterior)
 # ==========================================
 if not st.session_state.logado:
     aplicar_estilo_por_pagina("OI_AGRISHOW.jpg", trava_rolagem=True)
     
     st.markdown('<div style="position: absolute; top: 60%; left: 50%; transform: translateX(-50%); width: 350px; text-align: center;">', unsafe_allow_html=True)
-    
-    # Logo
     if os.path.exists("logoTriadetransparente.png"):
         logo_64 = get_base64("logoTriadetransparente.png")
         st.markdown(f'<img src="data:image/png;base64,{logo_64}" style="width: 380px; margin-bottom: 10px;">', unsafe_allow_html=True)
     
-    # Caixa de Login
     st.markdown('<div style="background: rgba(0,0,0,0.6); padding: 20px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.2);">', unsafe_allow_html=True)
     senha = st.text_input("Senha", type="password", label_visibility="collapsed", placeholder="Senha de Acesso")
     if st.button("DESBLOQUEAR PLATAFORMA"):
@@ -71,41 +84,40 @@ if not st.session_state.logado:
     st.markdown('</div></div>', unsafe_allow_html=True)
 
 # ==========================================
-# PÁGINA 2: CONFIGURAÇÃO (Fundo imagemaptriadefundo)
+# PÁGINA 2: CONFIGURAÇÃO (Textos Brancos e Negrito)
 # ==========================================
 elif st.session_state.pagina == "dados":
     aplicar_estilo_por_pagina("imagemaptriadefundo.png", trava_rolagem=False)
     
-    # Centralizando o painel de configuração
     _, col_central, _ = st.columns([0.1, 0.8, 0.1])
     
     with col_central:
         st.write("<br><br>", unsafe_allow_html=True)
         st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-        st.markdown("<h2 style='color: #FFD700;'>⚙️ Configuração do Projeto</h2>", unsafe_allow_html=True)
+        st.markdown('<div class="titulo-dourado">⚙️ CONFIGURAÇÃO DO PROJETO</div>', unsafe_allow_html=True)
         
-        # Dados do Produtor
+        # Dados do Produtor (Labels agora são brancos e negrito via CSS)
         c1, c2, c3 = st.columns(3)
-        produtor = c1.text_input("Nome do Produtor")
-        fazenda = c2.text_input("Fazenda")
-        municipio = c3.text_input("Município/UF")
+        with c1: produtor = st.text_input("NOME DO PRODUTOR")
+        with c2: fazenda = st.text_input("FAZENDA")
+        with c3: municipio = st.text_input("MUNICÍPIO / UF")
         
-        st.markdown("<hr style='opacity: 0.2;'>", unsafe_allow_html=True)
+        st.markdown("<br><hr style='opacity: 0.3;'><br>", unsafe_allow_html=True)
         
         # Uploads
-        st.subheader("Upload de Arquivos")
-        st.write("Selecione o contorno da área e a planilha de dados (Colunas A a Y).")
+        st.markdown("<h3>UPLOAD DE ARQUIVOS</h3>", unsafe_allow_html=True)
+        st.markdown("<p>INSIRA O CONTORNO (GEOJSON) E A PLANILHA DE DADOS (COLUNAS A A Y)</p>", unsafe_allow_html=True)
         
-        up_geojson = st.file_uploader("Arquivo de Contorno (GeoJSON)", type=["json", "geojson"])
-        up_excel = st.file_uploader("Planilha de Dados (Excel)", type=["xlsx"])
+        up_geojson = st.file_uploader("ARQUIVO DE CONTORNO (.GEOJSON)", type=["json", "geojson"])
+        up_excel = st.file_uploader("PLANILHA DE DADOS (.XLSX)", type=["xlsx"])
         
+        st.write("<br>", unsafe_allow_html=True)
         if st.button("🚀 PROCESSAR E ABRIR PLATAFORMA"):
             if up_geojson and up_excel:
-                # Aqui entra o motor de leitura A-Y que definimos
+                # Aqui o sistema já deve começar a ler as colunas A-Y
                 st.session_state.pagina = "plataforma"
-                st.success("Dados carregados! Abrindo painel técnico...")
                 st.rerun()
             else:
-                st.error("Por favor, carregue ambos os arquivos para continuar.")
+                st.warning("⚠️ POR FAVOR, CARREGUE OS DOIS ARQUIVOS.")
         
         st.markdown('</div>', unsafe_allow_html=True)
