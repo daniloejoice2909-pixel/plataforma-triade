@@ -145,3 +145,98 @@ elif st.session_state.pagina == "dados":
                 st.warning("CARREGUE OS ARQUIVOS PARA CONTINUAR")
         
         st.markdown('</div>', unsafe_allow_html=True)
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+# --- 1. FUNÇÃO DE CÁLCULO DE RECOMENDAÇÃO (LOGICA DANILO) ---
+def processar_recomendacoes(df, attr):
+    # Conversão de Argila g/kg para % se necessário, mas usaremos direto conforme a regra
+    # GESSO: Argila (g/kg) * fator (15)
+    df['RECO_GESSO'] = df['ARGILA'] * attr['gesso_fator']
+    df['RECO_GESSO'] = df['RECO_GESSO'].clip(lower=attr['gesso_min'], upper=attr['gesso_max'])
+    
+    # FÓSFORO: Lógica de Nível Crítico por P-Rem
+    def nivel_critico_p(prem):
+        if prem <= 4: return attr['p_nc1']
+        elif prem <= 10: return attr['p_nc2']
+        elif prem <= 19: return attr['p_nc3']
+        elif prem <= 30: return attr['p_nc4']
+        elif prem <= 45: return attr['p_nc5']
+        else: return attr['p_nc6']
+    
+    # Fator de Textura (simplificado pela Argila g/kg)
+    def fator_textura(argila):
+        if argila > 600: return attr['fator_m_argiloso']
+        elif argila > 350: return attr['fator_argiloso']
+        elif argila > 150: return attr['fator_medio']
+        else: return attr['fator_arenoso']
+
+    # Aplicação da lógica de Fósforo
+    # (Exemplo simplificado da subtração da "gordura" da exportação)
+    exp_p = attr['prod_esperada'] * attr['p_export_sc']
+    df['NC_P'] = df['P-REM'].apply(nivel_critico_p)
+    df['FATOR_T'] = df['ARGILA'].apply(fator_textura)
+    
+    # Se P solo > NC, subtrai a diferença da exportação
+    df['DIF_P'] = df['P'] - df['NC_P']
+    df['RECO_P2O5'] = np.where(df['DIF_P'] > 0, 
+                                exp_p - (df['DIF_P'] * df['FATOR_T']), 
+                                exp_p + (abs(df['DIF_P']) * df['FATOR_T']))
+    
+    return df
+
+# --- 2. INTERFACE DA ABA DE ATRIBUTOS ---
+def exibir_aba_atributos():
+    st.markdown("## ⚙️ Painel de Atributos Estratégicos")
+    
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.subheader("⚪ Calcário")
+        ca_cao = st.number_input("CaO %", value=36.0)
+        ca_mgo = st.number_input("MgO %", value=9.0)
+        ca_prnt = st.number_input("PRNT %", value=80.0)
+        ca_ctc_des = st.number_input("Ca% desejado na CTC", value=60.0)
+        mg_ctc_des = st.number_input("Mg% desejado na CTC", value=18.0)
+        ca_preco = st.number_input("Preço Calcário (R$/ton)", value=190.0)
+
+    with col2:
+        st.subheader("🟠 Fósforo (P)")
+        st.write("**Níveis Críticos (P-Rem)**")
+        p_nc1 = st.number_input("0 a 4 (P-Rem)", value=8.0)
+        p_nc2 = st.number_input("4.1 a 10 (P-Rem)", value=10.0)
+        p_nc3 = st.number_input("10.1 a 19 (P-Rem)", value=12.0)
+        p_nc4 = st.number_input("19.1 a 30 (P-Rem)", value=15.0)
+        
+        st.write("**Fator Textura (kg P p/ elevar 1mg)**")
+        f_m_arg = st.number_input("M. Argiloso", value=10.0)
+        f_arg = st.number_input("Argiloso", value=8.0)
+        
+        p_export = st.number_input("Exportação P (kg/sc)", value=0.8)
+        p_adubo_perc = st.number_input("% P2O5 no Adubo", value=21.0)
+        p_preco = st.number_input("Preço Adubo P (R$/ton)", value=2800.0)
+
+    with col3:
+        st.subheader("🔴 Potássio (K) & Gesso")
+        k_perc_ctc = st.number_input("K% desejado na CTC", value=3.2)
+        k_export = st.number_input("Exportação K (kg/sc)", value=1.2)
+        k_adubo_perc = st.number_input("% K2O no Adubo", value=60.0)
+        k_preco = st.number_input("Preço Adubo K (R$/ton)", value=2800.0)
+        
+        st.write("---")
+        g_fator = st.number_input("Fator Gesso (Argila * X)", value=15.0)
+        g_max = st.number_input("Dose Máxima Gesso", value=900.0)
+        g_min = st.number_input("Dose Mínima Gesso", value=400.0)
+        g_preco = st.number_input("Preço Gesso (R$/ton)", value=400.0)
+        
+        st.write("---")
+        prod_exp = st.number_input("Produtividade Esperada (sc/ha)", value=80.0)
+
+    # Dicionário de Atributos para os cálculos
+    return {
+        "gesso_fator": g_fator, "gesso_min": g_min, "gesso_max": g_max,
+        "p_nc1": p_nc1, "p_nc2": p_nc2, "p_nc3": p_nc3, "p_nc4": p_nc4,
+        "fator_m_argiloso": f_m_arg, "fator_argiloso": f_arg,
+        "p_export_sc": p_export, "prod_esperada": prod_exp
+    }
