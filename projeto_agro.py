@@ -6,17 +6,19 @@ import base64
 st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica 1.0")
 
 def get_base64(bin_file):
-    with open(bin_file, 'rb') as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
+    if os.path.exists(bin_file):
+        with open(bin_file, 'rb') as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    return ""
 
-# --- 2. CSS COM CONTRASTE REFORÇADO ---
+# --- 2. CSS COM CONTRASTE REFORÇADO E BOTÕES VISÍVEIS ---
 def aplicar_visual_fixo(nome_imagem):
-    if os.path.exists(nome_imagem):
-        bin_str = get_base64(nome_imagem)
+    bin_str = get_base64(nome_imagem)
+    if bin_str:
         st.markdown(f"""
         <style>
-        /* Bloqueio de rolagem */
+        /* Bloqueio de rolagem total */
         html, body, [data-testid="stAppViewContainer"], [data-testid="stMainViewContainer"] {{
             height: 100vh !important;
             width: 100vw !important;
@@ -31,50 +33,44 @@ def aplicar_visual_fixo(nome_imagem):
             background-position: center;
         }}
 
+        /* Painel de vidro escurecido */
         .glass-panel {{
             background: rgba(0, 0, 0, 0.85); 
-            padding: 30px;
-            border-radius: 20px;
-            backdrop-filter: blur(15px);
+            padding: 25px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.3);
-            width: 850px;
+            width: 800px;
             margin: auto;
         }}
 
-        /* Textos Gerais */
+        /* Textos Branco e Negrito com Sombra */
         label, p, span, h3 {{
             color: #FFFFFF !important;
             font-weight: bold !important;
             text-transform: uppercase;
-            font-size: 0.9rem !important;
+            font-size: 0.85rem !important;
             text-shadow: 2px 2px 4px rgba(0,0,0,1) !important;
         }}
 
         .titulo-dourado {{
             color: #FFD700 !important;
             font-weight: 900 !important;
-            font-size: 1.8rem !important;
+            font-size: 1.6rem !important;
             text-align: center;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
             text-shadow: 3px 3px 6px rgba(0,0,0,0.9) !important;
         }}
 
         /* --- AJUSTE DOS BOTÕES "BROWSE FILES" --- */
-        /* Força o fundo do botão a ser claro e o texto ESCURO */
         [data-testid="stFileUploader"] section button {{
-            background-color: #EEEEEE !important;
-            color: #111111 !important;
+            background-color: #FFFFFF !important;
+            color: #000000 !important;
             font-weight: bold !important;
-            border: 1px solid #333 !important;
+            border-radius: 5px !important;
         }}
         
-        /* Ajuste da cor do texto informativo dentro do uploader */
-        [data-testid="stFileUploader"] section div div {{
-            color: #FFFFFF !important;
-            font-weight: normal !important;
-        }}
-
-        /* Inputs de texto com fundo branco e letra preta */
+        /* Inputs de texto Brancos com letra Preta */
         .stTextInput input {{
             background-color: white !important;
             color: black !important;
@@ -91,26 +87,35 @@ if "logado" not in st.session_state:
 if "pagina" not in st.session_state:
     st.session_state.pagina = "login"
 
-# --- PÁGINA 1: LOGIN ---
+# ==========================================
+# PÁGINA 1: LOGIN (Fundo Agrishow)
+# ==========================================
 if not st.session_state.logado:
     aplicar_visual_fixo("OI_AGRISHOW.jpg")
-    st.markdown('<div style="position: absolute; top: 58%; left: 50%; transform: translateX(-50%); width: 380px; text-align: center;">', unsafe_allow_html=True)
-    if os.path.exists("logoTriadetransparente.png"):
-        logo_64 = get_base64("logoTriadetransparente.png")
-        st.markdown(f'<img src="data:image/png;base64,{logo_64}" style="width: 380px; margin-bottom: 10px; filter: drop-shadow(0px 0px 12px rgba(0,0,0,0.9));">', unsafe_allow_html=True)
     
-    st.markdown('<div style="background: rgba(0,0,0,0.8); padding: 25px; border-radius: 15px;">', unsafe_allow_html=True)
-    senha = st.text_input("Acesso", type="password", label_visibility="collapsed", placeholder="CHAVE DE ACESSO")
-    if st.button("DESBLOQUEAR"):
+    st.markdown('<div style="position: absolute; top: 58%; left: 50%; transform: translateX(-50%); width: 380px; text-align: center;">', unsafe_allow_html=True)
+    
+    logo_64 = get_base64("logoTriadetransparente.png")
+    if logo_64:
+        st.markdown(f'<img src="data:image/png;base64,{logo_64}" style="width: 380px; margin-bottom: 5px; filter: drop-shadow(0px 0px 10px rgba(0,0,0,1));">', unsafe_allow_html=True)
+    
+    st.markdown('<div style="background: rgba(0,0,0,0.8); padding: 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);">', unsafe_allow_html=True)
+    senha = st.text_input("Senha", type="password", label_visibility="collapsed", placeholder="CHAVE DE ACESSO")
+    if st.button("DESBLOQUEAR PLATAFORMA"):
         if senha == "triade2026":
             st.session_state.logado = True
             st.session_state.pagina = "dados"
             st.rerun()
+        else:
+            st.error("CHAVE INVÁLIDA")
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-# --- PÁGINA 2: CONFIGURAÇÃO ---
+# ==========================================
+# PÁGINA 2: CONFIGURAÇÃO (Fundo TriadeFundo)
+# ==========================================
 elif st.session_state.pagina == "dados":
     aplicar_visual_fixo("imagemaptriadefundo.png")
+    
     st.write("<br><br><br>", unsafe_allow_html=True)
     _, col_central, _ = st.columns([0.1, 0.8, 0.1])
     
@@ -118,9 +123,4 @@ elif st.session_state.pagina == "dados":
         st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
         st.markdown('<div class="titulo-dourado">⚙️ CONFIGURAÇÃO DO PROJETO</div>', unsafe_allow_html=True)
         
-        c1, c2, c3 = st.columns(3)
-        with c1: st.text_input("PRODUTOR")
-        with c2: st.text_input("FAZENDA")
-        with c3: st.text_input("MUNICÍPIO / UF")
-        
-        st.markdown("<hr style='margin: 15px 0; opacity: 0.3;'>", unsafe_allow_
+        c1, c2, c3 =
