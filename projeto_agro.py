@@ -11,18 +11,19 @@ def get_base64(bin_file):
         data = f.read()
     return base64.b64encode(data).decode()
 
-# --- 3. CSS TRAVADO (ZERO ROLAGEM) ---
-def configurar_layout_travado():
-    img_fundo = "OI_AGRISHOW.jpg" # Nome da sua nova imagem
+# --- 3. CSS PARA IMAGEM FULLSCREEN E ZERO ROLAGEM ---
+def configurar_layout_perfeito():
+    img_fundo = "OI_AGRISHOW.jpg"
     img_logo = "logoTriadetransparente.png"
     
     if os.path.exists(img_fundo):
         bin_str = get_base64(img_fundo)
         st.markdown(f"""
         <style>
-        /* Bloqueio absoluto de rolagem */
+        /* Força o corpo da página a ocupar exatamente 100% da visão do usuário */
         html, body, [data-testid="stAppViewContainer"], [data-testid="stMainViewContainer"] {{
             height: 100vh !important;
+            width: 100vw !important;
             overflow: hidden !important;
             margin: 0;
             padding: 0;
@@ -30,15 +31,17 @@ def configurar_layout_travado():
         
         .stApp {{
             background-image: url("data:image/jpg;base64,{bin_str}");
-            background-size: cover;
+            background-size: 100% 100%; /* Ajusta a imagem exatamente ao tamanho da tela */
+            background-repeat: no-repeat;
             background-position: center;
             height: 100vh;
+            width: 100vw;
         }}
 
-        /* Bloco centralizado do MEIO para BAIXO */
+        /* Container posicionado na metade inferior */
         .triade-login-container {{
             position: absolute;
-            top: 62%; /* Ajuste fino para a metade inferior */
+            top: 65%; /* Ajustado para ficar na parte inferior */
             left: 50%;
             transform: translateX(-50%);
             width: 320px;
@@ -46,18 +49,17 @@ def configurar_layout_travado():
             display: flex;
             flex-direction: column;
             align-items: center;
-            z-index: 9999;
+            z-index: 1000;
         }}
 
         .logo-triade {{
             width: 380px;
             margin-bottom: 5px;
-            filter: drop-shadow(0px 4px 10px rgba(0,0,0,0.5));
+            filter: drop-shadow(0px 4px 10px rgba(0,0,0,0.6));
         }}
 
-        /* Caixa de Login Minimalista */
         .login-box-compacta {{
-            background-color: rgba(0, 0, 0, 0.6); /* Escurecido para dar contraste com a foto */
+            background-color: rgba(0, 0, 0, 0.65);
             padding: 15px;
             border-radius: 12px;
             backdrop-filter: blur(8px);
@@ -75,25 +77,23 @@ def configurar_layout_travado():
             border: none;
         }}
 
-        /* Remove cabeçalhos e menus do Streamlit */
-        header, footer, [data-testid="stHeader"] {{
+        /* Esconde elementos nativos do Streamlit que causam rolagem */
+        header, footer, [data-testid="stHeader"], .stDeployButton {{
             display: none !important;
-            visibility: hidden !important;
         }}
         </style>
         """, unsafe_allow_html=True)
-    else:
-        st.error(f"Arquivo '{img_fundo}' não encontrado. Verifique o nome no GitHub.")
     
     return img_logo
 
-# --- 4. EXECUÇÃO DA INTERFACE ---
+# --- 4. EXECUÇÃO ---
 if "logado" not in st.session_state:
     st.session_state.logado = False
 
 if not st.session_state.logado:
-    logo_path = configurar_layout_travado()
+    logo_path = configurar_layout_perfeito()
     
+    # Renderização do Bloco Inferior
     st.markdown('<div class="triade-login-container">', unsafe_allow_html=True)
     
     if os.path.exists(logo_path):
@@ -101,20 +101,4 @@ if not st.session_state.logado:
         st.markdown(f'<img src="data:image/png;base64,{logo_64}" class="logo-triade">', unsafe_allow_html=True)
     
     st.markdown('<div class="login-box-compacta">', unsafe_allow_html=True)
-    senha = st.text_input("Senha", type="password", label_visibility="collapsed", placeholder="Digite a Senha de Acesso")
-    if st.button("DESBLOQUEAR PLATAFORMA"):
-        if senha == "triade2026":
-            st.session_state.logado = True
-            st.rerun()
-        else:
-            st.error("Senha Incorreta")
-            
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
-else:
-    # PROSSEGUIR PARA A SEGUNDA PÁGINA
-    st.markdown("<h2 style='color: white; text-align: center; padding-top: 45vh;'>Acesso Liberado.</h2>", unsafe_allow_html=True)
-    if st.button("ABRIR IMPORTAÇÃO DE DADOS (A-Y)"):
-        st.session_state.pagina_atual = "config_dados"
-        st.rerun()
+    senha = st.text_input("Senha", type="password", label_visibility
