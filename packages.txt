@@ -1,0 +1,5 @@
+libgl1
+gdal-bin
+python3-gdal
+binutils
+libproj-dev
