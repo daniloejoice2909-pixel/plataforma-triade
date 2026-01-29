@@ -240,3 +240,81 @@ def exibir_aba_atributos():
         "fator_m_argiloso": f_m_arg, "fator_argiloso": f_arg,
         "p_export_sc": p_export, "prod_esperada": prod_exp
     }
+import streamlit as st
+import plotly.graph_objects as go
+import pandas as pd
+import os
+
+def exibir_aba_mapas_fertilidade(df, contorno_geojson):
+    st.markdown("### 🗺️ Mapas de Fertilidade (Zonas de Manejo)")
+    
+    # Caminho do Logo para a Marca d'Água
+    logo_path = "LogoTriadeagro.png.png"
+    logo_base64 = ""
+    if os.path.exists(logo_path):
+        import base64
+        with open(logo_path, "rb") as f:
+            logo_base64 = base64.b64encode(f.read()).decode()
+
+    # Selecionar apenas colunas de dados (E até Y)
+    colunas_dados = [c for c in df.columns if c not in ['LATITUDE', 'LONGITUDE', 'CAMPO', 'PONTO']]
+
+    for col in colunas_dados:
+        # Se a coluna for toda zero ou vazia, ocultamos
+        if df[col].dropna().sum() == 0:
+            continue
+
+        st.markdown(f"#### Atributo: {col}")
+        
+        # Estatísticas para o rodapé reduzido
+        v_min, v_max, v_med = df[col].min(), df[col].max(), df[col].mean()
+
+        # Criando o Mapa de Contorno (Zonamento 100% preenchido)
+        fig = go.Figure(go.Histogram2dContour(
+            x = df['LONGITUDE'],
+            y = df['LATITUDE'],
+            z = df[col],
+            colorscale='coolwarm',
+            ncontours=6, # 6 Zonas de Manejo
+            line_width=0,
+            hovertemplate="Valor: %{z}<extra></extra>"
+        ))
+
+        # Configuração da Identidade Visual (Logo Apagado)
+        if logo_base64:
+            fig.add_layout_image(
+                dict(
+                    source=f"data:image/png;base64,{logo_base64}",
+                    xref="paper", yref="paper",
+                    x=0.5, y=0.5, # Centralizado
+                    sizex=0.4, sizey=0.4, # Tamanho discreto
+                    xanchor="center", yanchor="middle",
+                    opacity=0.15, # Tom apagado para não atrapalhar
+                    layer="above"
+                )
+            )
+
+        # Ajustes de Layout e Legendas Reduzidas
+        fig.update_layout(
+            width=900, height=600,
+            margin={"r":10,"t":10,"l":10,"b":10},
+            coloraxis_showscale=True,
+            plot_bgcolor='rgba(0,0,0,0)',
+            paper_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            coloraxis_colorbar=dict(
+                thickness=12,
+                title="",
+                tickfont=dict(size=9, color="white")
+            )
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Rodapé Técnico em Tamanho Reduzido
+        st.markdown(
+            f"""<div style='text-align: center; font-size: 11px; color: #CCCCCC; margin-bottom: 20px;'>
+            MÍN: {v_min:.2f} | MÉD: {v_med:.2f} | MÁX: {v_max:.2f}
+            </div>""", unsafe_allow_html=True
+        )
