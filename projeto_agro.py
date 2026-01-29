@@ -80,62 +80,57 @@ def render_atributos():
 def render_mapas(df):
     st.markdown("### 🗺️ Análise de Fertilidade")
     
-    # Lista de colunas para processar
-    cols = ['ARGILA', 'P-REM', 'P', 'CA', 'MG', 'K', 'CTC', 'CA%', 'MG%', 'K%', 'PH_CACL2', 'V%']
-    
+    # Lista de colunas para processar conforme seu checklist
+    cols = ['ARGILA', 'P-REM', 'P', 'CA', 'MG', 'K', 'CTC', 'CA%', 'MG%', 'K%', 'PH_CACL2']
     logo = get_base64("LogoTriadeagro.png.png")
     
     for col in cols:
         try:
-            # Verifica se coluna existe e tem dados
             if col not in df.columns: continue
             
-            # Limpeza de dados
-            df_safe = df.dropna(subset=['LATITUDE', 'LONGITUDE', col])
-            df_safe = df_safe[pd.to_numeric(df_safe[col], errors='coerce').notnull()]
+            # Limpeza e conversão para garantir que são números
+            df_safe = df.dropna(subset=['LATITUDE', 'LONGITUDE', col]).copy()
+            df_safe[col] = pd.to_numeric(df_safe[col], errors='coerce')
+            df_safe = df_safe.dropna(subset=[col])
             
             if df_safe.empty or df_safe[col].sum() == 0: continue
 
-            st.markdown(f"**{col}**")
+            st.markdown(f"**Mapa de Distribuição: {col}**")
             
-            # CRIAÇÃO DO MAPA
             fig = go.Figure()
             
-            # Usando 'RdBu_r' que é nativo (Red-Blue Reversed = Azul->Vermelho)
-            # Isso evita o erro de validação de cores manuais
+            # Versão Corrigida: Removido 'connectgaps' e 'line_width' incompatíveis
             fig.add_trace(go.Histogram2dContour(
                 x=df_safe['LONGITUDE'],
                 y=df_safe['LATITUDE'],
                 z=df_safe[col],
                 colorscale='RdBu_r', 
-                ncontours=6,
-                line_width=0,
-                connectgaps=True,
-                hoverinfo='x+y+z'
+                ncontours=8,
+                reversescale=False,
+                hoverinfo='all'
             ))
             
-            # Adiciona Logo se existir
             if logo:
                 fig.add_layout_image(dict(
                     source=f"data:image/png;base64,{logo}",
                     xref="paper", yref="paper", x=0.5, y=0.5,
-                    sizex=0.3, sizey=0.3, opacity=0.15, layer="above"
+                    sizex=0.3, sizey=0.3, xanchor="center", yanchor="middle",
+                    opacity=0.1, layer="above"
                 ))
 
             fig.update_layout(
-                margin=dict(l=0, r=0, t=0, b=0),
-                height=500,
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
+                margin=dict(l=10, r=10, t=10, b=10),
+                height=550,
+                paper_bgcolor='white',
+                plot_bgcolor='white',
                 xaxis=dict(showgrid=False, zeroline=False, visible=False),
                 yaxis=dict(showgrid=False, zeroline=False, visible=False)
             )
             
-            # Key única baseada na coluna para evitar conflito de Node
-            st.plotly_chart(fig, use_container_width=True, key=f"chart_{col}")
+            st.plotly_chart(fig, use_container_width=True, key=f"fixed_map_{col}")
             
         except Exception as e:
-            st.warning(f"Não foi possível gerar o mapa de {col}. Erro: {e}")
+            st.error(f"Erro ao processar {col}: {e}")
 
 # --- 5. LOGICA PRINCIPAL ---
 if "logado" not in st.session_state: st.session_state.logado = False
@@ -205,3 +200,4 @@ else:
             
         with tab4:
             st.info("Módulo Sentinel Hub em espera.")
+
