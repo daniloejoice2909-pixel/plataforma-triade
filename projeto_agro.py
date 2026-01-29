@@ -16,7 +16,7 @@ def aplicar_visual_fixo(nome_imagem):
         bin_str = get_base64(nome_imagem)
         st.markdown(f"""
         <style>
-        /* Trava a visualização para não ter rolagem */
+        /* Bloqueio absoluto de rolagem */
         html, body, [data-testid="stAppViewContainer"], [data-testid="stMainViewContainer"] {{
             height: 100vh !important;
             width: 100vw !important;
@@ -29,39 +29,39 @@ def aplicar_visual_fixo(nome_imagem):
             background-size: 100% 100%;
             background-repeat: no-repeat;
             background-position: center;
+            display: flex;
+            justify-content: center;
+            align-items: center;
         }}
 
-        /* Ajuste do painel de vidro para caber sem rolar */
+        /* Painel de vidro compacto para a segunda página */
         .glass-panel {{
             background: rgba(0, 0, 0, 0.75);
-            padding: 25px;
-            border-radius: 15px;
-            backdrop-filter: blur(10px);
+            padding: 30px;
+            border-radius: 20px;
+            backdrop-filter: blur(12px);
             border: 1px solid rgba(255, 255, 255, 0.2);
-            margin-top: 2vh;
+            width: 800px;
+            margin: auto;
         }}
 
-        /* Textos em Branco e Negrito */
+        /* Textos em Branco e Negrito conforme solicitado */
         label, p, span, h3 {{
             color: white !important;
             font-weight: bold !important;
             text-transform: uppercase;
-            font-size: 0.85rem !important;
+            font-size: 0.9rem !important;
         }}
 
         .titulo-dourado {{
             color: #FFD700 !important;
             font-weight: 900 !important;
-            font-size: 1.5rem !important;
+            font-size: 1.8rem !important;
             text-align: center;
-            margin-bottom: 15px;
+            margin-bottom: 20px;
         }}
 
-        /* Compactar campos de upload */
-        [data-testid="stFileUploader"] {{
-            padding-bottom: 0px;
-        }}
-
+        /* Esconde elementos nativos */
         header, footer, [data-testid="stHeader"] {{ display: none !important; }}
         </style>
         """, unsafe_allow_html=True)
@@ -73,9 +73,59 @@ if "pagina" not in st.session_state:
     st.session_state.pagina = "login"
 
 # ==========================================
-# PÁGINA 1: LOGIN
+# PÁGINA 1: LOGIN (Fundo Agrishow)
 # ==========================================
 if not st.session_state.logado:
     aplicar_visual_fixo("OI_AGRISHOW.jpg")
     
-    st.markdown('<div style="position: absolute; top
+    # Bloco de Login
+    st.markdown('<div style="position: absolute; top: 60%; left: 50%; transform: translateX(-50%); width: 350px; text-align: center;">', unsafe_allow_html=True)
+    
+    if os.path.exists("logoTriadetransparente.png"):
+        logo_64 = get_base64("logoTriadetransparente.png")
+        st.markdown(f'<img src="data:image/png;base64,{logo_64}" style="width: 380px; margin-bottom: 10px;">', unsafe_allow_html=True)
+    
+    st.markdown('<div style="background: rgba(0,0,0,0.6); padding: 20px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.1);">', unsafe_allow_html=True)
+    senha = st.text_input("Senha", type="password", label_visibility="collapsed", placeholder="DIGITE A SENHA")
+    if st.button("DESBLOQUEAR ACESSO"):
+        if senha == "triade2026":
+            st.session_state.logado = True
+            st.session_state.pagina = "dados"
+            st.rerun()
+        else:
+            st.error("SENHA INCORRETA")
+    st.markdown('</div></div>', unsafe_allow_html=True)
+
+# ==========================================
+# PÁGINA 2: CONFIGURAÇÃO (Fundo TriadeFundo)
+# ==========================================
+elif st.session_state.pagina == "dados":
+    aplicar_visual_fixo("imagemaptriadefundo.png")
+    
+    # Centralização forçada do formulário
+    st.write("<br><br><br>", unsafe_allow_html=True)
+    _, col_central, _ = st.columns([0.1, 0.8, 0.1])
+    
+    with col_central:
+        st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+        st.markdown('<div class="titulo-dourado">CONFIGURAÇÃO DO PROJETO</div>', unsafe_allow_html=True)
+        
+        c1, c2, c3 = st.columns(3)
+        with c1: st.text_input("NOME DO PRODUTOR")
+        with c2: st.text_input("FAZENDA")
+        with c3: st.text_input("MUNICÍPIO / UF")
+        
+        st.markdown("<hr style='margin: 20px 0; opacity: 0.2;'>", unsafe_allow_html=True)
+        
+        st.markdown("<h3>IMPORTAÇÃO DE ARQUIVOS TÉCNICOS</h3>", unsafe_allow_html=True)
+        up_geojson = st.file_uploader("CONTORNO DA ÁREA (.GEOJSON)", type=["json", "geojson"])
+        up_excel = st.file_uploader("PLANILHA DE DADOS (COLUNAS A-Y)", type=["xlsx"])
+        
+        if st.button("🚀 INICIAR ANÁLISE ESTRATÉGICA"):
+            if up_geojson and up_excel:
+                st.session_state.pagina = "plataforma"
+                st.rerun()
+            else:
+                st.warning("CARREGUE OS DOIS ARQUIVOS PARA CONTINUAR.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
