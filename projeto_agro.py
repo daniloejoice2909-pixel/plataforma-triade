@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 import os
 import base64
+import json
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica 1.0")
@@ -35,93 +36,73 @@ def aplicar_visual_fixo(nome_imagem):
         </style>
         """, unsafe_allow_html=True)
 
-# --- 3. ABA 1: ATRIBUTOS (COM PERSISTÊNCIA) ---
+# --- 3. FUNÇÕES TÉCNICAS (ABAS) ---
+
 def exibir_aba_atributos():
     st.markdown("## ⚙️ Painel de Atributos Estratégicos")
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.subheader("⚪ Calcário")
-        ca_prnt = st.number_input("PRNT %", value=80.0, key='ca_prnt')
-        ca_preco = st.number_input("Preço Calcário (R$/ton)", value=190.0, key='ca_preco')
-    
-    with col2:
-        st.subheader("🟠 Fósforo (P)")
-        # Faixas de P-Rem que você solicitou
-        p_rem_0_4 = st.number_input("NC 0 a 4 (P-Rem)", value=8.0, key='p04')
-        p_rem_4_10 = st.number_input("NC 4.1 a 10 (P-Rem)", value=10.0, key='p410')
-        p_preco = st.number_input("Preço Adubo P (R$/ton)", value=2800.0, key='ppreco')
-        
-    with col3:
-        st.subheader("🔴 Potássio & Gesso")
-        g_fator = st.number_input("Fator Gesso (Argila * 15)", value=15.0, key='gfator')
-        g_preco = st.number_input("Preço Gesso (R$/ton)", value=400.0, key='gpreco')
-        prod_exp = st.number_input("Produtividade Esperada (sc/ha)", value=80.0, key='prod_exp')
+        st.subheader("⚪ Correção de Solo")
+        st.number_input("CaO %", value=36.0, key='ca_cao')
+        st.number_input("MgO %", value=9.0, key='ca_mgo')
+        st.number_input("PRNT %", value=80.0, key='ca_prnt')
+        st.number_input("Ca% desejado na CTC", value=60.0, key='ca_ctc')
+        st.number_input("Preço Calcário (R$/ton)", value=190.0, key='ca_preco')
+        st.number_input("Fator Gesso (Argila g/kg * X)", value=15.0, key='g_fator')
 
-# --- 4. ABA 2: MAPAS FERTILIDADE (CONFIGURAÇÃO IDEAL) ---
+    with col2:
+        st.subheader("🟠 Fósforo (P) - Níveis Críticos")
+        st.number_input("NC 0-4 (P-Rem)", value=8.0, key='p_nc1')
+        st.number_input("NC 4.1-10 (P-Rem)", value=10.0, key='p_nc2')
+        st.number_input("NC 10.1-19 (P-Rem)", value=12.0, key='p_nc3')
+        st.number_input("NC 19.1-30 (P-Rem)", value=15.0, key='p_nc4')
+        st.number_input("NC 30.1-45 (P-Rem)", value=20.0, key='p_nc5')
+        st.number_input("NC 45.1-60 (P-Rem)", value=25.0, key='p_nc6')
+        st.number_input("Preço Adubo P (R$/ton)", value=2800.0, key='p_preco')
+
+    with col3:
+        st.subheader("🔴 Potássio & Metas")
+        st.number_input("K% desejado na CTC", value=3.2, key='k_ctc')
+        st.number_input("Exportação K (kg/sc)", value=1.2, key='k_exp')
+        st.number_input("Produtividade Esperada (sc/ha)", value=80.0, key='prod_meta')
+        st.number_input("Preço Adubo K (R$/ton)", value=2800.0, key='k_preco')
+        st.number_input("Preço Gesso (R$/ton)", value=400.0, key='g_preco')
+
 def exibir_aba_mapas_fertilidade(df):
     st.markdown("### 🗺️ Mapas de Fertilidade (Zonas de Manejo)")
-    logo_path = "LogoTriadeagro.png.png"
-    logo_base64 = get_base64(logo_path)
+    logo_base64 = get_base64("LogoTriadeagro.png.png")
+    colunas = [c for c in df.columns if c not in ['LATITUDE', 'LONGITUDE', 'CAMPO', 'PONTO']]
     
-    # Filtra colunas de dados
-    colunas_dados = [c for c in df.columns if c not in ['LATITUDE', 'LONGITUDE', 'CAMPO', 'PONTO']]
-    
-    for col in colunas_dados:
-        # Limpeza rigorosa para evitar o ValueError
+    for col in colunas:
         df_clean = df.dropna(subset=['LATITUDE', 'LONGITUDE', col])
         if df_clean.empty: continue
         
         st.markdown(f"#### Atributo: {col}")
-        
-        # O segredo do preenchimento e da cor:
-        fig = go.Figure()
-        fig.add_trace(go.Histogram2dContour(
-            x=df_clean['LONGITUDE'],
-            y=df_clean['LATITUDE'],
-            z=df_clean[col],
-            colorscale='coolwarm',
-            ncontours=6,
-            line_width=0,
-            hoverinfo='z',
-            connectgaps=True # Faz o mapa ter "forma" mesmo com poucos pontos
+        fig = go.Figure(go.Histogram2dContour(
+            x=df_clean['LONGITUDE'], y=df_clean['LATITUDE'], z=df_clean[col],
+            colorscale='coolwarm', ncontours=6, line_width=0, connectgaps=True
         ))
         
         if logo_base64:
-            fig.add_layout_image(dict(
-                source=f"data:image/png;base64,{logo_base64}",
-                xref="paper", yref="paper", x=0.5, y=0.5,
-                sizex=0.45, sizey=0.45, xanchor="center", yanchor="middle",
-                opacity=0.12, layer="above"
-            ))
-
-        fig.update_layout(
-            width=1000, height=600,
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='white',
-            margin=dict(l=20, r=20, t=40, b=20),
-            coloraxis_colorbar=dict(thickness=15, title=col)
-        )
+            fig.add_layout_image(dict(source=f"data:image/png;base64,{logo_base64}", xref="paper", yref="paper", 
+                                     x=0.5, y=0.5, sizex=0.4, sizey=0.4, xanchor="center", yanchor="middle", opacity=0.12))
+        
+        fig.update_layout(width=1000, height=600, paper_bgcolor='white', plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig, use_container_width=True)
 
-# --- 5. ABA 3: RECOMENDAÇÕES (V43) ---
 def exibir_aba_recomendacoes(df):
-    st.markdown("## 💰 Recomendações e Custos por Zona")
-    # Lógica de cálculo baseada nos inputs da Aba 1
-    df['Dose_Gesso'] = (df['ARGILA'] * st.session_state.gfator).clip(lower=400, upper=900)
-    df['Custo_HA'] = (df['Dose_Gesso']/1000) * st.session_state.gpreco
+    st.markdown("## 💰 Recomendações Técnicas V43")
+    # Exemplo de cálculo usando o fator que você definiu (Argila * 15)
+    df['Recomendacao_Gesso'] = (df['ARGILA'] * st.session_state.g_fator).clip(lower=400, upper=900)
+    df['Custo_Invest'] = (df['Recomendacao_Gesso']/1000) * st.session_state.g_preco
     
-    # Criando as 6 zonas de investimento
-    df['Zona'] = pd.qcut(df['Custo_HA'].rank(method='first'), 6, labels=["Z1", "Z2", "Z3", "Z4", "Z5", "Z6"])
-    
-    resumo = df.groupby('Zona', observed=True).agg({
-        'Dose_Gesso': 'mean',
-        'Custo_HA': 'mean'
-    }).reset_index()
-    
+    df['Zona'] = pd.qcut(df['Custo_Invest'].rank(method='first'), 6, labels=["Z1", "Z2", "Z3", "Z4", "Z5", "Z6"])
+    resumo = df.groupby('Zona', observed=True).agg({'Recomendacao_Gesso': 'mean', 'Custo_Invest': 'mean'}).reset_index()
     st.table(resumo.style.format(precision=2))
 
-# --- 6. FLUXO DE NAVEGAÇÃO ---
+# --- 4. FLUXO DE NAVEGAÇÃO ---
+
 if "logado" not in st.session_state: st.session_state.logado = False
 if "pagina" not in st.session_state: st.session_state.pagina = "login"
 
@@ -129,24 +110,38 @@ if not st.session_state.logado:
     aplicar_visual_fixo("OI_AGRISHOW.jpg")
     st.markdown('<div style="height: 55vh;"></div>', unsafe_allow_html=True)
     st.markdown('<div class="glass-panel" style="width: 400px; text-align: center;">', unsafe_allow_html=True)
-    logo_64 = get_base64("logoTriadetransparente.png")
-    if logo_64: st.markdown(f'<img src="data:image/png;base64,{logo_64}" style="width: 300px;">', unsafe_allow_html=True)
-    senha = st.text_input("Acesso", type="password", placeholder="CHAVE DE ACESSO", label_visibility="collapsed")
-    if st.button("DESBLOQUEAR"):
+    logo = get_base64("logoTriadetransparente.png")
+    if logo: st.markdown(f'<img src="data:image/png;base64,{logo}" style="width: 300px; margin-bottom: 15px;">', unsafe_allow_html=True)
+    senha = st.text_input("Acesso", type="password", placeholder="SENHA", label_visibility="collapsed")
+    if st.button("DESBLOQUEAR PLATAFORMA"):
         if senha == "triade2026": st.session_state.logado = True; st.session_state.pagina = "dados"; st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
 elif st.session_state.pagina == "dados":
     aplicar_visual_fixo("imagemaptriadefundo.png")
-    st.markdown('<div style="height: 25vh;"></div>', unsafe_allow_html=True)
+    st.markdown('<div style="height: 20vh;"></div>', unsafe_allow_html=True)
     with st.container():
         st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
-        st.markdown("<h2 style='color:#FFD700; text-align:center;'>CONFIGURAÇÃO</h2>", unsafe_allow_html=True)
-        up_excel = st.file_uploader("CARREGAR PLANILHA (.XLSX)", type=["xlsx"])
-        if st.button("🚀 INICIAR"):
-            if up_excel:
-                st.session_state.dados_excel = pd.read_excel(up_excel)
-                st.session_state.pagina = "plataforma"; st.rerun()
+        st.markdown("<h2 style='color:#FFD700; text-align:center;'>⚙️ CONFIGURAÇÃO DO PROJETO</h2>", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        with c1: produtor = st.text_input("NOME DO PRODUTOR")
+        with c2: fazenda = st.text_input("FAZENDA")
+        with c3: municipio = st.text_input("MUNICÍPIO / UF")
+        
+        col_u1, col_u2 = st.columns(2)
+        with col_u1:
+            up_geo = st.file_uploader("📦 ARQUIVO DE CONTORNO (.GEOJSON)", type=["geojson", "json"])
+        with col_u2:
+            up_xlsx = st.file_uploader("📊 PLANILHA DE DADOS (.XLSX)", type=["xlsx"])
+            
+        if st.button("🚀 INICIAR ANÁLISE ESTRATÉGICA"):
+            if up_xlsx and up_geo:
+                st.session_state.dados_excel = pd.read_excel(up_xlsx)
+                st.session_state.contorno = json.load(up_geo)
+                st.session_state.pagina = "plataforma"
+                st.rerun()
+            else:
+                st.error("ERRO: Carregue o arquivo de Contorno E a Planilha de Dados.")
         st.markdown('</div>', unsafe_allow_html=True)
 
 elif st.session_state.pagina == "plataforma":
@@ -156,6 +151,8 @@ elif st.session_state.pagina == "plataforma":
     with tab1: exibir_aba_atributos()
     with tab2: exibir_aba_mapas_fertilidade(st.session_state.dados_excel)
     with tab3: exibir_aba_recomendacoes(st.session_state.dados_excel)
-    with tab4: 
+    with tab4:
         st.subheader("🛰️ Integração Sentinel Hub")
-        st.info("Chaves de acesso pendentes de configuração.")
+        st.text_input("SENTINEL_CLIENT_ID", type="password")
+        st.text_input("SENTINEL_CLIENT_SECRET", type="password")
+        st.button("CONECTAR SATÉLITE")
