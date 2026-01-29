@@ -12,13 +12,13 @@ def get_base64(bin_file):
         return base64.b64encode(data).decode()
     return ""
 
-# --- 2. CSS COM CONTRASTE REFORÇADO E BOTÕES VISÍVEIS ---
+# --- 2. CSS PARA TRAVAMENTO TOTAL E CONTRASTE ALTO ---
 def aplicar_visual_fixo(nome_imagem):
     bin_str = get_base64(nome_imagem)
     if bin_str:
         st.markdown(f"""
         <style>
-        /* Bloqueio de rolagem total */
+        /* Trava de visualização sem rolagem */
         html, body, [data-testid="stAppViewContainer"], [data-testid="stMainViewContainer"] {{
             height: 100vh !important;
             width: 100vw !important;
@@ -33,18 +33,19 @@ def aplicar_visual_fixo(nome_imagem):
             background-position: center;
         }}
 
-        /* Painel de vidro escurecido */
+        /* Painel de vidro escurecido para proteção do texto */
         .glass-panel {{
             background: rgba(0, 0, 0, 0.85); 
             padding: 25px;
             border-radius: 15px;
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.3);
-            width: 800px;
+            width: 850px;
             margin: auto;
+            box-shadow: 0px 10px 30px rgba(0,0,0,0.7);
         }}
 
-        /* Textos Branco e Negrito com Sombra */
+        /* Textos em Branco, Negrito e com Sombra Projetada */
         label, p, span, h3 {{
             color: #FFFFFF !important;
             font-weight: bold !important;
@@ -56,18 +57,19 @@ def aplicar_visual_fixo(nome_imagem):
         .titulo-dourado {{
             color: #FFD700 !important;
             font-weight: 900 !important;
-            font-size: 1.6rem !important;
+            font-size: 1.7rem !important;
             text-align: center;
             margin-bottom: 15px;
             text-shadow: 3px 3px 6px rgba(0,0,0,0.9) !important;
         }}
 
-        /* --- AJUSTE DOS BOTÕES "BROWSE FILES" --- */
+        /* Ajuste dos botões "Browse Files" - Fundo Branco, Letra Preta */
         [data-testid="stFileUploader"] section button {{
             background-color: #FFFFFF !important;
             color: #000000 !important;
             font-weight: bold !important;
             border-radius: 5px !important;
+            border: 1px solid #ccc !important;
         }}
         
         /* Inputs de texto Brancos com letra Preta */
@@ -88,7 +90,7 @@ if "pagina" not in st.session_state:
     st.session_state.pagina = "login"
 
 # ==========================================
-# PÁGINA 1: LOGIN (Fundo Agrishow)
+# PÁGINA 1: LOGIN (Fundo OI_AGRISHOW)
 # ==========================================
 if not st.session_state.logado:
     aplicar_visual_fixo("OI_AGRISHOW.jpg")
@@ -100,14 +102,14 @@ if not st.session_state.logado:
         st.markdown(f'<img src="data:image/png;base64,{logo_64}" style="width: 380px; margin-bottom: 5px; filter: drop-shadow(0px 0px 10px rgba(0,0,0,1));">', unsafe_allow_html=True)
     
     st.markdown('<div style="background: rgba(0,0,0,0.8); padding: 20px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.2);">', unsafe_allow_html=True)
-    senha = st.text_input("Senha", type="password", label_visibility="collapsed", placeholder="CHAVE DE ACESSO")
+    senha = st.text_input("Acesso", type="password", label_visibility="collapsed", placeholder="CHAVE DE ACESSO")
     if st.button("DESBLOQUEAR PLATAFORMA"):
         if senha == "triade2026":
             st.session_state.logado = True
             st.session_state.pagina = "dados"
             st.rerun()
         else:
-            st.error("CHAVE INVÁLIDA")
+            st.error("SENHA INCORRETA")
     st.markdown('</div></div>', unsafe_allow_html=True)
 
 # ==========================================
@@ -123,4 +125,23 @@ elif st.session_state.pagina == "dados":
         st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
         st.markdown('<div class="titulo-dourado">⚙️ CONFIGURAÇÃO DO PROJETO</div>', unsafe_allow_html=True)
         
-        c1, c2, c3 =
+        # Correção da linha 126: Atribuindo as colunas corretamente
+        c1, c2, c3 = st.columns(3)
+        with c1: st.text_input("NOME DO PRODUTOR")
+        with c2: st.text_input("FAZENDA")
+        with c3: st.text_input("MUNICÍPIO / UF")
+        
+        st.markdown("<hr style='margin: 15px 0; opacity: 0.3;'>", unsafe_allow_html=True)
+        
+        st.markdown("<h3>IMPORTAÇÃO DE ARQUIVOS (A-Y)</h3>", unsafe_allow_html=True)
+        up_geojson = st.file_uploader("CONTORNO DA ÁREA (.GEOJSON)", type=["json", "geojson"])
+        up_excel = st.file_uploader("PLANILHA DE DADOS (.XLSX)", type=["xlsx"])
+        
+        if st.button("🚀 INICIAR ANÁLISE ESTRATÉGICA"):
+            if up_geojson and up_excel:
+                st.session_state.pagina = "plataforma"
+                st.rerun()
+            else:
+                st.warning("CARREGUE OS ARQUIVOS PARA CONTINUAR")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
