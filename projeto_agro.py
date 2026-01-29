@@ -91,13 +91,16 @@ def exibir_aba_mapas_fertilidade(df):
     colunas_dados = [c for c in df.columns if c not in ['LATITUDE', 'LONGITUDE', 'CAMPO', 'PONTO']]
     
     for col in colunas_dados:
-        df_clean = df[df[col].notna() & (df[col] != 0)].copy()
-        if df_clean.empty: continue
+        df_clean = df[df[col].notna()].copy()
+        if df_clean.empty or df_clean[col].sum() == 0: continue
         
         st.markdown(f"#### Atributo: {col}")
+        
+        # Correção do Erro: Usando lista de cores explícita para evitar o ValueError do validador
         fig = go.Figure(go.Histogram2dContour(
             x=df_clean['LONGITUDE'], y=df_clean['LATITUDE'], z=df_clean[col],
-            colorscale='coolwarm', ncontours=6, line_width=0
+            colorscale=[[0, 'blue'], [0.5, 'yellow'], [1, 'red']], # Coolwarm manual e seguro
+            ncontours=6, line_width=0
         ))
         
         if logo_base64:
@@ -108,26 +111,26 @@ def exibir_aba_mapas_fertilidade(df):
                 opacity=0.15, layer="above"
             ))
             
-        fig.update_layout(width=900, height=500, margin={"r":10,"t":10,"l":10,"b":10},
-                          coloraxis_colorbar=dict(thickness=12, tickfont=dict(size=9, color="white")))
+        fig.update_layout(
+            width=900, height=500, margin={"r":10,"t":10,"l":10,"b":10},
+            plot_bgcolor='white', paper_bgcolor='white',
+            xaxis=dict(showgrid=False, zeroline=False), yaxis=dict(showgrid=False, zeroline=False),
+            coloraxis_colorbar=dict(thickness=12, tickfont=dict(size=9, color="black"))
+        )
         st.plotly_chart(fig, use_container_width=True)
-        st.markdown(f"<div style='text-align: center; font-size: 11px; color: #CCCCCC;'>MÍN: {df_clean[col].min():.2f} | MÉD: {df_clean[col].mean():.2f} | MÁX: {df_clean[col].max():.2f}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align: center; font-size: 11px; color: #333;'>MÍN: {df_clean[col].min():.2f} | MÉD: {df_clean[col].mean():.2f} | MÁX: {df_clean[col].max():.2f}</div>", unsafe_allow_html=True)
 
 def exibir_aba_recomendacoes(df, attr):
     st.markdown("## 💰 Recomendações Técnicas e Custos por Zona")
     df_calc = df.fillna(0).copy()
     
-    # Cálculos
     df_calc['Dose_Gesso'] = (df_calc['ARGILA'] * attr['gesso_fator']).clip(lower=attr['gesso_min'], upper=attr['gesso_max'])
     exp_k = attr['prod_esperada'] * attr['k_export_sc']
     df_calc['Dose_K2O'] = exp_k + (((attr['k_perc_ctc'] - df_calc['K%']).clip(lower=0) / 100) * df_calc['CTC'] * 391 * 2)
     
     def calc_p(row):
         prem = row['P-REM']
-        if prem <= 4: nc = attr['p_nc1']
-        elif prem <= 10: nc = attr['p_nc2']
-        elif prem <= 19: nc = attr['p_nc3']
-        else: nc = attr['p_nc4']
+        nc = attr['p_nc1'] if prem <= 4 else attr['p_nc2'] if prem <= 10 else attr['p_nc3'] if prem <= 19 else attr['p_nc4']
         return (attr['prod_esperada'] * attr['p_export_sc']) - ((row['P'] - nc) * 8)
 
     df_calc['Dose_P2O5'] = df_calc.apply(calc_p, axis=1).clip(lower=0)
@@ -148,7 +151,6 @@ def exibir_aba_recomendacoes(df, attr):
 if "logado" not in st.session_state: st.session_state.logado = False
 if "pagina" not in st.session_state: st.session_state.pagina = "login"
 
-# TELA 1: LOGIN
 if not st.session_state.logado:
     aplicar_visual_fixo("OI_AGRISHOW.jpg")
     st.markdown('<div style="position: absolute; top: 58%; left: 50%; transform: translateX(-50%); width: 380px; text-align: center;">', unsafe_allow_html=True)
@@ -160,7 +162,6 @@ if not st.session_state.logado:
             st.session_state.logado = True; st.session_state.pagina = "dados"; st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
 
-# TELA 2: CONFIGURAÇÃO E UPLOAD
 elif st.session_state.pagina == "dados":
     aplicar_visual_fixo("imagemaptriadefundo.png")
     st.write("<br><br><br>", unsafe_allow_html=True)
@@ -184,9 +185,17 @@ elif st.session_state.pagina == "dados":
                 st.warning("CARREGUE AMBOS OS ARQUIVOS PARA CONTINUAR")
         st.markdown('</div>', unsafe_allow_html=True)
 
-# TELA 3: PLATAFORMA (ABAS)
 elif st.session_state.pagina == "plataforma":
-    st.markdown("<style>[data-testid='stAppViewContainer']{background-image:none !important; background-color:#0e1117 !important; overflow:auto !important;}</style>", unsafe_allow_html=True)
+    # --- FUNDO BRANCO E TEXTO PRETO PARA MELHOR LEITURA ---
+    st.markdown("""
+        <style>
+        [data-testid='stAppViewContainer']{ background-image:none !important; background-color: white !important; overflow:auto !important; }
+        .stTabs [data-baseweb="tab-list"] button { color: black !important; font-weight: bold !important; }
+        h2, h3, h4, label, p { color: black !important; text-shadow: none !important; }
+        .stTable { background-color: #f8f9fa; border-radius: 10px; }
+        </style>
+    """, unsafe_allow_html=True)
+    
     aba1, aba2, aba3, aba4 = st.tabs(["⚙️ ATRIBUTOS", "🗺️ MAPAS FERTILIDADE", "💰 RECOMENDAÇÕES", "🛰️ SATÉLITE"])
     
     with aba1:
@@ -199,4 +208,3 @@ elif st.session_state.pagina == "plataforma":
         st.subheader("🛰️ Monitoramento Sentinel Hub")
         st.text_input("SENTINEL CLIENT ID", type="password")
         st.text_input("SENTINEL CLIENT SECRET", type="password")
-        st.info("Conexão pronta para integração de NDVI/EVI.")
