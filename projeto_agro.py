@@ -318,3 +318,70 @@ def exibir_aba_mapas_fertilidade(df, contorno_geojson):
             MÍN: {v_min:.2f} | MÉD: {v_med:.2f} | MÁX: {v_max:.2f}
             </div>""", unsafe_allow_html=True
         )
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+def exibir_aba_recomendacoes(df, attr):
+    st.markdown("## 💰 Recomendações Técnicas e Custos por Zona")
+    
+    # --- 1. CÁLCULOS TÉCNICOS (LOGICA DANILO) ---
+    
+    # GESSO
+    df['Dose_Gesso'] = df['ARGILA'] * attr['gesso_fator']
+    df['Dose_Gesso'] = df['Dose_Gesso'].clip(lower=attr['gesso_min'], upper=attr['gesso_max'])
+    
+    # POTÁSSIO (K)
+    # 1.2 kg/sc * Produtividade + Elevação para 3.2% da CTC
+    exp_k = attr['prod_esperada'] * attr['k_export_sc']
+    # Simplificação da necessidade de elevação (K_necessario = (K_desejado% - K_atual%) * CTC)
+    df['Elevacao_K'] = ((attr['k_perc_ctc'] - df['K%']).clip(lower=0) / 100) * df['CTC'] * 391 * 2 
+    df['Dose_K2O'] = exp_k + df['Elevacao_K']
+    
+    # FÓSFORO (P)
+    def calcular_p(row):
+        # Define Nível Crítico (NC) baseado no P-REM
+        prem = row['P-REM']
+        if prem <= 4: nc = attr['p_nc1']
+        elif prem <= 10: nc = attr['p_nc2']
+        elif prem <= 19: nc = attr['p_nc3']
+        elif prem <= 30: nc = attr['p_nc4']
+        elif prem <= 45: nc = attr['p_nc5']
+        else: nc = attr['p_nc6']
+        
+        export_p = attr['prod_esperada'] * attr['p_export_sc']
+        fator_t = 8 # Padrão argiloso (editável nos atributos)
+        
+        dif_p = row['P'] - nc
+        # Se P solo > NC (Gordura), subtrai da exportação. Se <, soma correção.
+        return export_p - (dif_p * fator_t)
+
+    df['Dose_P2O5'] = df.apply(calcular_p, axis=1).clip(lower=0)
+
+    # CALCÁRIO (Maior dose entre elevar Ca ou Mg)
+    nec_ca = ((attr['ca_ctc_des'] - df['CA%']).clip(lower=0) / 100) * df['CTC']
+    nec_mg = ((attr['mg_ctc_des'] - df['MG%']).clip(lower=0) / 100) * df['CTC']
+    df['Dose_Calcario'] = np.maximum(nec_ca, nec_mg) * (100 / attr['ca_prnt']) * 1000 # kg/ha
+
+    # --- 2. CÁLCULO DE CUSTOS (R$/ha) ---
+    df['Custo_Gesso'] = (df['Dose_Gesso'] / 1000) * attr['gesso_preco']
+    df['Custo_P'] = (df['Dose_P2O5'] / (attr['p_adubo_perc']/100) / 1000) * attr['p_preco']
+    df['Custo_K'] = (df['Dose_K2O'] / (attr['k_adubo_perc']/100) / 1000) * attr['k_preco']
+    df['Custo_Calcario'] = (df['Dose_Calcario'] / 1000) * attr['ca_preco']
+    
+    df['Custo_Total_HA'] = df['Custo_Gesso'] + df['Custo_P'] + df['Custo_K'] + df['Custo_Calcario']
+
+    # --- 3. EXIBIÇÃO POR ZONAS DE CUSTO ---
+    df['Zona_Investimento'] = pd.qcut(df['Custo_Total_HA'], 6, labels=["Muito Baixo", "Baixo", "Médio-Baixo", "Médio-Alto", "Alto", "Crítico"])
+    
+    resumo_zonas = df.groupby('Zona_Investimento', observed=True).agg({
+        'Dose_Gesso': 'mean',
+        'Dose_P2O5': 'mean',
+        'Dose_K2O': 'mean',
+        'Dose_Calcario': 'mean',
+        'Custo_Total_HA': 'mean'
+    }).reset_index()
+
+    st.table(resumo_zonas.style.format(precision=2))
+
+    st.info("💡 Os custos acima são baseados nos preços editados na aba de Atributos.")
