@@ -11,50 +11,35 @@ def get_base64(bin_file):
         data = f.read()
     return base64.b64encode(data).decode()
 
-# --- 2. CSS PARA IMAGEM FULLSCREEN E ZERO ROLAGEM ---
-def aplicar_estilo_fixo():
-    img_fundo = "OI_AGRISHOW.jpg"
-    img_logo = "logoTriadetransparente.png"
-    
-    if os.path.exists(img_fundo):
-        bin_str = get_base64(img_fundo)
+# --- 2. FUNÇÃO DE ESTILO DINÂMICO ---
+def aplicar_estilo_por_pagina(nome_imagem, trava_rolagem=True):
+    if os.path.exists(nome_imagem):
+        bin_str = get_base64(nome_imagem)
+        rolagem = "hidden" if trava_rolagem else "auto"
         st.markdown(f"""
         <style>
-        /* Bloqueio de rolagem e ajuste de imagem */
-        html, body, [data-testid="stAppViewContainer"], [data-testid="stMainViewContainer"] {{
+        html, body, [data-testid="stAppViewContainer"] {{
             height: 100vh !important;
-            width: 100vw !important;
-            overflow: hidden !important;
-            margin: 0; padding: 0;
+            overflow: {rolagem} !important;
         }}
         .stApp {{
-            background-image: url("data:image/jpg;base64,{bin_str}");
+            background-image: url("data:image/png;base64,{bin_str}");
             background-size: 100% 100%;
             background-repeat: no-repeat;
             background-position: center;
         }}
-        /* Remove espaços internos do Streamlit que causam rolagem */
-        [data-testid="stVerticalBlock"] {{ gap: 0; }}
-        .block-container {{ padding: 0 !important; }}
-
-        .triade-login-container {{
-            position: absolute;
-            top: 65%; left: 50%;
-            transform: translateX(-50%);
-            width: 320px;
-            text-align: center;
-            z-index: 1000;
-        }}
-        .logo-triade {{ width: 380px; filter: drop-shadow(0px 4px 10px rgba(0,0,0,0.6)); }}
-        .login-box-compacta {{
-            background-color: rgba(0, 0, 0, 0.65);
-            padding: 15px; border-radius: 12px;
-            backdrop-filter: blur(8px); border: 1px solid rgba(255, 255, 255, 0.1);
+        /* Container de vidro para a segunda página */
+        .glass-panel {{
+            background: rgba(0, 0, 0, 0.7);
+            padding: 30px;
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: white;
         }}
         header, footer, [data-testid="stHeader"] {{ display: none !important; }}
         </style>
         """, unsafe_allow_html=True)
-    return img_logo
 
 # --- 3. LÓGICA DE NAVEGAÇÃO ---
 if "logado" not in st.session_state:
@@ -62,49 +47,65 @@ if "logado" not in st.session_state:
 if "pagina" not in st.session_state:
     st.session_state.pagina = "login"
 
-# --- TELA DE LOGIN ---
+# ==========================================
+# PÁGINA 1: LOGIN (Fundo OI_AGRISHOW)
+# ==========================================
 if not st.session_state.logado:
-    logo_path = aplicar_estilo_fixo()
-    st.markdown('<div class="triade-login-container">', unsafe_allow_html=True)
-    if os.path.exists(logo_path):
-        logo_64 = get_base64(logo_path)
-        st.markdown(f'<img src="data:image/png;base64,{logo_64}" class="logo-triade">', unsafe_allow_html=True)
+    aplicar_estilo_por_pagina("OI_AGRISHOW.jpg", trava_rolagem=True)
     
-    st.markdown('<div class="login-box-compacta">', unsafe_allow_html=True)
+    st.markdown('<div style="position: absolute; top: 60%; left: 50%; transform: translateX(-50%); width: 350px; text-align: center;">', unsafe_allow_html=True)
+    
+    # Logo
+    if os.path.exists("logoTriadetransparente.png"):
+        logo_64 = get_base64("logoTriadetransparente.png")
+        st.markdown(f'<img src="data:image/png;base64,{logo_64}" style="width: 380px; margin-bottom: 10px;">', unsafe_allow_html=True)
+    
+    # Caixa de Login
+    st.markdown('<div style="background: rgba(0,0,0,0.6); padding: 20px; border-radius: 15px; border: 1px solid rgba(255,255,255,0.2);">', unsafe_allow_html=True)
     senha = st.text_input("Senha", type="password", label_visibility="collapsed", placeholder="Senha de Acesso")
     if st.button("DESBLOQUEAR PLATAFORMA"):
         if senha == "triade2026":
             st.session_state.logado = True
             st.session_state.pagina = "dados"
             st.rerun()
-        else:
-            st.error("Chave Inválida")
     st.markdown('</div></div>', unsafe_allow_html=True)
 
-# --- TELA DE DADOS (PÁGINA 2) ---
+# ==========================================
+# PÁGINA 2: CONFIGURAÇÃO (Fundo imagemaptriadefundo)
+# ==========================================
 elif st.session_state.pagina == "dados":
-    st.markdown("""<style>.stApp { background: #1a1a1a; } .block-container { padding: 2rem !important; overflow: auto !important; }</style>""", unsafe_allow_html=True)
+    aplicar_estilo_por_pagina("imagemaptriadefundo.png", trava_rolagem=False)
     
-    st.title("📂 Importação de Dados - Tríade Agro")
+    # Centralizando o painel de configuração
+    _, col_central, _ = st.columns([0.1, 0.8, 0.1])
     
-    with st.expander("👤 Informações do Produtor", expanded=True):
-        col1, col2, col3 = st.columns(3)
-        produtor = col1.text_input("Nome do Produtor")
-        fazenda = col2.text_input("Fazenda")
-        municipio = col3.text_input("Município")
-
-    with st.container():
-        st.subheader("📤 Upload de Arquivos")
-        up_contorno = st.file_uploader("Arquivo de Contorno (GeoJSON)", type=["json", "geojson"])
-        up_planilha = st.file_uploader("Planilha de Dados (Colunas A a Y)", type=["xlsx"])
-
-    if st.button("⚙️ PROCESSAR DADOS E ABRIR PLATAFORMA"):
-        if up_contorno and up_planilha:
-            # Lógica para ler a planilha respeitando A-Y
-            df = pd.read_excel(up_planilha)
-            st.session_state.dados_completos = df
-            st.session_state.pagina = "plataforma"
-            st.success("Dados carregados com sucesso!")
-            st.rerun()
-        else:
-            st.warning("Aguardando o upload de ambos os arquivos.")
+    with col_central:
+        st.write("<br><br>", unsafe_allow_html=True)
+        st.markdown('<div class="glass-panel">', unsafe_allow_html=True)
+        st.markdown("<h2 style='color: #FFD700;'>⚙️ Configuração do Projeto</h2>", unsafe_allow_html=True)
+        
+        # Dados do Produtor
+        c1, c2, c3 = st.columns(3)
+        produtor = c1.text_input("Nome do Produtor")
+        fazenda = c2.text_input("Fazenda")
+        municipio = c3.text_input("Município/UF")
+        
+        st.markdown("<hr style='opacity: 0.2;'>", unsafe_allow_html=True)
+        
+        # Uploads
+        st.subheader("Upload de Arquivos")
+        st.write("Selecione o contorno da área e a planilha de dados (Colunas A a Y).")
+        
+        up_geojson = st.file_uploader("Arquivo de Contorno (GeoJSON)", type=["json", "geojson"])
+        up_excel = st.file_uploader("Planilha de Dados (Excel)", type=["xlsx"])
+        
+        if st.button("🚀 PROCESSAR E ABRIR PLATAFORMA"):
+            if up_geojson and up_excel:
+                # Aqui entra o motor de leitura A-Y que definimos
+                st.session_state.pagina = "plataforma"
+                st.success("Dados carregados! Abrindo painel técnico...")
+                st.rerun()
+            else:
+                st.error("Por favor, carregue ambos os arquivos para continuar.")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
