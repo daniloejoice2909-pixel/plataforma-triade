@@ -7,5 +7,6 @@ pykrige
 shapely
 scipy
 matplotlib
-openpyxl
 fpdf2
+openpyxl
+Pillow
