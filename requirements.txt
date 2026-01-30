@@ -1,5 +1,10 @@
+streamlit
 pandas
 numpy
-plotly
+folium
+streamlit-folium
+pykrige
+shapely
+scipy
+matplotlib
 openpyxl
-fpdf2
