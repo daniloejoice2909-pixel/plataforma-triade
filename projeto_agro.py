@@ -1,151 +1,128 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import folium
 import json
-import os
-import base64
-from fpdf import FPDF
-from datetime import datetime
+import io
+from streamlit_folium import folium_static
+from pykrige.ok import OrdinaryKriging
+from shapely.geometry import shape, Point
+import matplotlib.pyplot as plt
 
-# --- 1. CONFIGURAÇÕES E ESTILO ---
-st.set_page_config(layout="wide", page_title="Tríade Agro Estratégica 1.0")
+# --- 1. CONFIGURAÇÃO DA INTERFACE ---
+st.set_page_config(layout="wide", page_title="Tríade Agro - Estratégica 1.0")
 
-def get_base64(bin_file):
-    if os.path.exists(bin_file):
-        with open(bin_file, 'rb') as f:
-            return base64.b64encode(f.read()).decode()
-    return ""
+if "pagina" not in st.session_state: st.session_state.pagina = "Entrada"
 
-# --- 2. MOTOR DE INTERPOLAÇÃO IDW ---
-def calcular_idw(x, y, z, xi, yi, p=2.5):
-    dist = np.sqrt((x[:, None] - xi[None, :])**2 + (y[:, None] - yi[None, :])**2)
-    dist = np.where(dist == 0, 1e-12, dist)
-    weights = 1.0 / (dist**p)
-    return np.dot(weights.T, z) / weights.sum(axis=0)
-
-# --- 3. PÁGINA DE ENTRADA (LOGIN) ---
-if "logado" not in st.session_state: st.session_state.logado = False
-
-if not st.session_state.logado:
-    st.markdown("<h1 style='text-align:center;'>Tríade Agro Estratégica</h1>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1,1,1])
+# --- 2. PÁGINA DE ENTRADA (LOGIN) ---
+if st.session_state.pagina == "Entrada":
+    st.markdown("<h1 style='text-align:center;'>🛰️ Tríade Agro | Solo & Precisão</h1>", unsafe_allow_html=True)
+    c1, c2, c3 = st.columns([1,1.5,1])
     with c2:
-        logo = "LogoTriadeagro.png.png"
-        if os.path.exists(logo): st.image(logo)
-        senha = st.text_input("Chave de Acesso", type="password")
-        if st.button("DESBLOQUEAR"):
+        st.info("Acesso Restrito - Consultoria Estratégica")
+        senha = st.text_input("Senha", type="password")
+        if st.button("ACESSAR SISTEMA"):
             if senha == "triade2026":
-                st.session_state.logado = True
+                st.session_state.pagina = "Upload"
                 st.rerun()
-else:
-    # --- 4. SEGUNDA PÁGINA: UPLOAD E METADADOS ---
-    with st.sidebar:
-        st.image("LogoTriadeagro.png.png") if os.path.exists("LogoTriadeagro.png.png") else st.title("Tríade")
-        st.header("📍 Identificação")
-        produtor = st.text_input("Nome do Produtor")
-        fazenda = st.text_input("Nome da Fazenda")
-        municipio = st.text_input("Município")
-        st.markdown("---")
-        f_geo = st.file_uploader("Contorno (.geojson)", type=['geojson'])
-        f_xls = st.file_uploader("Dados (.xlsx)", type=['xlsx'])
+
+# --- 3. PÁGINA DE UPLOAD (CONTORNO + DADOS) ---
+elif st.session_state.pagina == "Upload":
+    st.header("📂 Importação de Dados da Fazenda")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.session_state.info = {
+            "produtor": st.text_input("Produtor"),
+            "fazenda": st.text_input("Fazenda"),
+            "municipio": st.text_input("Município")
+        }
+    with col2:
+        f_contorno = st.file_uploader("Contorno (.json)", type=['json', 'geojson'])
+        f_dados = st.file_uploader("Planilha de Solo (A a Y)", type=['xlsx'])
+
+    if f_contorno and f_dados:
+        st.session_state.contorno = json.load(f_contorno)
+        # Mapeamento conforme sua sequência A-Y
+        df = pd.read_excel(f_dados)
+        col_names = [
+            'LAT', 'LON', 'CAMPO', 'PONTO', 'ARGILA', 'PREM', 'P', 'CA', 'MG', 'K', 
+            'AL', 'HAL', 'S', 'B', 'MN', 'ZN', 'CU', 'FE', 'MO', 'PH', 'CTC', 
+            'CA_PERC', 'MG_PERC', 'K_PERC', 'CAMG'
+        ]
+        df.columns = col_names[:len(df.columns)]
+        st.session_state.dados = df
         
-    if not f_geo or not f_xls:
-        st.info("Por favor, carregue o Contorno e a Planilha para abrir a plataforma.")
-    else:
-        # Processamento inicial de dados (Sequência de colunas A a Y)
-        if "dados" not in st.session_state:
-            df = pd.read_excel(f_xls)
-            # Mapeamento conforme seu script (A=0, B=1...)
-            col_map = {0:'LAT', 1:'LON', 2:'CAMPO', 3:'PONTO', 4:'ARGILA', 5:'P-REM', 6:'P', 
-                       7:'CA', 8:'MG', 9:'K', 10:'AL', 11:'H_AL', 12:'S', 13:'B', 14:'MN', 
-                       15:'ZN', 16:'CU', 17:'FE', 18:'MO', 19:'PH_CACL2', 20:'CTC', 
-                       21:'CA_PERC', 22:'MG_PERC', 23:'K_PERC', 24:'CA_MG'}
-            df.columns = [col_map.get(i, f"COL_{i}") for i in range(len(df.columns))]
-            st.session_state.dados = df
-            st.session_state.geo = json.load(f_geo)
+        if st.button("🚀 GERAR PLATAFORMA"):
+            st.session_state.pagina = "Dashboard"
+            st.rerun()
 
-        # --- 5. TERCEIRA PÁGINA: ABAS DA PLATAFORMA ---
-        tabs = st.tabs(["⚙️ Atributos", "🔍 Fertilidade", "🏠 Recomendações", "🛰️ Satélite", "🗺️ Zonas", "🌱 RSTV", "🌱 RNTV", "🌱 RDTV", "📄 Relatório"])
+# --- 4. PÁGINA DASHBOARD (ABAS TÉCNICAS) ---
+elif st.session_state.pagina == "Dashboard":
+    tab_attr, tab_fert, tab_recom, tab_zonas, tab_relat = st.tabs([
+        "⚙️ Atributos", "🔍 Mapas de Fertilidade", "🏠 Recomendações", "🗺️ Zonas de Manejo", "📄 Relatório & Exportação"
+    ])
 
-        # --- ABA ATRIBUTOS ---
-        with tabs[0]:
-            st.header("Configuração de Recomendação v43")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.subheader("Calcário")
-                ca_desejado = st.number_input("Ca% na CTC desejado", value=60.0)
-                mg_desejado = st.number_input("Mg% na CTC desejado", value=18.0)
-                prnt = st.number_input("PRNT do Calcário (%)", value=80.0)
-                preco_calcario = st.number_input("Preço Calcário (R$/t)", value=190.0)
+    df = st.session_state.dados
+
+    # --- ABA: ATRIBUTOS (PARÂMETROS EDITÁVEIS) ---
+    with tab_attr:
+        st.subheader("Configuração de Insumos e Metas")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("**Calcário**")
+            p_cao = st.number_input("CaO %", 36.0); p_mgo = st.number_input("MgO %", 9.0)
+            p_prnt = st.number_input("PRNT %", 80.0); p_cadir = st.number_input("Ca% Desejado", 60.0)
+            p_mgdir = st.number_input("Mg% Desejado", 18.0); p_precalc = st.number_input("Preço Calcário", 190.0)
+        with c2:
+            st.markdown("**Fósforo**")
+            p_prodesp = st.number_input("Produtividade (sc/ha)", 80.0); p_export_p = st.number_input("Exp. P (kg/sc)", 0.8)
+            p_perc_adubo = st.number_input("% P2O5 Adubo", 21.0); p_pre_p = st.number_input("Preço Adubo P", 2800.0)
+            f_m_arg = st.number_input("Fator M. Argiloso", 10.0); f_arg = st.number_input("Fator Argiloso", 8.0)
+        with c3:
+            st.markdown("**Potássio & Gesso**")
+            p_kdir = st.number_input("K% Desejado", 3.2); p_export_k = st.number_input("Exp. K (kg/sc)", 1.2)
+            p_g_fator = st.number_input("Fator Gesso (Arg * F)", 15); p_g_max = st.number_input("Dose Máx Gesso", 900)
+
+    # --- ABA: RECOMENDAÇÕES (FÓRMULAS TRÍADE) ---
+    with tab_recom:
+        st.subheader("Cálculo de Prescrição VRA")
+        
+        # Lógica Fósforo Remanescente
+        def get_nc_p(prem):
+            if prem <= 4: return 8.0
+            elif prem <= 10: return 10.0
+            elif prem <= 19: return 12.0
+            elif prem <= 30: return 15.0
+            elif prem <= 45: return 20.0
+            else: return 25.0
+        
+        df['NC_P'] = df['PREM'].apply(get_nc_p)
+        df['SALDO_P'] = (df['P'] - df['NC_P']).clip(lower=0)
+        df['DESS_P'] = (df['NC_P'] - df['P']).clip(lower=0)
+        
+        # Exemplo de Cálculo de Adubo P (Dose = (Necessidade * Fator Solo) + Exportação - Saldo)
+        df['REC_P_ADUBO'] = (((df['DESS_P'] * f_arg) + (p_prodesp * p_export_p) - df['SALDO_P']) * 100 / p_perc_adubo).clip(lower=0)
+        
+        # Calcário (Maior entre Ca e Mg)
+        df['REC_CALC'] = pmax = np.maximum((p_cadir - df['CA_PERC']), (p_mgdir - df['MG_PERC'])).clip(lower=0) # Simplificado
+        
+        st.dataframe(df[['PONTO', 'ARGILA', 'P', 'REC_P_ADUBO', 'REC_CALC']])
+
+    # --- ABA: MAPAS DE FERTILIDADE (KRIGAGEM ORDINÁRIA) ---
+    with tab_fert:
+        st.subheader("Mapas Geoestatísticos")
+        attr = st.selectbox("Atributo para Mapear:", ['ARGILA', 'PH', 'P', 'K', 'CTC', 'MO'])
+        
+        if st.button("GERAR MAPA POR KRIGAGEM"):
+            with st.spinner("Processando correlação espacial..."):
+                # Motor de Krigagem Ordinária
+                OK = OrdinaryKriging(df['LON'], df['LAT'], df[attr], variogram_model='spherical')
+                grid_x = np.linspace(df['LON'].min(), df['LON'].max(), 100)
+                grid_y = np.linspace(df['LAT'].min(), df['LAT'].max(), 100)
+                z, ss = OK.execute('grid', grid_x, grid_y)
                 
-                st.subheader("Gesso")
-                fator_gesso = st.number_input("Fator Gesso (Argila * X)", value=15.0)
-                gesso_max = st.number_input("Dose Máxima Gesso (kg/ha)", value=900.0)
-                gesso_min = st.number_input("Dose Mínima Gesso (kg/ha)", value=400.0)
-                preco_gesso = st.number_input("Preço Gesso (R$/t)", value=400.0)
-
-            with c2:
-                st.subheader("Fósforo (P-Rem)")
-                prod_esperada = st.number_input("Produtividade Esperada (sc/ha)", value=80.0)
-                p_export = st.number_input("P Exportação (kg/sc)", value=0.8)
-                p2o5_adubo = st.number_input("% P2O5 no Adubo", value=21.0)
-                preco_p = st.number_input("Preço Adubo Fosfatado (R$/t)", value=2800.0)
-                
-                st.write("Nível Crítico por P-Rem:")
-                nc_0_4 = st.number_input("0 a 4", value=8.0)
-                nc_4_10 = st.number_input("4.1 a 10", value=10.0)
-                nc_10_19 = st.number_input("10.1 a 19", value=12.0)
-                nc_19_30 = st.number_input("19.1 a 30", value=15.0)
-
-            with c3:
-                st.subheader("Potássio (K)")
-                k_ctc_meta = st.number_input("K% na CTC Meta", value=3.2)
-                k_export = st.number_input("K Exportação (kg/sc)", value=1.2)
-                k2o_adubo = st.number_input("% K2O no Adubo", value=60.0)
-                preco_k = st.number_input("Preço Adubo Potássico (R$/t)", value=2800.0)
-
-        # --- ABA MAPAS DE FERTILIDADE ---
-        with tabs[1]:
-            st.subheader("Mapas de Variabilidade de Solo")
-            df = st.session_state.dados
-            geo = st.session_state.geo
-            cols_map = ['ARGILA', 'PH_CACL2', 'CA', 'MG', 'P', 'P-REM', 'K', 'CTC', 'MO']
-            
-            sel_col = st.selectbox("Selecione o atributo", [c for c in cols_map if c in df.columns])
-            
-            # Cálculo de Mapa com IDW (conforme padrão memorável anterior)
-            x, y, z = df['LON'].values, df['LAT'].values, df[sel_col].values
-            xi = np.linspace(x.min(), x.max(), 150)
-            yi = np.linspace(y.min(), y.max(), 150)
-            xi_g, yi_g = np.meshgrid(xi, yi)
-            zi = calcular_idw(x, y, z, xi_g.flatten(), yi_g.flatten()).reshape(150, 150)
-
-            fig = go.Figure(data=go.Contour(z=zi, x=xi, y=yi, colorscale='coolwarm', ncontours=6))
-            # (Aqui entra o loop de contorno GeoJSON para fidelidade 100%)
-            st.plotly_chart(fig, use_container_width=True)
-
-        # --- ABA RECOMENDAÇÕES (O MOTOR DE CÁLCULO) ---
-        with tabs[2]:
-            st.subheader("Cálculos de Taxa Variável")
-            df_rec = df.copy()
-            
-            # CÁLCULO GESSO
-            df_rec['REC_GESSO'] = (df_rec['ARGILA'] * fator_gesso).clip(gesso_min, gesso_max)
-            
-            # CÁLCULO CALCÁRIO (Elevação Ca ou Mg - a maior)
-            nec_ca = (ca_desejado - df_rec['CA_PERC']) * df_rec['CTC'] / 100 # Exemplo simplificado da lógica
-            nec_mg = (mg_desejado - df_rec['MG_PERC']) * df_rec['CTC'] / 100
-            df_rec['REC_CALCARIO'] = np.maximum(nec_ca, nec_mg) * (100/prnt)
-            
-            # CÁLCULO POTÁSSIO (Elevação + Exportação sempre cheia)
-            eleva_k = (k_ctc_meta - df_rec['K_PERC']) * df_rec['CTC'] / 100
-            df_rec['REC_K2O'] = (eleva_k.clip(lower=0) + (prod_esperada * k_export)) * (100/k2o_adubo)
-
-            st.dataframe(df_rec[['PONTO', 'REC_GESSO', 'REC_CALCARIO', 'REC_K2O']])
-
-        # --- ABA RELATÓRIO ---
-        with tabs[8]:
-            if st.button("GERAR RELATÓRIO FINAL PDF"):
-                # Lógica de PDF A4, margens 2cm, argumentos técnicos por mapa
-                st.success("Relatório gerado com sucesso (Simulação)")
+                fig, ax = plt.subplots()
+                c = ax.imshow(z, extent=(df['LON'].min(), df['LON'].max(), df['LAT'].min(), df['LAT'].max()), origin='lower', cmap='RdYlGn')
+                plt.colorbar(c)
+                st.pyplot(fig)
+                st.info(f"O mapa de {attr} utiliza o modelo esférico para garantir a transição suave entre os pontos de coleta.")
