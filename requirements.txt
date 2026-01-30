@@ -8,3 +8,4 @@ shapely
 scipy
 matplotlib
 openpyxl
+fpdf2
