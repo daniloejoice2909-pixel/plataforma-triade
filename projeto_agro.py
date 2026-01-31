@@ -18,7 +18,7 @@ from fpdf import FPDF
 # --- 1. CONFIGURAÇÕES VISUAIS PREMIUM ---
 st.set_page_config(layout="wide", page_title="Tríade Agro | Estratégica 1.0", page_icon="🌱")
 
-# Paleta Profissional 6 Camadas: Azul (Alto) ao Vermelho (Crítico)
+# Paleta 6 Camadas: Azul (Alto/Suficiente) ao Vermelho (Crítico)
 colors_6 = ['#08306b', '#2171b5', '#6baed6', '#fee090', '#f46d43', '#a50026']
 cmap_6 = ListedColormap(colors_6)
 norm_6 = BoundaryNorm(np.linspace(0, 1, 7), cmap_6.N)
@@ -47,7 +47,6 @@ class PDF(FPDF):
         if os.path.exists(img_path): os.remove(img_path)
 
 # --- 3. FLUXO DE NAVEGAÇÃO ---
-
 if st.session_state.pagina == "Entrada":
     st.markdown("<h1 style='text-align:center;'>🛰️ Tríade Agro | Estratégica 1.0</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,1.5,1])
@@ -81,7 +80,7 @@ elif st.session_state.pagina == "Upload":
         if st.button("🚀 ABRIR DASHBOARD TÉCNICO", use_container_width=True): st.session_state.pagina = "Dashboard"; st.rerun()
 
 elif st.session_state.pagina == "Dashboard":
-    # --- SIDEBAR: ATRIBUTOS EDITÁVEIS (PREVENÇÃO DE NAMEERROR) ---
+    # --- SIDEBAR: ATRIBUTOS ---
     st.sidebar.header("⚙️ Parâmetros Técnicos")
     with st.sidebar.expander("Calcário (Elevação Ca/Mg)", expanded=True):
         p_cao = st.number_input("Teor CaO %", 36.0); p_mgo = st.number_input("Teor MgO %", 9.0)
@@ -90,7 +89,6 @@ elif st.session_state.pagina == "Dashboard":
     with st.sidebar.expander("Fósforo (P-Rem + Gordura)", expanded=False):
         nc_list = [st.number_input(f"NC Classe {i+1}", v) for i, v in enumerate([8.0, 10.0, 12.0, 15.0, 20.0, 25.0])]
         f_marg = st.number_input("Fator M.Argiloso", 10.0); f_arg = st.number_input("Fator Argiloso", 8.0)
-        f_med = st.number_input("Fator Médio", 4.0); f_are = st.number_input("Fator Arenoso", 2.0)
         p_prod = st.number_input("Produtividade (sc/ha)", 80.0); p_exp_p = st.number_input("Exp. P (kg/sc)", 0.8)
     with st.sidebar.expander("Potássio e Gesso", expanded=False):
         p_k_des = st.number_input("K% desejado CTC", 3.2); k_f_391 = st.number_input("Fator Atômico K", 391.0)
@@ -120,9 +118,45 @@ elif st.session_state.pagina == "Dashboard":
                 fig, ax = plt.subplots(figsize=(5, 4)); ax.axis('off')
                 ax.imshow(z_norm, cmap=cmap_6, norm=norm_6, origin='lower', extent=[minx, maxx, miny, maxy])
                 poly = shape(contorno['features'][0]['geometry']); x_p, y_p = poly.exterior.xy
-                ax.plot(x_p, y_p, color='black', linewidth=4) # CONTORNO PRETO PREMIUM
+                ax.plot(x_p, y_p, color='black', linewidth=4)
                 
                 buf = io.BytesIO(); plt.savefig(buf, format='png', transparent=True, bbox_inches='tight', pad_inches=0); plt.close(fig)
                 st.image(buf, use_container_width=True)
                 st.markdown(f"<p style='text-align:center; font-size:12px;'><b>{col_id}</b><br>Mín: {v_min:.2f} | Méd: {v_med:.2f} | Máx: {v_max:.2f}</p>", unsafe_allow_html=True)
-                st.session_state.mapas_finalizados[col_id] = {"img": buf, "stats": f"Máx: {v_max:.2f} | Méd: {v_med:.2f} | Mín: {v_min:.2f}", "titulo": col_id,
+                # --- CORREÇÃO DO DICIONÁRIO ---
+                st.session_state.mapas_finalizados[col_id] = {
+                    "img": buf, 
+                    "stats": f"Máx: {v_max:.2f} | Méd: {v_med:.2f} | Mín: {v_min:.2f}", 
+                    "titulo": col_id, 
+                    "desc": desc_base
+                }
+
+    with tabs[0]: render_mapa_grid(['P', 'K', 'PH', 'ARGILA', 'PREM', 'CTC'], "Diagnóstico de Solo.")
+
+    with tabs[1]:
+        # CÁLCULOS TÉCNICOS
+        df['NC_CA'] = ((p_ca_des - df['CA_PERC']).clip(lower=0) * df['CTC'] / 100 * 560) / (p_cao * p_prnt / 10)
+        df['NC_MG'] = ((p_mg_des - df['MG_PERC']).clip(lower=0) * df['CTC'] / 100 * 400) / (p_mgo * p_prnt / 10)
+        df['REC_CALCARIO'] = (np.maximum(df['NC_CA'], df['NC_MG']) + p_adicional).round(2)
+        df['NC_P'] = df['PREM'].apply(lambda x: nc_list[0] if x<=4 else (nc_list[1] if x<=10 else (nc_list[2] if x<=19 else (nc_list[3] if x<=30 else (nc_list[4] if x<=45 else nc_list[5])))))
+        df['REC_P_ADUBO'] = ((((df['NC_P'] - df['P']).clip(lower=0) * f_arg) + (p_prod * p_exp_p)) - (df['P'] - df['NC_P']).clip(lower=0)).clip(lower=0)
+        df['REC_K_ADUBO'] = (((((p_k_des - df['K_PERC']).clip(lower=0) * df['CTC'] / 100) * k_f_391 * 2 * 1.2) + (p_prod * p_exp_k * 1.2)) * 100 / p_perc_k).round(2)
+        df['REC_GESSO'] = (df['ARGILA'] * g_fator / 10).clip(lower=400, upper=g_max)
+
+        render_mapa_grid(['REC_CALCARIO', 'REC_P_ADUBO', 'REC_K_ADUBO', 'REC_GESSO'], "Recomendação Estratégica VRA.")
+
+    with tabs[2]:
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📥 EXPORTAR PDF RECOMENDAÇÕES"):
+                pdf = PDF(); pdf.add_page(); pdf.set_font('Arial', 'B', 12)
+                f_n = st.session_state.info.get('fazenda', 'Fazenda'); p_n = st.session_state.info.get('produtor', 'Produtor')
+                pdf.cell(0, 10, f"Fazenda: {f_n} | Produtor: {p_n}", 0, 1)
+                for k, m in st.session_state.mapas_finalizados.items(): pdf.secao_mapa(m['titulo'], m['img'], m['stats'], m['desc'])
+                st.download_button("Baixar PDF", bytes(pdf.output()), f"Relatorio_Tríade_{f_n}.pdf", "application/pdf")
+        with c2:
+            if st.button("🚜 GERAR ZIP MÁQUINAS"):
+                zip_b = io.BytesIO()
+                with zipfile.ZipFile(zip_b, "w") as z:
+                    z.writestr("John_Deere/Rx/prescricao.shp", "Dados espaciais"); z.writestr("Case_IH/TaskData/prescricao.xml", "Dados ISOXML")
+                st.download_button("Baixar ZIP", zip_b.getvalue(), "Export_Maquinas_Triade.zip")
