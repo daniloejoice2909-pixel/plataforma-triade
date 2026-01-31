@@ -2,29 +2,30 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import folium
+from folium.plugins import Draw
 import json
 import io
 import os
 import zipfile
-from streamlit_folium import folium_static
+from streamlit_folium import folium_static, st_folium
 from pykrige.ok import OrdinaryKriging
-from shapely.geometry import shape, Point
+from shapely.geometry import shape, Point, Polygon
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from PIL import Image
 from fpdf import FPDF
 
-# --- 1. CONFIGURAÇÕES VISUAIS ---
+# --- 1. CONFIGURAÇÕES VISUAIS PREMIUM ---
 st.set_page_config(layout="wide", page_title="Tríade Agro | Estratégica 1.0", page_icon="🌱")
 
-# Paleta 6 Camadas: Azul (Alto/Suficiente) ao Vermelho (Crítico/Baixo)
-colors_6 = ['#4575b4', '#91bfdb', '#d9ef8b', '#fee090', '#fc8d59', '#d73027']
+# Paleta 6 Camadas Sólidas: Azul (Topo) ao Vermelho (Crítico)
+colors_6 = ['#0000FF', '#00FFFF', '#00FF00', '#FFFF00', '#FFA500', '#FF0000']
 cmap_6 = ListedColormap(colors_6)
 norm_6 = BoundaryNorm(np.linspace(0, 1, 7), cmap_6.N)
 
 if "pagina" not in st.session_state: st.session_state.pagina = "Entrada"
-if "mapas_recom_pdf" not in st.session_state: st.session_state.mapas_recom_pdf = {}
 if "info" not in st.session_state: st.session_state.info = {}
+if "mapas_finalizados" not in st.session_state: st.session_state.mapas_finalizados = {}
 
 # --- 2. MOTOR DE RELATÓRIO PDF ---
 class PDF(FPDF):
@@ -32,22 +33,22 @@ class PDF(FPDF):
         if os.path.exists("logoTriadetransparente.png"):
             self.image("logoTriadetransparente.png", 10, 8, 30)
         self.set_font('Arial', 'B', 14)
-        self.cell(0, 10, 'RELATÓRIO DE PRESCRIÇÃO - TRÍADE AGRO', 0, 1, 'C')
+        self.cell(0, 10, 'RELATÓRIO ESTRATÉGICO - TRÍADE AGRO', 0, 1, 'C')
         self.ln(10)
 
     def secao_mapa(self, titulo, img_buf, stats, desc):
         self.add_page()
         self.set_font('Arial', 'B', 12); self.cell(0, 10, titulo.upper(), 0, 1, 'L')
-        safe_name = titulo.replace(' ', '_').replace('/', '_')
-        path = f"temp_{safe_name}.png"
-        with open(path, "wb") as f: f.write(img_buf.getbuffer())
-        self.image(path, x=45, w=120)
+        img_path = f"temp_{titulo.replace(' ', '_')}.png"
+        with open(img_path, "wb") as f: f.write(img_buf.getbuffer())
+        self.image(img_path, x=35, w=140)
         self.ln(5)
-        self.set_font('Arial', 'B', 10); self.cell(0, 10, stats, 0, 1, 'C')
-        self.ln(5); self.set_font('Arial', '', 11); self.multi_cell(0, 6, desc)
-        if os.path.exists(path): os.remove(path)
+        self.set_font('Arial', 'B', 9); self.cell(0, 8, stats, 0, 1, 'C')
+        self.set_font('Arial', '', 10); self.multi_cell(0, 5, desc)
+        if os.path.exists(img_path): os.remove(img_path)
 
-# --- 3. NAVEGAÇÃO ---
+# --- 3. FLUXO DE NAVEGAÇÃO ---
+
 if st.session_state.pagina == "Entrada":
     st.markdown("<h1 style='text-align:center;'>🛰️ Tríade Agro | Estratégica 1.0</h1>", unsafe_allow_html=True)
     c1, c2, c3 = st.columns([1,1.5,1])
@@ -57,109 +58,123 @@ if st.session_state.pagina == "Entrada":
             if senha == "triade2026": st.session_state.pagina = "Upload"; st.rerun()
 
 elif st.session_state.pagina == "Upload":
-    st.header("📂 Cadastro e Importação A-Y")
-    c1, c2 = st.columns(2)
+    st.header("📂 Cadastro do Projeto e Área")
+    c1, c2 = st.columns([1, 1.5])
     with c1:
         st.session_state.info['produtor'] = st.text_input("Produtor", "Danilo")
         st.session_state.info['fazenda'] = st.text_input("Fazenda", "Berneck")
         st.session_state.info['municipio'] = st.text_input("Município")
+        f_dados = st.file_uploader("Upload Planilha Solo (A a Y)", type=['xlsx'])
+        f_json = st.file_uploader("Upload Contorno JSON (Opcional)", type=['json', 'geojson'])
+        
     with c2:
-        f_contorno = st.file_uploader("Upload Contorno (.json)", type=['json', 'geojson'])
-        f_dados = st.file_uploader("Upload Planilha Solo (A-Y)", type=['xlsx'])
-    if f_contorno and f_dados:
-        st.session_state.contorno = json.load(f_contorno)
+        st.write("🌍 **Globo Terrestre: Localize e Desenhe sua Área**")
+        m = folium.Map(location=[-15.78, -47.92], zoom_start=4)
+        folium.TileLayer('https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri').add_to(m)
+        draw = Draw(export=True)
+        draw.add_to(m)
+        output = st_folium(m, width=700, height=450)
+        
+        if f_json:
+            st.session_state.contorno = json.load(f_json)
+            st.success("Contorno carregado via arquivo!")
+        elif output.get("all_drawings"):
+            st.session_state.contorno = {"type": "FeatureCollection", "features": [output["all_drawings"][-1]]}
+            st.success("Contorno desenhado com sucesso!")
+
+    if 'contorno' in st.session_state and f_dados:
         df = pd.read_excel(f_dados)
         df.columns = ['LAT', 'LON', 'CAMPO', 'PONTO', 'ARGILA', 'PREM', 'P', 'CA', 'MG', 'K', 'AL', 'HAL', 'S', 'B', 'MN', 'ZN', 'CU', 'FE', 'MO', 'PH', 'CTC', 'CA_PERC', 'MG_PERC', 'K_PERC', 'CAMG'][:len(df.columns)]
         st.session_state.dados = df
-        if st.button("🚀 ABRIR PLATAFORMA", use_container_width=True): st.session_state.pagina = "Dashboard"; st.rerun()
+        if st.button("🚀 ABRIR DASHBOARD TÉCNICO", use_container_width=True): 
+            st.session_state.pagina = "Dashboard"; st.rerun()
 
 elif st.session_state.pagina == "Dashboard":
-    tabs = st.tabs(["⚙️ Atributos", "🔍 Fertilidade", "🏠 Recomendações VRA", "📄 Relatório & Exportação"])
+    tabs = st.tabs(["⚙️ Atributos", "🔍 Fertilidade", "🏠 Recomendações", "📄 Relatório"])
     df = st.session_state.dados
     contorno = st.session_state.contorno
     geom = shape(contorno['features'][0]['geometry']); minx, miny, maxx, maxy = geom.bounds
 
     with tabs[0]:
-        st.subheader("Configuração Global de Parâmetros")
+        st.subheader("Configuração Global de Insumos")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("### 🪨 Calcário & Calagem")
-            p_ca_des = st.number_input("Ca% desejado na CTC", 60.0); p_mg_des = st.number_input("Mg% desejado na CTC", 18.0)
-            p_prnt = st.number_input("PRNT %", 80.0); p_calc_extra = st.number_input("Adicional Calcário (t/ha)", 0.0)
+            p_cao = st.number_input("Teor CaO %", 36.0); p_mgo = st.number_input("Teor MgO %", 9.0)
+            p_prnt = st.number_input("PRNT %", 80.0); p_ca_des = st.number_input("Ca% desejado CTC", 60.0)
+            p_mg_des = st.number_input("Mg% desejado CTC", 18.0); p_adicional = st.number_input("Adicional (t/ha)", 0.0)
+            p_preco_calc = st.number_input("Preço Calcário (t)", 190.0)
         with c2:
             st.markdown("### 🧪 Fósforo ($P_{rem}$)")
-            nc1 = st.number_input("NC Classe 1 (0-4)", 8.0); nc2 = st.number_input("NC Classe 2 (4.1-10)", 10.0)
-            nc3 = st.number_input("NC Classe 3 (10.1-19)", 12.0); nc4 = st.number_input("NC Classe 4 (19.1-30)", 15.0)
-            nc5 = st.number_input("NC Classe 5 (30.1-45)", 20.0); nc6 = st.number_input("NC Classe 6 (45-60)", 25.0)
-            f_marg = st.number_input("Fator M. Argiloso (P)", 10.0); f_arg = st.number_input("Fator Argiloso (P)", 8.0)
-            p_exp_p = st.number_input("Fator Exportação P (kg/sc)", 0.8); p_perc_p = st.number_input("% P2O5 Adubo", 21.0)
+            nc_list = [st.number_input(f"NC Classe {i+1}", v) for i, v in enumerate([8.0, 10.0, 12.0, 15.0, 20.0, 25.0])]
+            f_arg = st.number_input("Fator Argiloso (P)", 8.0); f_med = st.number_input("Fator Médio (P)", 4.0)
+            p_prod = st.number_input("Produtividade Esperada (sc/ha)", 80.0); p_exp_p = st.number_input("Exportação P (kg/sc)", 0.8)
+            p_perc_p = st.number_input("% P2O5 Adubo", 21.0)
         with c3:
             st.markdown("### 🍌 Potássio & 🧪 Gesso")
-            p_prod = st.number_input("Produtividade Esperada (sc/ha)", 80.0)
-            p_k_des = st.number_input("K% desejado na CTC", 3.2); p_exp_k = st.number_input("Fator Exportação K (kg/sc)", 1.2)
-            k_fator_391 = st.number_input("Fator Atômico K", 391.0); p_perc_k = st.number_input("% K2O Adubo", 60.0)
-            g_fator = st.number_input("Fator Gesso (Arg * F)", 15); g_max = st.number_input("Dose Máx Gesso", 900.0)
+            p_k_des = st.number_input("K% desejado CTC", 3.2); p_exp_k = st.number_input("Exportação K (kg/sc)", 1.2)
+            p_perc_k = st.number_input("% K2O Adubo", 60.0); g_fator = st.number_input("Fator Gesso (Arg * F)", 15)
+            g_max = st.number_input("Dose Máxima Gesso", 900.0); g_min = st.number_input("Dose Mínima Gesso", 400.0)
 
-    def render_mapa_triade(col_id, titulo, desc, is_recom=False):
-        OK = OrdinaryKriging(df['LON'], df['LAT'], df[col_id], variogram_model='spherical')
-        gx, gy = np.linspace(minx, maxx, 250), np.linspace(miny, maxy, 250)
-        z, ss = OK.execute('grid', gx, gy); z_mask = np.full(z.shape, np.nan)
-        for i in range(len(gy)):
-            for j in range(len(gx)):
-                if geom.contains(Point(gx[j], gy[i])): z_mask[i, j] = z[i, j]
-        v_max, v_med, v_min = np.nanmax(z_mask), np.nanmean(z_mask), np.nanmin(z_mask)
-        z_norm = (z_mask - v_min) / (v_max - v_min) if v_max > v_min else z_mask * 0
-        fig, ax = plt.subplots(figsize=(8, 7)); ax.axis('off')
-        ax.imshow(z_norm, cmap=cmap_6, norm=norm_6, origin='lower', extent=[minx, maxx, miny, maxy])
-        buf = io.BytesIO(); plt.savefig(buf, format='png', transparent=True, bbox_inches='tight', pad_inches=0); plt.close(fig)
-        if is_recom: st.session_state.mapas_recom_pdf[col_id] = {"img": buf, "stats": f"Máx: {v_max:.2f} | Méd: {v_med:.2f} | Mín: {v_min:.2f}", "titulo": titulo, "desc": desc}
-        m = folium.Map(location=[geom.centroid.y, geom.centroid.x], zoom_start=15, tiles=None)
-        folium.TileLayer('https://clarity.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', attr='Esri').add_to(m)
-        folium.raster_layers.ImageOverlay(image=np.array(Image.open(buf)), bounds=[[miny, minx], [maxy, maxx]], opacity=0.85).add_to(m)
-        folium.GeoJson(contorno, style_function=lambda x: {'fillColor': 'none', 'color': 'black', 'weight': 5}).add_to(m)
-        folium_static(m, width=1000, height=700)
-        st.write(f"📊 Máximo: {v_max:.2f} | Médio: {v_med:.2f} | Mínimo: {v_min:.2f}")
+    # --- MOTOR DE MAPEAMENTO HD ---
+    def render_grid_mapas(colunas, titulo_pref, is_recom=False):
+        cols_st = st.columns(3)
+        for i, col_id in enumerate(colunas):
+            with cols_st[i % 3]:
+                OK = OrdinaryKriging(df['LON'], df['LAT'], df[col_id], variogram_model='spherical')
+                gx, gy = np.linspace(minx, maxx, 200), np.linspace(miny, maxy, 200)
+                z, ss = OK.execute('grid', gx, gy); z_mask = np.full(z.shape, np.nan)
+                for r in range(len(gy)):
+                    for c in range(len(gx)):
+                        if geom.contains(Point(gx[c], gy[r])): z_mask[r, c] = z[r, c]
+                
+                v_max, v_med, v_min = np.nanmax(z_mask), np.nanmean(z_mask), np.nanmin(z_mask)
+                z_norm = (z_mask - v_min) / (v_max - v_min) if v_max > v_min else z_mask * 0
+                
+                fig, ax = plt.subplots(figsize=(5, 4)); ax.axis('off')
+                ax.imshow(z_norm, cmap=cmap_6, norm=norm_6, origin='lower', extent=[minx, maxx, miny, maxy])
+                # CONTORNO PRETO Weight 5
+                poly = shape(contorno['features'][0]['geometry'])
+                x_p, y_p = poly.exterior.xy
+                ax.plot(x_p, y_p, color='black', linewidth=3)
+                
+                buf = io.BytesIO(); plt.savefig(buf, format='png', transparent=True, bbox_inches='tight', pad_inches=0); plt.close(fig)
+                st.image(buf, use_container_width=True)
+                st.caption(f"**{col_id}** | Máx: {v_max:.2f} | Méd: {v_med:.2f} | Mín: {v_min:.2f}")
+                
+                desc_rel = "Metodologia Tríade Agro: Elevação de teores + Reposição Cultural."
+                st.session_state.mapas_finalizados[col_id] = {"img": buf, "stats": f"Máx: {v_max:.2f} | Méd: {v_med:.2f} | Mín: {v_min:.2f}", "titulo": col_id, "desc": desc_rel}
 
     with tabs[1]:
-        sel_f = st.selectbox("Mapa de Fertilidade:", ['P', 'K', 'PH', 'ARGILA', 'PREM', 'CTC', 'CA', 'MG'])
-        if st.button("Gerar Visualização"): render_mapa_triade(sel_f, f"Fertilidade: {sel_f}", "Diagnóstico de Solo", is_recom=False)
+        st.subheader("Mapas de Fertilidade (Diagnóstico)")
+        render_grid_mapas(['P', 'K', 'PH', 'ARGILA', 'PREM', 'CTC'], "Fertilidade", False)
 
     with tabs[2]:
-        # MOTOR DE RECOMENDAÇÃO (Fórmulas Danillo)
-        # Calcário (Maior Dose)
-        df['REC_CALC'] = (np.maximum(((p_ca_des - df['CA_PERC']).clip(lower=0) * df['CTC'] / 100) * (100/p_prnt), 
-                                     ((p_mg_des - df['MG_PERC']).clip(lower=0) * df['CTC'] / 100) * (100/p_prnt)) + p_calc_extra).round(2)
-        # Fósforo (Gordura subtrai da Exportação)
-        df['NC_P_D'] = df['PREM'].apply(lambda x: nc1 if x<=4 else (nc2 if x<=10 else (nc3 if x<=19 else (nc4 if x<=30 else (nc5 if x<=45 else nc6)))))
-        df['F_TEXT_D'] = df['ARGILA'].apply(lambda x: f_marg if x>600 else f_arg)
-        df['P_GORDURA'] = (df['P'] - df['NC_P_D']).clip(lower=0) * df['F_TEXT_D']
-        df['P_ELEV'] = (df['NC_P_D'] - df['P']).clip(lower=0) * df['F_TEXT_D']
-        df['REC_P_ADUBO'] = (((df['P_ELEV'] + (p_prod * p_exp_p)) - df['P_GORDURA']).clip(lower=0) * 100 / p_perc_p).round(2)
-        # Potássio (Soma Incondicional da Exportação)
-        df['K_LACUNA'] = ((p_k_des - df['K_PERC']).clip(lower=0) * df['CTC'] / 100) * k_fator_391 * 2 * 1.2
-        df['REC_K_ADUBO'] = (((df['K_LACUNA'] + (p_prod * p_exp_k))) * 100 / p_perc_k).round(2)
-        # Gesso
-        df['REC_GESSO'] = (df['ARGILA'] * g_fator / 10).clip(lower=400, upper=g_max).round(2)
+        st.subheader("Mapas de Recomendação VRT (Prescrição)")
+        # --- CÁLCULOS TÉCNICOS ---
+        # 1. Calcário (Fatores 560 e 400)
+        df['NC_CA'] = ((p_ca_des - df['CA_PERC']).clip(lower=0) * df['CTC'] / 100 * 560) / (p_cao * p_prnt / 100 * 10)
+        df['NC_MG'] = ((p_mg_des - df['MG_PERC']).clip(lower=0) * df['CTC'] / 100 * 400) / (p_mgo * p_prnt / 100 * 10)
+        df['REC_CALCARIO'] = (np.maximum(df['NC_CA'], df['NC_MG']) + p_adicional).round(2)
+        
+        # 2. Fósforo (Gordura)
+        df['NC_P'] = df['PREM'].apply(lambda x: nc_list[0] if x<=4 else (nc_list[1] if x<=10 else (nc_list[2] if x<=19 else (nc_list[3] if x<=30 else (nc_list[4] if x<=45 else nc_list[5])))))
+        df['REC_P_ADUBO'] = ((((df['NC_P'] - df['P']).clip(lower=0) * f_arg) + (p_prod * p_exp_p)) - (df['P'] - df['NC_P']).clip(lower=0)).clip(lower=0)
+        
+        # 3. Potássio (Soma Incondicional)
+        df['REC_K_ADUBO'] = (((((p_k_des - df['K_PERC']).clip(lower=0) * df['CTC'] / 100) * 391 * 2 * 1.2) + (p_prod * p_exp_k * 1.2)) * 100 / p_perc_k).round(2)
+        
+        # 4. Gesso
+        df['REC_GESSO'] = (df['ARGILA'] * g_fator / 10).clip(lower=g_min, upper=g_max)
 
-        sel_vr = st.selectbox("Recomendação VRA:", ['REC_CALC', 'REC_P_ADUBO', 'REC_K_ADUBO', 'REC_GESSO'])
-        if st.button("Gerar Recomendação"):
-            v_p = f"Metodologia: Fósforo Remanescente. Vantagem: Utiliza a gordura do solo para abater a exportação de {p_prod} sc/ha."
-            v_k = f"Metodologia: Elevação CTC para {p_k_des}% + Reposição de Exportação. Vantagem: Balanço de massa sustentável."
-            just = v_p if 'P_ADUBO' in sel_vr else (v_k if 'K_ADUBO' in sel_vr else "Equilíbrio de Bases.")
-            render_mapa_triade(sel_vr, sel_vr, just, is_recom=True)
+        render_grid_mapas(['REC_CALCARIO', 'REC_P_ADUBO', 'REC_K_ADUBO', 'REC_GESSO'], "Recomendação", True)
 
     with tabs[3]:
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("📥 EXPORTAR PDF RECOMENDAÇÕES"):
-                pdf = PDF(); pdf.add_page(); pdf.set_font('Arial', 'B', 12)
-                f_n = st.session_state.info.get('fazenda', 'Fazenda'); p_n = st.session_state.info.get('produtor', 'Produtor')
-                pdf.cell(0, 10, f"Fazenda: {f_n} | Produtor: {p_n}", 0, 1)
-                for k, m in st.session_state.mapas_recom_pdf.items(): pdf.secao_mapa(m['titulo'], m['stats'], m['desc'])
-                st.download_button("Baixar PDF", bytes(pdf.output()), f"Relatorio_Recomendações_{f_n}.pdf", "application/pdf")
-        with c2:
-            if st.button("🚜 EXPORTAR ZIP MÁQUINAS"):
-                zip_b = io.BytesIO()
-                with zipfile.ZipFile(zip_b, "w") as z:
-                    z.writestr("John_Deere/prescricao.shp", "Dados espaciais JD"); z.writestr("Case_IH/prescricao.xml", "ISOXML CASE")
-                st.download_button("Baixar ZIP", zip_b.getvalue(), "Exportacao_Triade_VRA.zip")
+        st.subheader("Finalização e Exportação")
+        if st.button("📥 GERAR RELATÓRIO PDF COMPLETO"):
+            pdf = PDF()
+            pdf.add_page(); pdf.set_font('Arial', 'B', 12)
+            pdf.cell(0, 10, f"Produtor: {st.session_state.info['produtor']} | Fazenda: {st.session_state.info['fazenda']}", 0, 1)
+            for k, m in st.session_state.mapas_finalizados.items():
+                pdf.secao_mapa(m['titulo'], m['img'], m['stats'], m['desc'])
+            st.download_button("Baixar PDF", bytes(pdf.output()), "Relatorio_Triade_Premium.pdf", "application/pdf")
