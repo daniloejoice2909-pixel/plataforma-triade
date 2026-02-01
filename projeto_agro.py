@@ -27,7 +27,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- CLASSE PDF PROFISSIONAL (A4, 2cm MARGENS) ---
+# --- CLASSE PDF PROFISSIONAL ---
 class TriadePDF(FPDF):
     def header(self):
         try: self.image("LogoTriadeagro.png.png", 10, 8, 40)
@@ -43,7 +43,7 @@ class TriadePDF(FPDF):
 
 # --- MOTOR DE CÁLCULO V43 ---
 def motor_calculo_v43(df, params):
-    # Tipagem: Garante que os cálculos não falhem por colunas 'texto'
+    # Tipagem para evitar erros com colunas lidas como 'Geral' ou Texto
     cols_numericas = ['Argila', 'Ca%', 'Mg%', 'CTC', 'P res', 'K%', 'V%', 'pH', 'prem']
     for col in cols_numericas:
         if col in df.columns:
@@ -55,10 +55,10 @@ def motor_calculo_v43(df, params):
     c_params = params["calagem"]
     prod_esperada = params["global"]["produtividade"]
 
-    # 1. GESSAGEM: Argila (g/kg) * 15
+    # 1. GESSAGEM: Argila (g/kg) * Fator
     df['REC_GESSO'] = (df['Argila'] * g_params["fator"]).clip(lower=g_params["min"], upper=g_params["max"])
 
-    # 2. CALAGEM (Fatores 560/400)
+    # 2. CALAGEM (Equilíbrio Atômico - Fatores 560/400)
     df['NC_CA'] = ((c_params["target_ca"] - df['Ca%']).clip(lower=0) * df['CTC'] / 100)
     df['NC_MG'] = ((c_params["target_mg"] - df['Mg%']).clip(lower=0) * df['CTC'] / 100)
     
@@ -78,10 +78,7 @@ def motor_calculo_v43(df, params):
         else: nc_alvo = p["nc_45_60"]
 
         arg = row['Argila']
-        if arg > 600: f_arg = p["f_muito_arg"]
-        elif arg > 350: f_arg = p["f_argiloso"]
-        elif arg > 150: f_arg = p["f_medio"]
-        else: f_arg = p["f_arenoso"]
+        f_arg = p["f_muito_arg"] if arg > 600 else p["f_argiloso"] if arg > 350 else p["f_medio"] if arg > 150 else p["f_arenoso"]
 
         delta_p = nc_alvo - row['P res']
         total_p2o5 = (max(delta_p, 0) * f_arg) + (prod_esperada * p["f_exp"])
@@ -100,70 +97,66 @@ def motor_calculo_v43(df, params):
     
     return df
 
-# --- INTERFACE E DOWNLOADS ---
+# --- FUNÇÃO QUE FALTAVA: CONFIGURAÇÃO DA INTERFACE ---
+def configurar_interface():
+    st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
+    menu = st.sidebar.radio("Navegação", ["🏠 Home", "👥 Produtores"])
+    
+    st.sidebar.header("⚙️ Parâmetros Técnicos")
+    
+    with st.sidebar.expander("🌍 Global"):
+        prod = st.number_input("Produtividade (sc/ha)", 80.0)
+
+    with st.sidebar.expander("🪨 Calcário"):
+        c_prnt = st.number_input("PRNT (%)", 80.0); c_cao = st.number_input("CaO (%)", 36.0); c_mgo = st.number_input("MgO (%)", 9.0)
+        c_t_ca = st.number_input("Alvo Ca (%)", 60.0); c_t_mg = st.number_input("Alvo Mg (%)", 18.0); c_res = st.number_input("Reserva (kg)", 0)
+
+    with st.sidebar.expander("🧪 Fósforo"):
+        nc04 = st.number_input("NC P-rem 0-4", 8.0); nc4560 = st.number_input("NC P-rem 45-60", 22.0)
+        p_teor = st.number_input("Teor Adubo P (%)", 21.0); p_exp = st.number_input("Exp. P (kg/sc)", 0.8)
+
+    with st.sidebar.expander("🍌 Potássio"):
+        k_target = st.number_input("Alvo K (%)", 3.2); k_teor = st.number_input("Teor Adubo K (%)", 60.0); k_exp = st.number_input("Exp. K (kg/sc)", 1.2)
+
+    with st.sidebar.expander("⚪ Gesso"):
+        g_fator = st.number_input("Fator Argila", 15.0); g_min = st.number_input("Min (kg/ha)", 400.0); g_max = st.number_input("Max (kg/ha)", 900.0)
+
+    params = {
+        "global": {"produtividade": prod},
+        "calagem": {"prnt": c_prnt, "cao": c_cao, "mgo": c_mgo, "target_ca": c_t_ca, "target_mg": c_t_mg, "reserva": c_res},
+        "fosforo": {"nc_0_4": nc04, "nc_4_10": 10.0, "nc_10_19": 12.0, "nc_19_30": 15.0, "nc_30_45": 18.0, "nc_45_60": nc4560, "f_muito_arg": 10.0, "f_argiloso": 8.0, "f_medio": 4.0, "f_arenoso": 2.0, "teor_adubo": p_teor, "f_exp": p_exp},
+        "potassio": {"target_k": k_target, "teor_adubo": k_teor, "f_exp": k_exp},
+        "gesso": {"fator": g_fator, "min": g_min, "max": g_max}
+    }
+    return menu, params
+
+# --- PÁGINA PRODUTORES ---
 def pag_produtores(params):
     st.markdown("<h2 class='section-header'>Area Tecnica: Consultoria Triade</h2>", unsafe_allow_html=True)
-    tab_dados, tab_mapas = st.tabs(["📁 Dados e Upload", "🗺️ Mapas e Recomendacoes"])
+    tab_dados, tab_mapas = st.tabs(["📁 Upload", "🗺️ Mapas"])
     
     with tab_dados:
-        st.write("### 1. Upload de Dados")
-        uploaded_file = st.file_uploader("Selecione o arquivo CSV (A-Y)", type=['csv'])
-        
+        uploaded_file = st.file_uploader("Subir CSV (A-Y)", type=['csv'])
         if uploaded_file:
             try:
-                # Ajuste para ler com ponto decimal e separador de ponto-e-virgula (padrao Excel BR)
-                df_input = pd.read_csv(uploaded_file, sep=';', decimal='.', encoding='utf-8-sig')
-                df_input.columns = df_input.columns.str.strip() 
-                
-                if 'Argila' in df_input.columns:
-                    st.success("Dados carregados e validados para o padrao v43!")
-                    st.session_state['df_base'] = df_input
-                else:
-                    st.error(f"Erro: Coluna 'Argila' nao encontrada. Verifique o cabeçalho.")
-            except Exception as e:
-                st.error(f"Erro ao ler arquivo: {e}")
+                df = pd.read_csv(uploaded_file, sep=';', decimal='.', encoding='utf-8-sig')
+                df.columns = df.columns.str.strip()
+                if 'Argila' in df.columns:
+                    st.session_state['df_base'] = df
+                    st.success("Dados carregados!")
+            except Exception as e: st.error(f"Erro: {e}")
 
     with tab_mapas:
         if 'df_base' in st.session_state:
             df_final = motor_calculo_v43(st.session_state['df_base'], params)
-            st.dataframe(df_final[['id', 'ZONA_MANEJO', 'REC_CALCARIO', 'REC_GESSO', 'REC_P_ADUBO', 'REC_K_ADUBO']], use_container_width=True)
-            
-            fig = px.scatter(df_final, x='Longitude', y='Latitude', color='ZONA_MANEJO',
-                             color_discrete_map={"Baixa":"#313695", "Média":"#fee090", "Alta":"#a50026"},
-                             title="Zoneamento Triade (Coolwarm Palette)")
+            st.dataframe(df_final[['id', 'ZONA_MANEJO', 'REC_CALCARIO', 'REC_GESSO']])
+            fig = px.scatter(df_final, x='Longitude', y='Latitude', color='ZONA_MANEJO', color_discrete_map={"Baixa":"#313695", "Média":"#fee090", "Alta":"#a50026"})
             st.plotly_chart(fig, use_container_width=True)
-            
-            if st.button("📄 Gerar Relatório PDF Final"):
-                pdf_bytes = gerar_relatorio_completo(df_final, params)
-                st.download_button("⬇️ Baixar PDF", pdf_bytes, "Relatorio_Triade_v43.pdf", "application/pdf")
-
-def gerar_relatorio_completo(df, params):
-    pdf = TriadePDF()
-    pdf.set_margins(20, 20, 20)
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "Argumentos Tecnicos da Recomendacao", ln=True)
-    pdf.set_font("helvetica", "", 12)
-    pdf.multi_cell(0, 7, "A metodologia Triade foca no rooting profundo (enraizamento) "
-                         "atraves da gessagem estrategica e reducao da toxicidade de aluminio. "
-                         "O equilibrio Ca/Mg na CTC assegura a estabilidade quimica do solo.")
-    pdf.ln(5)
-    # Tabela simplificada no PDF
-    pdf.set_font("helvetica", "B", 10)
-    pdf.cell(30, 10, "Zona", 1); pdf.cell(40, 10, "Gesso (kg/ha)", 1); pdf.cell(40, 10, "Calcario (t/ha)", 1); pdf.ln()
-    pdf.set_font("helvetica", "", 10)
-    for zona in ["Alta", "Média", "Baixa"]:
-        val = df[df['ZONA_MANEJO'] == zona].mean(numeric_only=True)
-        pdf.cell(30, 10, zona, 1)
-        pdf.cell(40, 10, f"{val['REC_GESSO']:.0f}", 1)
-        pdf.cell(40, 10, f"{val['REC_CALCARIO']:.1f}", 1)
-        pdf.ln()
-    return pdf.output()
 
 # --- EXECUÇÃO ---
 menu, params = configurar_interface()
 if menu == "🏠 Home":
-    st.markdown("<h2 class='section-header'>Dashboard de Controle Triade</h2>", unsafe_allow_html=True)
-    st.info("Plataforma v43 pronta para processamento de Gilson Berneck.")
+    st.markdown("<h2 class='section-header'>Dashboard Triade</h2>", unsafe_allow_html=True)
+    st.info("Pronto para processar dados.")
 else:
     pag_produtores(params)
