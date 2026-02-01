@@ -33,10 +33,23 @@ st.markdown("""
 
 # --- MOTOR DE CÁLCULO V43 ---
 def motor_calculo_v43(df, params):
+    # --- NORMALIZAÇÃO DE COLUNAS (SOLUÇÃO PARA KEYERROR) ---
+    # Mapeia variações comuns para o padrão que o motor espera
+    mapeamento = {
+        'ph': 'pH', 'PH': 'pH', 'argila': 'Argila', 'ARGILA': 'Argila',
+        'v%': 'V%', 'V%': 'V%', 'ctc': 'CTC', 'CTC': 'CTC',
+        'p res': 'P res', 'P RES': 'P res', 'prem': 'prem', 'PREM': 'prem',
+        'ca%': 'Ca%', 'mg%': 'Mg%', 'k%': 'K%'
+    }
+    df = df.rename(columns=mapeamento)
+
     cols_numericas = ['Argila', 'Ca%', 'Mg%', 'CTC', 'P res', 'K%', 'V%', 'pH', 'prem', 'K']
     for col in cols_numericas:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        else:
+            # Cria a coluna com zeros se ela não existir para não quebrar a conta
+            df[col] = 0.0
 
     p_p = params["fosforo"]
     k_p = params["potassio"]
@@ -44,50 +57,45 @@ def motor_calculo_v43(df, params):
     c_p = params["calagem"]
     prod_esperada = params["global"]["produtividade"]
 
-    # 1. GESSAGEM: Argila (g/kg) * Fator
+    # 1. GESSAGEM
     df['REC_GESSO'] = (df['Argila'] * g_p["fator"]).clip(lower=g_p["min"], upper=g_p["max"]).round(2)
 
-    # 2. CALAGEM (Equilíbrio Ca e Mg na CTC)
+    # 2. CALAGEM
     df['NC_CA'] = ((c_p["target_ca"] - df['Ca%']).clip(lower=-999) * df['CTC'] / 100)
     df['NC_MG'] = ((c_p["target_mg"] - df['Mg%']).clip(lower=-999) * df['CTC'] / 100)
-    
     dose_ca = (df['NC_CA'].clip(lower=0) * 560 * 100) / (c_p["cao"] * c_p["prnt"])
     dose_mg = (df['NC_MG'].clip(lower=0) * 400 * 100) / (c_p["mgo"] * c_p["prnt"])
-    
-    # Resultado Final em kg/ha
     df['REC_CALCARIO'] = ((np.maximum(dose_ca, dose_mg) * 1000) + c_p["reserva"]).round(2)
 
-    # 3. FÓSFORO (NC P-rem + Argila + Exportação)
+    # 3. FÓSFORO
     def calc_p(row):
         prem = row['prem']
+        nc_alvo = p_p["nc_45_60"]
         if prem <= 4: nc_alvo = p_p["nc_0_4"]
         elif prem <= 10: nc_alvo = p_p["nc_4_10"]
         elif prem <= 19: nc_alvo = p_p["nc_10_19"]
         elif prem <= 30: nc_alvo = p_p["nc_19_30"]
         elif prem <= 45: nc_alvo = p_p["nc_30_45"]
-        else: nc_alvo = p_p["nc_45_60"]
 
         arg = row['Argila']
+        f_arg = p_p["f_arenoso"]
         if arg > 600: f_arg = p_p["f_muito_arg"]
         elif arg > 350: f_arg = p_p["f_argiloso"]
         elif arg > 150: f_arg = p_p["f_medio"]
-        else: f_arg = p_p["f_arenoso"]
 
         delta_p = nc_alvo - row['P res']
-        p_correcao_p2o5 = delta_p * f_arg
-        p_exportacao = prod_esperada * p_p["f_exp"]
-        total_p2o5 = p_correcao_p2o5 + p_exportacao
+        total_p2o5 = (delta_p * f_arg) + (prod_esperada * p_p["f_exp"])
         return (max(total_p2o5, 0) * 100) / p_p["teor_adubo"]
 
     df['REC_P_ADUBO'] = df.apply(calc_p, axis=1).round(2)
 
-    # 4. POTÁSSIO (Correção + Exportação Obrigatória)
+    # 4. POTÁSSIO
     df['K_CORRECAO'] = (k_p["target_k"] - df['K%']).clip(lower=-999) * df['CTC'] / 100 * 941
     k_exportacao = prod_esperada * k_p["f_exp"]
     total_k2o = df['K_CORRECAO'].clip(lower=0) + k_exportacao
     df['REC_K_ADUBO'] = (total_k2o * 100 / k_p["teor_adubo"]).round(2)
 
-    # 5. CUSTOS (R$ / ha)
+    # 5. CUSTOS
     df['CUSTO_CALC'] = (df['REC_CALCARIO'] / 1000) * c_p["preco"]
     df['CUSTO_P'] = (df['REC_P_ADUBO'] / 1000) * p_p["preco"]
     df['CUSTO_K'] = (df['REC_K_ADUBO'] / 1000) * k_p["preco"]
@@ -95,9 +103,12 @@ def motor_calculo_v43(df, params):
     df['CUSTO_TOTAL'] = df['CUSTO_CALC'] + df['CUSTO_P'] + df['CUSTO_K'] + df['CUSTO_GESSO']
 
     # 6. ZONEAMENTO
+    # Cálculo seguro do Score
     df['SCORE_ZONA'] = (df['V%'] / 100 * 0.5) + (df['Argila'] / 1000 * 0.25) + (df['pH'] / 10 * 0.25)
-    try: df['ZONA_MANEJO'] = pd.qcut(df['SCORE_ZONA'], 3, labels=["Baixa", "Média", "Alta"], duplicates='drop')
-    except: df['ZONA_MANEJO'] = "Zona Única"
+    try:
+        df['ZONA_MANEJO'] = pd.qcut(df['SCORE_ZONA'], 3, labels=["Baixa", "Média", "Alta"], duplicates='drop')
+    except:
+        df['ZONA_MANEJO'] = "Zona Única"
     return df
 
 # --- INTERFACE LATERAL ---
@@ -109,8 +120,7 @@ def configurar_interface():
     sel_prod = st.sidebar.selectbox("Produtor", produtores)
     if sel_prod == "+ Novo Produtor":
         sel_prod = st.sidebar.text_input("Nome do Produtor")
-        if sel_prod and sel_prod not in st.session_state['db']:
-            st.session_state['db'][sel_prod] = {}
+        if sel_prod and sel_prod not in st.session_state['db']: st.session_state['db'][sel_prod] = {}
 
     fazendas = []
     if sel_prod in st.session_state['db']:
@@ -118,8 +128,7 @@ def configurar_interface():
     sel_faz = st.sidebar.selectbox("Fazenda", fazendas)
     if sel_faz == "+ Nova Fazenda":
         sel_faz = st.sidebar.text_input("Nome da Fazenda")
-        if sel_faz and sel_faz not in st.session_state['db'][sel_prod]:
-            st.session_state['db'][sel_prod][sel_faz] = {}
+        if sel_faz and sel_faz not in st.session_state['db'][sel_prod]: st.session_state['db'][sel_prod][sel_faz] = {}
 
     talhoes = []
     if sel_prod in st.session_state['db'] and sel_faz in st.session_state['db'][sel_prod]:
@@ -132,7 +141,6 @@ def configurar_interface():
 
     st.sidebar.divider()
     st.sidebar.header("⚙️ Atributos Tríade")
-
     with st.sidebar.expander("🌍 Global & Produtividade"):
         prod = st.number_input("Produtividade Esperada (sc/ha)", 80.0)
 
@@ -185,7 +193,6 @@ def pag_produtores(params):
             st.write("#### ➕ Adicionar Dados")
             up_csv = st.file_uploader("Subir Planilha Solo (A-Y)", type=['csv'], key=f"csv_{t}")
             up_kml = st.file_uploader("Subir Contorno (KML, JSON, GEOJSON, ZIP)", type=['kml', 'json', 'geojson', 'zip'], key=f"kml_{t}")
-            
             if st.button("💾 Salvar no Banco de Dados"):
                 if up_csv:
                     try:
@@ -201,7 +208,7 @@ def pag_produtores(params):
             st.write("#### 📋 Planilha Atual")
             if st.session_state['db'][p][f][t]["df"] is not None:
                 st.dataframe(st.session_state['db'][p][f][t]["df"])
-            else: st.info("Sem dados vinculados a este talhão.")
+            else: st.info("Selecione os dados para este talhão.")
 
     with tab_mapas:
         df_base = st.session_state['db'][p][f][t]["df"]
@@ -215,11 +222,11 @@ def pag_produtores(params):
                 k1.markdown(f"<div class='kpi-card'><small>Custo Calcário</small><div class='kpi-value'>R$ {res['CUSTO_CALC'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
                 k2.markdown(f"<div class='kpi-card'><small>Custo Fósforo</small><div class='kpi-value'>R$ {res['CUSTO_P'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
                 k3.markdown(f"<div class='kpi-card'><small>Custo Potássio</small><div class='kpi-value'>R$ {res['CUSTO_K'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
-                k4.markdown(f"<div class='kpi-card'><small>TOTAL</small><div class='kpi-value' style='color:#27ae60'>R$ {res['CUSTO_TOTAL'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+                k4.markdown(f"<div class='kpi-card'><small>INVESTIMENTO TOTAL</small><div class='kpi-value' style='color:#27ae60'>R$ {res['CUSTO_TOTAL'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
                 
                 st.write("### Recomendações (kg/ha)")
-                cols_v = ['id', 'CAMPO', 'ZONA_MANEJO', 'REC_CALCARIO', 'REC_GESSO', 'REC_P_ADUBO', 'REC_K_ADUBO']
-                st.dataframe(res[cols_v])
+                cols_view = ['id', 'ZONA_MANEJO', 'REC_CALCARIO', 'REC_GESSO', 'REC_P_ADUBO', 'REC_K_ADUBO']
+                st.dataframe(res[cols_view])
                 
                 fig = px.scatter(res, x='Longitude', y='Latitude', color='ZONA_MANEJO',
                                  color_discrete_map={"Baixa":"#313695", "Média":"#fee090", "Alta":"#a50026"},
@@ -227,14 +234,14 @@ def pag_produtores(params):
                 st.plotly_chart(fig, use_container_width=True)
 
                 if st.button("⚙️ Motor Tríade"):
-                    st.dialog("Fórmulas v43")
-                    st.markdown("""
-                    **1. Gesso:** $Argila (g/kg) \\times Fator$.  
+                    st.dialog("Fórmulas de Recomendação v43")
+                    st.markdown(r"""
+                    **1. Gesso:** $Argila (g/kg) \times Fator$.  
                     **2. Calcário:** $Max(NC_{Ca}, NC_{Mg}) + Reserva$.  
-                    **3. Fósforo:** $((NC_{P-rem} - P_{solo}) \\times Fator_{Argila} + Prod \\times F_{exp}) \\times \\frac{100}{Teor_{P2O5}}$.  
-                    **4. Potássio:** $((Alvo_K - Atual_K) \\times \\frac{CTC}{100} \\times 941 + Prod \\times F_{exp}) \\times \\frac{100}{Teor_{K2O}}$.
+                    **3. Fósforo:** $((NC_{P-rem} - P_{solo}) \times Fator_{Argila} + Prod \times F_{exp}) \times \frac{100}{Teor_{P2O5}}$.  
+                    **4. Potássio:** $((Alvo_K - Atual_K) \times \frac{CTC}{100} \times 941 + Prod \times F_{exp}) \times \frac{100}{Teor_{K2O}}$.
                     """)
-        else: st.warning("Suba os dados primeiro.")
+        else: st.warning("Aguardando upload de dados.")
 
 # --- EXECUÇÃO ---
 params = configurar_interface()
