@@ -27,7 +27,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- MOTOR DE CÁLCULO V43 (REGRAS DE NEGÓCIO EXPANDIDAS) ---
+# --- MOTOR DE CÁLCULO V43 (REGRAS DE NEGÓCIO) ---
 def motor_calculo_v43(df, params):
     # Desempacotamento de Parâmetros
     p = params["fosforo"]
@@ -37,10 +37,10 @@ def motor_calculo_v43(df, params):
     prod_esperada = params["global"]["produtividade"]
 
     # 1. GESSAGEM (Argila g/kg * Fator) com travas Min/Max
+    # O .clip garante que a dose não saia da faixa permitida pelo agrônomo
     df['REC_GESSO'] = (df['Argila'] * g_params["fator"]).clip(lower=g_params["min"], upper=g_params["max"])
 
     # 2. CALAGEM (Máximo entre Ca e Mg)
-    # NC = (Alvo - Atual) * CTC / 100 -> Convertendo para dose baseada em CaO/MgO e PRNT
     df['NC_CA'] = ((c_params["target_ca"] - df['Ca%']).clip(lower=0) * df['CTC'] / 100)
     df['NC_MG'] = ((c_params["target_mg"] - df['Mg%']).clip(lower=0) * df['CTC'] / 100)
     
@@ -60,31 +60,29 @@ def motor_calculo_v43(df, params):
         elif prem <= 45: nc_alvo = p["nc_30_45"]
         else: nc_alvo = p["nc_45_60"]
 
-        # Identifica Fator de Correção (Argila)
+        # Identifica Fator de Correção pela Classe de Argila
         arg = row['Argila']
         if arg > 600: f_arg = p["f_muito_arg"]
         elif arg > 350: f_arg = p["f_argiloso"]
         elif arg > 150: f_arg = p["f_medio"]
         else: f_arg = p["f_arenoso"]
 
-        # Cálculo: (Alvo - Atual) * Fator
+        # Balanço: (Alvo - Atual) * Fator + Exportação
         delta_p = nc_alvo - row['P res']
-        # Se P no solo > Alvo, o valor negativo subtrai da exportação
         p_correcao_p2o5 = delta_p * f_arg 
         p_exportacao = prod_esperada * p["f_exp"]
         
         total_p2o5 = p_correcao_p2o5 + p_exportacao
+        # Converte para kg/ha do adubo escolhido
         return (max(total_p2o5, 0) * 100) / p["teor_adubo"]
 
     df['REC_P_ADUBO'] = df.apply(calc_p, axis=1).round(2)
 
     # 4. POTÁSSIO (Correção na CTC + Exportação)
-    # cmolc -> kg/ha de K2O (Fator aprox 941)
-    df['K_ATUAL_CTC'] = (df['K'] / df['CTC']) * 100 # Se K estiver em cmolc
     df['NC_K_CORRECAO'] = (k_params["target_k"] - df['K%']).clip(lower=0) * df['CTC'] / 100 * 941
     df['K_EXPORTACAO'] = prod_esperada * k_params["f_exp"]
     
-    # Soma correção + exportação (mesmo se solo estiver alto, soma exportação)
+    # Soma correção + exportação (mesmo se solo alto, soma exportação)
     total_k2o = df['NC_K_CORRECAO'] + df['K_EXPORTACAO']
     df['REC_K_ADUBO'] = (total_k2o * 100 / k_params["teor_adubo"]).round(2)
 
@@ -97,18 +95,16 @@ def motor_calculo_v43(df, params):
 
     return df
 
-# --- INTERFACE LATERAL (PASTAS DE ATRIBUTOS) ---
+# --- INTERFACE LATERAL (PARAMETRIZAÇÃO EDITÁVEL) ---
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
     menu = st.sidebar.radio("Navegação", ["🏠 Home", "👥 Produtores"])
     
     st.sidebar.header("⚙️ Parâmetros da Metodologia")
     
-    # Pasta Global
     with st.sidebar.expander("🌍 Global & Produtividade"):
         prod = st.number_input("Produtividade Esperada (sc/ha)", 80.0)
 
-    # Pasta Calagem
     with st.sidebar.expander("🪨 Atributos: Calcário"):
         c_prnt = st.number_input("PRNT (%)", 80.0)
         c_cao = st.number_input("Teor CaO (%)", 36.0)
@@ -116,39 +112,36 @@ def configurar_interface():
         c_t_ca = st.number_input("Alvo Ca/CTC (%)", 60.0)
         c_t_mg = st.number_input("Alvo Mg/CTC (%)", 18.0)
         c_res = st.number_input("Calcário Reserva (kg/ha)", 0)
-        c_preco = st.number_input("R$ / Tonelada (Calcário)", 250.0)
+        c_preco = st.number_input("Preço R$/Ton (Calcário)", 250.0)
 
-    # Pasta Fósforo
     with st.sidebar.expander("🧪 Atributos: Fósforo"):
         st.write("**Níveis Críticos (mg/dm³)**")
-        nc04 = st.number_input("0-4 P-rem", 8.0)
-        nc410 = st.number_input("4.1-10 P-rem", 10.0)
-        nc1019 = st.number_input("10.1-19 P-rem", 12.0)
-        nc1930 = st.number_input("19.1-30 P-rem", 15.0)
-        nc3045 = st.number_input("30.1-45 P-rem", 18.0)
-        nc4560 = st.number_input("45.1-60 P-rem", 22.0)
+        nc04 = st.number_input("0 a 4 P-rem", 8.0)
+        nc410 = st.number_input("4,1 a 10 P-rem", 10.0)
+        nc1019 = st.number_input("10,1 a 19 P-rem", 12.0)
+        nc1930 = st.number_input("19,1 a 30 P-rem", 15.0)
+        nc3045 = st.number_input("30,1 a 45 P-rem", 18.0)
+        nc4560 = st.number_input("45,1 a 60 P-rem", 22.0)
         
-        st.write("**Fatores Argila (Multiplicador)**")
-        f_m_arg = st.number_input("Muito Argiloso (>60%)", 10.0)
-        f_arg = st.number_input("Argiloso (35-60%)", 8.0)
-        f_med = st.number_input("Médio (15-35%)", 4.0)
-        f_are = st.number_input("Arenoso (<15%)", 2.0)
+        st.write("**Fatores de Correção (Argila)**")
+        f_m_arg = st.number_input("Muito Argiloso (x10)", 10.0)
+        f_arg = st.number_input("Argiloso (x8)", 8.0)
+        f_med = st.number_input("Médio (x4)", 4.0)
+        f_are = st.number_input("Arenoso (x2)", 2.0)
         
         st.write("**Adubo & Exportação**")
         p_teor = st.number_input("Teor P2O5 no Adubo (%)", 21.0)
-        p_exp = st.number_input("Fator Exportação P (kg/sc)", 0.8)
-        p_preco = st.number_input("R$ / Tonelada (Fosfatado)", 3200.0)
+        p_exp = st.number_input("Fator Exportação (kg/sc)", 0.8)
+        p_preco = st.number_input("Preço R$/Ton (Fosfatado)", 3200.0)
 
-    # Pasta Potássio
     with st.sidebar.expander("🍌 Atributos: Potássio"):
         k_target = st.number_input("Alvo K na CTC (%)", 3.2)
         k_teor = st.number_input("Teor K2O no Adubo (%)", 60.0)
-        k_exp = st.number_input("Fator Exportação K (kg/sc)", 1.2)
-        k_preco = st.number_input("R$ / Tonelada (Potássico)", 2800.0)
+        k_exp = st.number_input("Fator Exportação (kg/sc)", 1.2)
+        k_preco = st.number_input("Preço R$/Ton (Potássico)", 2800.0)
 
-    # Pasta Gesso
     with st.sidebar.expander("⚪ Atributos: Gesso"):
-        g_fator = st.number_input("Fator Argila (Argila * X)", 15.0)
+        g_fator = st.number_input("Fator Multiplicação Argila", 15.0)
         g_min = st.number_input("Dose Mínima (kg/ha)", 400.0)
         g_max = st.number_input("Dose Máxima (kg/ha)", 900.0)
 
@@ -167,50 +160,64 @@ def configurar_interface():
 
 # --- PÁGINA PRODUTORES ---
 def pag_produtores(params):
-    st.markdown(f"<h2 class='section-header'>Consultoria Estratégica: Gilson Berneck</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 class='section-header'>Área Técnica: Consultoria Tríade</h2>", unsafe_allow_html=True)
     
     tab_dados, tab_mapas = st.tabs(["📁 Dados e Upload", "🗺️ Mapas e Recomendações"])
     
     with tab_dados:
-        st.write("### Gestão de Arquivos de Solo")
-        # Download do Modelo A-Y
-        cols = ['Latitude', 'Longitude', 'CAMPO', 'id', 'prof', 'pH', 'P res', 'P mehl', 'K', 'Ca', 'Mg', 'Al', 'CTC', 'V%', 'Argila', 'Silte', 'K%', 'Ca%', 'prem', 'Areia gross', 'Areia total', 'Areia fina', 'Ca/Mg', 'H/Al', 'Mg%']
-        df_mod = pd.DataFrame(columns=cols)
+        st.write("### 1. Preparação da Planilha")
+        cols_triade = ['Latitude', 'Longitude', 'CAMPO', 'id', 'prof', 'pH', 'P res', 'P mehl', 'K', 'Ca', 'Mg', 'Al', 'CTC', 'V%', 'Argila', 'Silte', 'K%', 'Ca%', 'prem', 'Areia gross', 'Areia total', 'Areia fina', 'Ca/Mg', 'H/Al', 'Mg%']
+        df_mod = pd.DataFrame(columns=cols_triade)
         csv = df_mod.to_csv(index=False, sep=';').encode('utf-8-sig')
-        st.download_button("⬇️ Baixar Modelo Oficial A-Y", data=csv, file_name="modelo_triade_A-Y.csv", mime="text/csv")
+        st.download_button("⬇️ Baixar Modelo Oficial A-Y", data=csv, file_name="modelo_triade_v43.csv", mime="text/csv")
         
         st.divider()
-        uploaded_file = st.file_uploader("Upload da Planilha de Solo", type=['csv'])
+        st.write("### 2. Upload de Dados")
+        uploaded_file = st.file_uploader("Selecione o arquivo CSV", type=['csv'])
         
         if uploaded_file:
-            df_input = pd.read_csv(uploaded_file, sep=';')
-            st.success("Dados carregados com sucesso!")
-            st.session_state['df_base'] = df_input
+            try:
+                # O segredo da correção está aqui:
+                df_input = pd.read_csv(uploaded_file, sep=';')
+                # Remove espaços em branco dos nomes das colunas
+                df_input.columns = df_input.columns.str.strip() 
+                
+                # Verifica se a coluna 'Argila' existe após a limpeza
+                if 'Argila' in df_input.columns:
+                    st.success("Dados carregados e colunas validadas!")
+                    st.session_state['df_base'] = df_input
+                else:
+                    st.error(f"Erro: A coluna 'Argila' não foi encontrada. Colunas detectadas: {list(df_input.columns)}")
+            except Exception as e:
+                st.error(f"Erro ao ler arquivo: {e}")
 
     with tab_mapas:
         if 'df_base' in st.session_state:
-            df = motor_calculo_v43(st.session_state['df_base'], params)
+            # Roda o motor de cálculo
+            df_final = motor_calculo_v43(st.session_state['df_base'], params)
             
-            st.write("### Painel de Recomendações VRT")
-            cols_show = ['id', 'ZONA_MANEJO', 'REC_CALCARIO', 'REC_GESSO', 'REC_P_ADUBO', 'REC_K_ADUBO']
-            st.dataframe(df[cols_show], use_container_width=True)
+            st.write("### Recomendações Geradas")
+            # Exibe as principais colunas de resultado
+            res_cols = ['id', 'ZONA_MANEJO', 'REC_CALCARIO', 'REC_GESSO', 'REC_P_ADUBO', 'REC_K_ADUBO']
+            st.dataframe(df_final[res_cols], use_container_width=True)
             
-            # Gráfico de Zonas
-            fig = px.scatter(df, x='Longitude', y='Latitude', color='ZONA_MANEJO',
+            # Visualização Espacial
+            fig = px.scatter(df_final, x='Longitude', y='Latitude', color='ZONA_MANEJO',
                              color_discrete_map={"Baixa":"#313695", "Média":"#fee090", "Alta":"#a50026"},
-                             title="Configuração das Zonas de Manejo")
+                             title="Mapa de Zonas de Manejo (Coolwarm)")
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Aguardando upload de dados na aba 'Dados e Upload'.")
+            st.info("Aguardando upload dos dados na aba anterior.")
 
-# --- EXECUÇÃO ---
+# --- EXECUÇÃO PRINCIPAL ---
 menu, params = configurar_interface()
+
 if menu == "🏠 Home":
-    # Reaproveitando a pag_home do seu código original
-    st.markdown("<h2 class='section-header'>Centro de Comando Tríade</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 class='section-header'>Dashboard Administrativo</h2>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
-    c1.markdown("<div class='kpi-card'><div class='kpi-label'>Área</div><div class='kpi-value'>17.000 ha</div></div>", unsafe_allow_html=True)
-    c2.markdown("<div class='kpi-card'><div class='kpi-label'>Cliente</div><div class='kpi-value'>G. Berneck</div></div>", unsafe_allow_html=True)
-    # ... etc
+    c1.markdown("<div class='kpi-card'><div class='kpi-label'>Área Monitorada</div><div class='kpi-value'>17.000 ha</div></div>", unsafe_allow_html=True)
+    c2.markdown("<div class='kpi-card'><div class='kpi-label'>Cliente Foco</div><div class='kpi-value'>G. Berneck</div></div>", unsafe_allow_html=True)
+    c3.markdown("<div class='kpi-card'><div class='kpi-label'>Safra</div><div class='kpi-value'>25/26</div></div>", unsafe_allow_html=True)
+    c4.markdown("<div class='kpi-card'><div class='kpi-label'>Status</div><div class='kpi-value' style='color:#27ae60'>Ativo</div></div>", unsafe_allow_html=True)
 else:
     pag_produtores(params)
