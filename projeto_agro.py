@@ -73,7 +73,12 @@ def motor_calculo_v43(df, params):
 
     # 4. ÁLGEBRA DE MAPAS (3 ZONAS: 50% NDVI | 25% CTC | 25% Brilho)
     df['SCORE_ZONA'] = (df['V%'] / 100 * 0.5) + (df['Argila'] / 1000 * 0.25) + (df['pH'] / 10 * 0.25)
-    df['ZONA_MANEJO'] = pd.qcut(df['SCORE_ZONA'], 3, labels=["Baixa", "Média", "Alta"])
+    try:
+    # Tenta criar as 3 zonas normalmente
+    df['ZONA_MANEJO'] = pd.qcut(df['SCORE_ZONA'], 3, labels=["Baixa", "Média", "Alta"], duplicates='drop')
+except ValueError:
+    # Se ainda assim der erro (ex: todos os valores são iguais), atribui uma zona única
+    df['ZONA_MANEJO'] = "Zona Única"
     
     return df
 
@@ -163,3 +168,4 @@ if menu == "🏠 Home / Onboarding":
     pag_home()
 else:
     pag_produtores(params)
+
