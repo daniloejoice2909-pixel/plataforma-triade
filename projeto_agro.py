@@ -28,7 +28,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- CLASSE PDF PROFISSIONAL (A4, MARGENS 2CM, OPEN SANS) ---
+# --- CLASSE PDF PROFISSIONAL (A4, MARGENS 2CM) ---
 class TriadePDF(FPDF):
     def header(self):
         try: self.image("LogoTriadeagro.png.png", 10, 8, 40)
@@ -36,17 +36,13 @@ class TriadePDF(FPDF):
         self.set_font("Helvetica", "B", 12)
         self.cell(0, 10, "Relatório de Recomendação Estratégica", ln=True, align="R")
         self.ln(10)
-
     def footer(self):
         self.set_y(-15)
         self.set_font("Helvetica", "I", 8)
         self.cell(0, 10, f"Tríade Agro Estratégica v43 - Página {self.page_no()}", 0, 0, "C")
 
-# --- MOTOR DE CÁLCULO V43 (AGRONOMIA + ÁLGEBRA DE MAPAS) ---
+# --- MOTOR DE CÁLCULO V43 (REGRAS DE OURO) ---
 def motor_calculo_v43(df, params):
-    """
-    Executa os cálculos de gessagem, calagem (fatores 560/400) e álgebra de mapas para 3 zonas.
-    """
     p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, f_ca, f_mg = params["calagem"]
     niveis_p = params["fosforo"]
     
@@ -54,13 +50,11 @@ def motor_calculo_v43(df, params):
     df['REC_GESSO'] = (df['Argila'] * 15).round(2)
     
     # 2. CALAGEM (Equilíbrio Ca/Mg na CTC - Fatores 560/400)
-    # NC (cmolc/dm3) = (Alvo % - Atual %) * CTC / 100
-    df['NC_CA_REQ'] = ((target_ca - df['Ca%']).clip(lower=0) * df['CTC'] / 100)
-    df['NC_MG_REQ'] = ((target_mg - df['Mg%']).clip(lower=0) * df['CTC'] / 100)
+    df['NC_CA'] = ((target_ca - df['Ca%']).clip(lower=0) * df['CTC'] / 100)
+    df['NC_MG'] = ((target_mg - df['Mg%']).clip(lower=0) * df['CTC'] / 100)
     
-    # Dose (t/ha) = (NC * Fator * 100) / (Teor no Calcário * PRNT)
-    df['DOSE_CAO'] = (df['NC_CA_REQ'] * f_ca * 100) / (p_cao * p_prnt)
-    df['DOSE_MGO'] = (df['NC_MG_REQ'] * f_mg * 100) / (p_mgo * p_prnt)
+    df['DOSE_CAO'] = (df['NC_CA'] * f_ca * 100) / (p_cao * p_prnt)
+    df['DOSE_MGO'] = (df['NC_MG'] * f_mg * 100) / (p_mgo * p_prnt)
     
     # Regra do Máximo estabelecida
     df['REC_CALCARIO'] = (np.maximum(df['DOSE_CAO'], df['DOSE_MGO']) + calc_extra).round(2)
@@ -75,17 +69,15 @@ def motor_calculo_v43(df, params):
         else: return niveis_p["45-60"]
 
     df['NC_P_ALVO'] = df['prem'].apply(buscar_nc_p)
-    df['REC_P2O5'] = ((df['NC_P_ALVO'] - df['P res']).clip(lower=0) * 10).round(2) # Fator 10 de exemplo
+    df['REC_P2O5'] = ((df['NC_P_ALVO'] - df['P res']).clip(lower=0) * 10).round(2)
 
     # 4. ÁLGEBRA DE MAPAS (3 ZONAS: 50% NDVI | 25% CTC | 25% Brilho)
-    # Normalização simples para o mock (0-1)
-    df['NDVI_NORM'] = (df['pH'] / 10) # Simulando NDVI via pH para o mock
-    df['SCORE_ZONA'] = (df['NDVI_NORM'] * 0.5) + (df['V%'] / 100 * 0.25) + (df['Argila'] / 1000 * 0.25)
+    df['SCORE_ZONA'] = (df['V%'] / 100 * 0.5) + (df['Argila'] / 1000 * 0.25) + (df['pH'] / 10 * 0.25)
     df['ZONA_MANEJO'] = pd.qcut(df['SCORE_ZONA'], 3, labels=["Baixa", "Média", "Alta"])
     
     return df
 
-# --- INTERFACE E NAVEGAÇÃO ---
+# --- INTERFACE LATERAL ---
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
     menu = st.sidebar.radio("Navegação", ["🏠 Home / Onboarding", "👥 Produtores"])
@@ -112,6 +104,7 @@ def configurar_interface():
 def pag_home():
     st.markdown("<h2 class='section-header'>Centro de Comando Tríade</h2>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
+    # KPI Cards blindados contra quebras de string
     c1.markdown("""<div class='kpi-card'><div class='kpi-label'>Área Monitorada</div><div class='kpi-value'>17.000 ha</div></div>""", unsafe_allow_html=True)
     c2.markdown("""<div class='kpi-card'><div class='kpi-label'>Cliente Ativo</div><div class='kpi-value'>Gilson Berneck</div></div>""", unsafe_allow_html=True)
     c3.markdown("""<div class='kpi-card'><div class='kpi-label'>Alertas NDVI</div><div class='kpi-value' style='color:#e74c3c'>02</div></div>""", unsafe_allow_html=True)
@@ -122,6 +115,7 @@ def pag_home():
 
     with col_dl:
         st.write("#### 1. Planilha de Solo (A-Y)")
+        # Sequência exata de colunas A-Y (25 colunas)
         cols = ['Latitude', 'Longitude', 'CAMPO', 'id', 'prof', 'pH', 'P res', 'P mehl', 'K', 'Ca', 'Mg', 'Al', 'CTC', 'V%', 'Argila', 'Silte', 'K%', 'Ca%', 'prem', 'Areia gross', 'Areia total', 'Areia fina', 'Ca/Mg', 'H/Al', 'Mg%']
         df_mod = pd.DataFrame(columns=cols)
         csv = df_mod.to_csv(index=False, sep=';').encode('utf-8-sig')
@@ -132,6 +126,40 @@ def pag_home():
         st.file_uploader("Subir Planilha Preenchida ou Contorno", type=['csv', 'zip', 'kml'])
 
     with col_map:
-        st.write("#### 📍 Delimitação de Talhões")
+        st.write("#### 📍 Delimitação Espacial")
+        # Correção do SyntaxError: Parênteses fechados corretamente
         m = folium.Map(location=[-18.42, -47.41], zoom_start=13, tiles="CartoDB positron")
-        Draw(export=True).add_to(
+        Draw(export=True).add_to(m) 
+        st_folium(m, width=800, height=450)
+
+# --- PÁGINA PRODUTORES ---
+def pag_produtores(params):
+    st.subheader("Consultoria: Gilson Berneck")
+    tab_safra, tab_analises = st.tabs(["🌾 Safra 2025/26", "📊 Histórico de Dados"])
+    
+    with tab_safra:
+        with st.expander("🎯 Zonas de Produtividade & Recomendações", expanded=True):
+            # Mock de dados seguindo a sequência A-Y para teste
+            data = {
+                'id': [1, 2, 3], 'Ca%': [45, 50, 35], 'Mg%': [12, 14, 10], 'CTC': [12, 10, 14], 
+                'Argila': [450, 200, 600], 'P res': [5, 12, 4], 'prem': [8, 15, 4],
+                'V%': [55, 60, 45], 'pH': [5.8, 6.2, 5.2],
+                'Latitude': [-18.42, -18.43, -18.44], 'Longitude': [-47.41, -47.42, -47.43]
+            }
+            df = motor_calculo_v43(pd.DataFrame(data), params)
+            
+            # Mapa Coolwarm classificado em 3 zonas
+            fig = px.scatter(df, x='Longitude', y='Latitude', color='ZONA_MANEJO', 
+                             color_discrete_map={"Baixa":"#313695", "Média":"#fee090", "Alta":"#a50026"},
+                             title="3 Zonas de Manejo (Coolwarm Palette)")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.write("### Recomendação Técnica VRT")
+            st.dataframe(df[['id', 'ZONA_MANEJO', 'REC_CALCARIO', 'REC_GESSO', 'REC_P2O5']])
+
+# --- EXECUÇÃO ---
+menu, params = configurar_interface()
+if menu == "🏠 Home / Onboarding":
+    pag_home()
+else:
+    pag_produtores(params)
