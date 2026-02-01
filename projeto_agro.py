@@ -83,11 +83,9 @@ def motor_calculo_v43(df, params):
     df['REC_P_ADUBO'] = df.apply(calc_p, axis=1).round(2)
 
     # 4. POTÁSSIO (Correção + Exportação Obrigatória)
-    # NC K = (Alvo - Atual) * CTC / 100 * 941 (Fator K2O)
     df['K_CORRECAO'] = (k_p["target_k"] - df['K%']).clip(lower=-999) * df['CTC'] / 100 * 941
     k_exportacao = prod_esperada * k_p["f_exp"]
     
-    # "Mesmo que no solo tenha valor maior que o esperado, somar a exportação"
     total_k2o = df['K_CORRECAO'].clip(lower=0) + k_exportacao
     df['REC_K_ADUBO'] = (total_k2o * 100 / k_p["teor_adubo"]).round(2)
 
@@ -109,7 +107,6 @@ def motor_calculo_v43(df, params):
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
     
-    # Gestão de Hierarquia na Lateral
     st.sidebar.header("📍 Localização")
     produtores = list(st.session_state['db'].keys()) + ["+ Novo Produtor"]
     sel_prod = st.sidebar.selectbox("Produtor", produtores)
@@ -194,7 +191,11 @@ def pag_produtores(params):
         with c1:
             st.write("#### ➕ Adicionar Dados")
             up_csv = st.file_uploader("Subir Planilha Solo (A-Y)", type=['csv'], key=f"csv_{t}")
-            up_kml = st.file_uploader("Subir Contorno (KML/ZIP)", type=['kml', 'zip'], key=f"kml_{t}")
+            
+            # ATUALIZAÇÃO SÊNIOR: Suporte a KML, JSON e GEOJSON adicionado aqui
+            up_contorno = st.file_uploader("Subir Contorno (KML, JSON, GEOJSON, ZIP)", 
+                                          type=['kml', 'json', 'geojson', 'zip'], 
+                                          key=f"contorno_{t}")
             
             if st.button("💾 Salvar no Banco de Dados"):
                 if up_csv:
@@ -202,6 +203,9 @@ def pag_produtores(params):
                     df_up.columns = df_up.columns.str.strip()
                     st.session_state['db'][p][f][t]["df"] = df_up
                     st.success("Planilha Salva!")
+                if up_contorno:
+                    st.session_state['db'][p][f][t]["contorno"] = up_contorno
+                    st.success("Arquivo de Contorno Salvo!")
         
         with c2:
             st.write("#### 📋 Planilha Atual")
