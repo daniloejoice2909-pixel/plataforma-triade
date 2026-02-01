@@ -12,7 +12,7 @@ from folium.plugins import Draw
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Tríade Agro Estratégica v43", layout="wide", page_icon="🌱")
 
-# --- CSS CUSTOMIZADO (UX PREMIUM) ---
+# --- CSS CUSTOMIZADO ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
@@ -24,7 +24,6 @@ st.markdown("""
         border-bottom: 4px solid #1e3d59;
     }
     .kpi-value { font-size: 28px; font-weight: 700; color: #1e3d59; }
-    .legend-box { padding: 10px; border-radius: 5px; font-weight: bold; color: white; text-align: center; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -34,31 +33,36 @@ class TriadePDF(FPDF):
         try: self.image("LogoTriadeagro.png.png", 10, 8, 40)
         except: pass
         self.set_font("helvetica", "B", 12)
-        self.cell(0, 10, "Relatório Técnico de Manejo Estratégico", ln=True, align="R")
+        self.cell(0, 10, "Relatório Técnico - Tríade Agro", ln=True, align="R")
         self.ln(10)
-
     def footer(self):
         self.set_y(-15)
         self.set_font("helvetica", "I", 8)
-        self.cell(0, 10, f"Tríade Agro Estratégica v43 - Página {self.page_no()}", 0, 0, "C")
+        self.cell(0, 10, f"Página {self.page_no()}", 0, 0, "C")
 
-# --- MOTOR DE CÁLCULO (AGRONOMIA & ÁLGEBRA) ---
+# --- MOTOR DE CÁLCULO V43 (REGRAS ATÔMICAS TRÍADE) ---
 def motor_calculo_v43(df, params):
-    # Unpack Params
-    v_alvo = params['v_alvo']
-    k_alvo = params['k_alvo']
-    niveis_p = params['niveis_p']
-    f_text = params['f_text']
+    # Parâmetros de Calagem
+    p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, f_ca, f_mg = params["calagem"]
+    # Parâmetros de Fósforo/Potássio
+    niveis_p, k_alvo = params["fosforo"], params["k_alvo"]
     
-    # 1. Gessagem (Argila em g/kg * 15)
+    # 1. GESSAGEM: Dose (kg/ha) = Argila (g/kg) * 15
     df['REC_GESSO'] = (df['ARGILA'] * 15).round(2)
     
-    # 2. Calagem (Saturação por Bases V%)
-    # NC (t/ha) = (V2 - V1) * CTC / PRNT
-    df['V1'] = (df['SB'] / df['CTC']) * 100
-    df['REC_CALCARIO'] = (((v_alvo - df['V1']).clip(lower=0) * df['CTC']) / 85).round(2) # PRNT padrão 85
+    # 2. CALAGEM (Elevação de Ca e Mg na CTC - Fatores 560/400)
+    # NC (cmolc/dm³) = (Alvo % - Atual %) * CTC / 100
+    df['NC_CA'] = ((target_ca - df['CA_PERC']).map(lambda x: max(0, x)) * df['CTC'] / 100)
+    df['NC_MG'] = ((target_mg - df['MG_PERC']).map(lambda x: max(0, x)) * df['CTC'] / 100)
     
-    # 3. Fósforo (P-rem 6 classes)
+    # Doses Individuais: (NC * Fator * 100) / (Teor no Calcário * PRNT)
+    df['DOSE_CAO'] = (df['NC_CA'] * f_ca * 100) / (p_cao * p_prnt)
+    df['DOSE_MGO'] = (df['NC_MG'] * f_mg * 100) / (p_mgo * p_prnt)
+    
+    # REGRA DE OURO: Máximo entre as doses + adicional
+    df['REC_CALCARIO'] = (np.maximum(df['DOSE_CAO'], df['DOSE_MGO']) + calc_extra).round(2)
+    
+    # 3. FÓSFORO (6 Classes P-rem)
     def calc_p(row):
         prem = row['PREM']
         if prem <= 4: nc = niveis_p["0-4"]
@@ -67,125 +71,82 @@ def motor_calculo_v43(df, params):
         elif prem <= 30: nc = niveis_p["19-30"]
         elif prem <= 45: nc = niveis_p["30-45"]
         else: nc = niveis_p["45-60"]
-        return ((nc - row['P']).clip(lower=0) * 10).round(2) # Exemplo de fator 10
+        return round(max(0, nc - row['P']) * 10, 2)
     
     df['REC_P2O5'] = df.apply(calc_p, axis=1)
     
-    # 4. Potássio (Reposição por CTC e Alvo)
-    df['REC_K2O'] = ((k_alvo - df['K']).clip(lower=0) * 2.4).round(2)
+    # 4. POTÁSSIO
+    df['REC_K2O'] = df['K'].map(lambda x: round(max(0, k_alvo - x) * 2.4, 2))
 
-    # 5. Álgebra de Mapas: Zonas de Produtividade (3 Zonas)
-    # 50% NDVI + 25% CTC + 25% Solo
+    # 5. ÁLGEBRA DE ZONAS (50% NDVI | 25% CTC | 25% Brilho)
     df['POTENCIAL_SCORE'] = (df['NDVI_HIST'] * 0.5) + (df['CTC_NORM'] * 0.25) + (df['BRIGHTNESS'] * 0.25)
     df['ZONA_MANEJO'] = pd.qcut(df['POTENCIAL_SCORE'], 3, labels=["Baixo", "Médio", "Alto"])
     
     return df
 
 # --- INTERFACE ---
+def configurar_interface():
+    st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
+    menu = st.sidebar.radio("Navegação", ["🏠 Home", "👥 Produtores"])
+    
+    st.sidebar.header("⚙️ Parâmetros Técnicos")
+    with st.sidebar.expander("🪨 Calagem Atômica (Ca/Mg)", expanded=True):
+        p_prnt = st.number_input("PRNT Calcário (%)", 80.0)
+        p_cao = st.number_input("Teor CaO (%)", 36.0)
+        p_mgo = st.number_input("Teor MgO (%)", 9.0)
+        target_ca = st.number_input("Alvo Ca na CTC (%)", 60.0)
+        target_mg = st.number_input("Alvo Mg na CTC (%)", 18.0)
+        calc_extra = st.number_input("Adicional (t/ha)", 0.0)
+        f_ca, f_mg = 560, 400
+
+    with st.sidebar.expander("🧪 Fósforo e Potássio", expanded=False):
+        niveis_p = {"0-4": 9.0, "4-10": 10.5, "10-19": 12.5, "19-30": 15.0, "30-45": 17.5, "45-60": 19.3}
+        k_alvo = st.number_input("Alvo K na CTC (%)", 0.35)
+
+    params = {
+        "calagem": (p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, f_ca, f_mg),
+        "fosforo": niveis_p,
+        "k_alvo": k_alvo
+    }
+    return menu, params
+
+# --- PÁGINAS ---
 def pag_produtores(params):
     st.title("Gestão de Produtores")
     produtor = st.selectbox("Selecione o Cliente:", ["Gilson Berneck"])
     
-    # Estrutura de Abas v43
     tab_safra, tab_config = st.tabs(["🌾 Safra 2025/26", "⚙️ Configurar Área"])
     
-    with tab_config:
-        st.subheader("Delimitação de Área")
-        col_shp, col_map = st.columns([1, 2])
-        with col_shp:
-            st.file_uploader("Upload SHP/KML", type=['shp', 'kml', 'zip'])
-            st.info("Ou utilize a ferramenta de desenho ao lado.")
-        with col_map:
-            m = folium.Map(location=[-18.42, -47.41], zoom_start=14)
-            Draw(export=True).add_to(m)
-            st_folium(m, width=700, height=400)
-
     with tab_safra:
-        # Hierarquia de Subpastas
-        exp_solo = st.expander("🧪 Análises de Solo", expanded=False)
-        exp_foliar = st.expander("🍃 Análises Foliares e DRIS", expanded=False)
-        exp_fert = st.expander("🗺️ Mapas de Fertilidade VRT", expanded=False)
-        exp_reco = st.expander("🚜 Mapas de Recomendações (v43)", expanded=True)
-        exp_sat = st.expander("🛰️ Imagens de Satélite", expanded=False)
-        exp_zonas = st.expander("🎯 Zonas de Produtividade (Álgebra)", expanded=True)
-
-        # Mock de dados para o motor
-        data = {
-            'ID': range(1, 7),
-            'ARGILA': [450, 200, 600, 350, 480, 150], # g/kg
-            'SB': [2.1, 1.5, 4.0, 2.8, 3.1, 1.2],
-            'CTC': [8.5, 6.0, 12.0, 9.5, 10.0, 5.5],
-            'P': [5, 12, 4, 18, 6, 25],
-            'PREM': [3, 15, 8, 35, 22, 50],
-            'K': [0.15, 0.10, 0.30, 0.20, 0.25, 0.08],
-            'NDVI_HIST': [0.85, 0.60, 0.90, 0.75, 0.82, 0.55],
-            'CTC_NORM': [0.7, 0.4, 1.0, 0.8, 0.9, 0.3],
-            'BRIGHTNESS': [0.6, 0.8, 0.5, 0.7, 0.6, 0.9],
-            'LAT': [-18.42, -18.43, -18.44, -18.42, -18.41, -18.40],
-            'LON': [-47.41, -47.42, -47.41, -47.40, -47.39, -47.41]
-        }
-        df = motor_calculo_v43(pd.DataFrame(data), params)
-
-        with exp_zonas:
-            st.write("### Álgebra de Mapas (50% NDVI | 25% CTC | 25% Brilho)")
-            fig_zonas = px.scatter(df, x='LON', y='LAT', color='ZONA_MANEJO', 
-                                   size='POTENCIAL_SCORE',
-                                   color_discrete_map={"Baixo":"#313695", "Médio":"#fee090", "Alto":"#a50026"},
-                                   title="Zonas de Manejo (Coolwarm Palette)")
-            st.plotly_chart(fig_zonas, use_container_width=True)
-
-        with exp_reco:
-            col_a, col_b = st.columns(2)
-            col_a.metric("Dose Média Gesso", f"{df['REC_GESSO'].mean():.0f} kg/ha")
-            col_b.metric("Calcário Médio", f"{df['REC_CALCARIO'].mean():.1f} t/ha")
-            st.dataframe(df[['ID', 'ZONA_MANEJO', 'REC_GESSO', 'REC_CALCARIO', 'REC_P2O5', 'REC_K2O']])
+        with st.expander("🎯 Zonas de Produtividade & Recomendações", expanded=True):
+            data = {
+                'ID': range(1, 7),
+                'ARGILA': [450, 200, 600, 350, 480, 150],
+                'CA_PERC': [45, 52, 38, 55, 42, 30],
+                'MG_PERC': [10, 12, 9, 14, 11, 8],
+                'CTC': [10.5, 8.0, 12.0, 11.0, 10.0, 7.5],
+                'P': [5, 12, 4, 18, 6, 25],
+                'PREM': [3, 15, 8, 35, 22, 50],
+                'K': [0.15, 0.10, 0.30, 0.20, 0.25, 0.08],
+                'NDVI_HIST': [0.85, 0.60, 0.90, 0.75, 0.82, 0.55],
+                'CTC_NORM': [0.7, 0.4, 1.0, 0.8, 0.9, 0.3],
+                'BRIGHTNESS': [0.6, 0.8, 0.5, 0.7, 0.6, 0.9],
+                'LAT': [-18.42, -18.43, -18.44, -18.42, -18.41, -18.40],
+                'LON': [-47.41, -47.42, -47.41, -47.40, -47.39, -47.41]
+            }
+            df = motor_calculo_v43(pd.DataFrame(data), params)
             
-            if st.button("📄 Gerar Relatório PDF Profissional"):
-                gerar_pdf_v43(df)
+            st.write("### Mapa de Variabilidade (3 Zonas)")
+            fig = px.scatter(df, x='LON', y='LAT', color='ZONA_MANEJO', 
+                             color_discrete_map={"Baixo":"#313695", "Médio":"#fee090", "Alto":"#a50026"})
+            st.plotly_chart(fig, use_container_width=True)
+            
+            st.write("### Tabela de Recomendação VRT")
+            st.dataframe(df[['ID', 'ZONA_MANEJO', 'REC_GESSO', 'REC_CALCARIO', 'REC_P2O5', 'REC_K2O']])
 
-# --- GERADOR DE PDF ---
-def gerar_pdf_v43(df):
-    pdf = TriadePDF()
-    pdf.set_margins(20, 20, 20)
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "Relatório de Recomendação Estratégica", ln=True)
-    
-    pdf.set_font("helvetica", "", 12)
-    pdf.multi_cell(0, 7, "Este relatório contempla o rooting profundo (enraizamento) através da gessagem "
-                         "e a redução da toxicidade de alumínio. A metodologia V% assegura o equilíbrio de bases "
-                         "essencial para alta produtividade.")
-    
-    # Tabela simplificada
-    pdf.ln(5)
-    pdf.set_fill_color(30, 61, 89)
-    pdf.set_text_color(255, 255, 255)
-    pdf.cell(30, 10, "Zona", 1, 0, 'C', True)
-    pdf.cell(40, 10, "Gesso (kg/ha)", 1, 0, 'C', True)
-    pdf.cell(40, 10, "Calcário (t/ha)", 1, 0, 'C', True)
-    pdf.ln()
-    
-    pdf.set_text_color(0, 0, 0)
-    for zona in ["Alto", "Médio", "Baixo"]:
-        val = df[df['ZONA_MANEJO'] == zona].mean(numeric_only=True)
-        pdf.cell(30, 10, zona, 1)
-        pdf.cell(40, 10, f"{val['REC_GESSO']:.0f}", 1)
-        pdf.cell(40, 10, f"{val['REC_CALCARIO']:.1f}", 1)
-        pdf.ln()
-
-    html = f'<a href="data:application/pdf;base64,{base64.b64encode(pdf.output()).decode()}" download="Relatorio_v43.pdf">Baixar PDF</a>'
-    st.markdown(html, unsafe_allow_html=True)
-
-# --- APP RUN ---
-params = {
-    'v_alvo': 70, 
-    'k_alvo': 0.35,
-    'niveis_p': {"0-4": 9.0, "4-10": 10.5, "10-19": 12.5, "19-30": 15.0, "30-45": 17.5, "45-60": 19.3},
-    'f_text': 10
-}
-
-menu = st.sidebar.radio("Navegação", ["🏠 Home", "👥 Produtores"])
+# --- EXECUÇÃO ---
+menu, params = configurar_interface()
 if menu == "🏠 Home":
-    st.header("Painel de Controle Tríade")
+    st.header("Tríade Agro Estratégica - Dashboard")
 else:
     pag_produtores(params)
