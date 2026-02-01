@@ -10,3 +10,8 @@ matplotlib
 fpdf2
 openpyxl
 Pillow
+streamlit
+pandas
+numpy
+plotly
+fpdf2
