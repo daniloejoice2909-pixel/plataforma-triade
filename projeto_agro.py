@@ -9,9 +9,9 @@ from streamlit_folium import st_folium
 from folium.plugins import Draw
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
-st.set_page_config(page_title="Tríade Agro Estratégica", layout="wide", page_icon="🌱")
+st.set_page_config(page_title="Tríade Agro Estratégica v43", layout="wide", page_icon="🌱")
 
-# --- CSS CUSTOMIZADO PARA PADRÃO PREMIUM ---
+# --- CSS CUSTOMIZADO (UX PREMIUM TRÍADE) ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
@@ -28,92 +28,29 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- CLASSES E FUNÇÕES AUXILIARES ---
+# --- GERADOR DE RELATÓRIO PDF (PADRÃO A4 / 2cm MARGENS) ---
 class TriadePDF(FPDF):
     def header(self):
         try: self.image("LogoTriadeagro.png.png", 10, 8, 40)
         except: pass
         self.ln(20)
 
-def gerar_pdf_relatorio(df_res, produtor, area_total, params_fin):
+def gerar_pdf_v43(df_res, produtor, area_total):
     pdf = TriadePDF(orientation="P", unit="mm", format="A4")
     pdf.set_margins(20, 20, 20)
     pdf.add_page()
     pdf.set_font("helvetica", "B", 16)
     pdf.cell(0, 10, f"Relatório Técnico: {produtor}", ln=True)
+    pdf.set_font("helvetica", "", 12)
+    pdf.multi_cell(0, 7, "Metodologia: Rooting profundo e reducao de aluminio via gessagem e calagem atomica.")
     pdf.ln(10)
+    # Tabela de Resultados
     pdf.set_font("helvetica", "B", 10)
-    pdf.cell(20, 8, "ID", 1); pdf.cell(40, 8, "Calcário (t/ha)", 1); pdf.cell(40, 8, "P2O5 (kg/ha)", 1); pdf.cell(40, 8, "Custo (R$/ha)", 1); pdf.ln()
+    pdf.cell(20, 8, "ID", 1); pdf.cell(40, 8, "Calcario (t/ha)", 1); pdf.cell(40, 8, "Gesso (kg/ha)", 1); pdf.ln()
     pdf.set_font("helvetica", "", 10)
     for _, row in df_res.iterrows():
-        pdf.cell(20, 8, str(row['id']), 1); pdf.cell(40, 8, str(row['REC_CALCARIO']), 1); pdf.cell(40, 8, str(row['REC_P_VRT']), 1); pdf.cell(40, 8, f"{row['CUSTO_HA']:.2f}", 1); pdf.ln()
+        pdf.cell(20, 8, str(row['id']), 1); pdf.cell(40, 8, str(row['REC_CALCARIO']), 1); pdf.cell(40, 8, str(row['REC_GESSO']), 1); pdf.ln()
     return pdf.output()
 
-def converter_csv_download(df):
-    return df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
-
-# --- MOTOR AGRONÔMICO (FÓRMULAS TRÍADE) ---
-def motor_calculo_vrt_v43(df, params):
-    p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, f_ca, f_mg = params["calagem"]
-    niveis_p, f_text_config, p_exp, p_teor_adubo = params["fosforo"]
-    preco_calc, preco_fosf, prod_alvo = params["financeiro"]
-    
-    # 1. Calagem (Regra do Máximo Ca/Mg - Fatores 560/400)
-    df['NC_CA'] = ((target_ca - df['Ca%']).clip(lower=0) * df['CTC'] / 100)
-    df['NC_MG'] = ((target_mg - df['Mg%']).clip(lower=0) * df['CTC'] / 100)
-    df['DOSE_CAO'] = (df['NC_CA'] * f_ca * 100) / (p_cao * p_prnt)
-    df['DOSE_MGO'] = (df['NC_MG'] * f_mg * 100) / (p_mgo * p_prnt)
-    df['REC_CALCARIO'] = (np.maximum(df['DOSE_CAO'], df['DOSE_MGO']) + calc_extra).round(2)
-
-    # 2. Gessagem (Argila * 15)
-    df['REC_GESSO'] = (df['Argila'] * 15).round(2)
-
-    # 3. Fósforo (6 Classes P-rem)
-    def buscar_nc_p(prem):
-        if prem <= 4: return niveis_p["0-4"]
-        elif prem <= 10: return niveis_p["4-10"]
-        elif prem <= 19: return niveis_p["10-19"]
-        elif prem <= 30: return niveis_p["19-30"]
-        elif prem <= 45: return niveis_p["30-45"]
-        else: return niveis_p["45-60"]
-
-    def definir_fator_textura(argila):
-        if argila > 600: return f_text_config[0]
-        elif argila > 360: return f_text_config[1]
-        elif argila > 150: return f_text_config[2]
-        else: return f_text_config[3]
-
-    df['NC_P'] = df['prem'].apply(buscar_nc_p)
-    df['F_TEXT'] = df['Argila'].apply(definir_fator_textura)
-    df['REC_P_VRT'] = (((df['NC_P'] - df['P res']).clip(lower=0) * df['F_TEXT']) * 100 / p_teor_adubo).round(2)
-    
-    df['CUSTO_HA'] = (df['REC_CALCARIO'] * preco_calc) + (df['REC_P_VRT'] * preco_fosf / 1000)
-    return df
-
-# --- INTERFACE LATERAL ---
-def configurar_interface():
-    st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
-    menu = st.sidebar.radio("Navegação", ["🏠 Home / Onboarding", "👥 Produtores"])
-    with st.sidebar.expander("⚙️ Parâmetros Técnicos", expanded=False):
-        p_prnt = st.number_input("PRNT (%)", 80.0)
-        p_cao = st.number_input("Teor CaO (%)", 36.0)
-        p_mgo = st.number_input("Teor MgO (%)", 9.0)
-        target_ca = st.number_input("Alvo Ca (%)", 60.0)
-        target_mg = st.number_input("Alvo Mg (%)", 18.0)
-        calc_extra = st.number_input("Adicional (t/ha)", 0.0)
-        niveis_p = {"0-4": 9.0, "4-10": 10.5, "10-19": 12.5, "19-30": 15.0, "30-45": 17.5, "45-60": 19.3}
-        f_text = [10.0, 8.0, 4.0, 2.0]
-    with st.sidebar.expander("💰 Financeiro", expanded=True):
-        p_calc = st.number_input("R$/t Calcário", 185.0)
-        p_fosf = st.number_input("R$/t Adubo", 3400.0)
-    return menu, {"calagem": (p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, 560, 400), "fosforo": (niveis_p, f_text, 0.8, 21.0), "financeiro": (p_calc, p_fosf, 85.0)}
-
-# --- PÁGINA HOME / ONBOARDING ---
-def pag_home():
-    st.markdown("<h2 class='section-header'>Centro de Comando Tríade</h2>", unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    # CORREÇÃO DO SYNTAX ERROR: Uso de Aspas Triplas """ para strings multi-linha
-    c1.markdown("""<div class='kpi-card'><div class='kpi-label'>Área Monitorada</div><div class='kpi-value'>17.000 ha</div></div>""", unsafe_allow_html=True)
-    c2.markdown("""<div class='kpi-card'><div class='kpi-label'>Cliente Ativo</div><div class='kpi-value'>Gilson Berneck</div></div>""", unsafe_allow_html=True)
-    c3.markdown("""<div class='kpi-card'><div class='kpi-label'>Alertas NDVI</div><div class='kpi-value' style='color:#e74c3c'>02</div></div>""", unsafe_allow_html=True)
-    c4.markdown("""<div class='kpi-card'><div class='kpi-label'>Mapas Gerados</div><div class='kpi-value'>1
+# --- MOTOR AGRONÔMICO (REGRAS DE OURO TRÍADE) ---
+def motor_calculo_v43(df
