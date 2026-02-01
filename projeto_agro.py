@@ -50,23 +50,25 @@ def gerar_pdf_relatorio(df_res, produtor, area_total, params_fin):
     return pdf.output()
 
 def converter_csv_download(df):
-    # Uso de utf-8-sig para garantir que o Excel abra com acentos e símbolos (%, /) corretos
     return df.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
 
-# --- MOTOR AGRONÔMICO (ESTABELECIDO) ---
+# --- MOTOR AGRONÔMICO (FÓRMULAS TRÍADE) ---
 def motor_calculo_vrt_v43(df, params):
     p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, f_ca, f_mg = params["calagem"]
     niveis_p, f_text_config, p_exp, p_teor_adubo = params["fosforo"]
     preco_calc, preco_fosf, prod_alvo = params["financeiro"]
     
-    # Cálculo de Calagem pelos Fatores 560/400 (Regra do Máximo)
+    # 1. Calagem (Regra do Máximo Ca/Mg - Fatores 560/400)
     df['NC_CA'] = ((target_ca - df['Ca%']).clip(lower=0) * df['CTC'] / 100)
     df['NC_MG'] = ((target_mg - df['Mg%']).clip(lower=0) * df['CTC'] / 100)
     df['DOSE_CAO'] = (df['NC_CA'] * f_ca * 100) / (p_cao * p_prnt)
     df['DOSE_MGO'] = (df['NC_MG'] * f_mg * 100) / (p_mgo * p_prnt)
     df['REC_CALCARIO'] = (np.maximum(df['DOSE_CAO'], df['DOSE_MGO']) + calc_extra).round(2)
 
-    # Cálculo de Fósforo (6 Classes P-rem)
+    # 2. Gessagem (Argila * 15)
+    df['REC_GESSO'] = (df['Argila'] * 15).round(2)
+
+    # 3. Fósforo (6 Classes P-rem)
     def buscar_nc_p(prem):
         if prem <= 4: return niveis_p["0-4"]
         elif prem <= 10: return niveis_p["4-10"]
@@ -85,36 +87,33 @@ def motor_calculo_vrt_v43(df, params):
     df['F_TEXT'] = df['Argila'].apply(definir_fator_textura)
     df['REC_P_VRT'] = (((df['NC_P'] - df['P res']).clip(lower=0) * df['F_TEXT']) * 100 / p_teor_adubo).round(2)
     
-    # Financeiro e Safe Zone
     df['CUSTO_HA'] = (df['REC_CALCARIO'] * preco_calc) + (df['REC_P_VRT'] * preco_fosf / 1000)
-    df['SAFE_ZONE_MSG'] = df['REC_CALCARIO'].apply(lambda x: "⚠️ Dose Alta: Parcelar" if x > 6 else "✅ Segura")
     return df
 
 # --- INTERFACE LATERAL ---
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
-    menu = st.sidebar.radio("Navegação Principal", ["🏠 Home / Onboarding", "👥 Módulo Produtores", "📊 Market Intelligence"])
-    st.sidebar.header("⚙️ Parâmetros Técnicos")
-    with st.sidebar.expander("🪨 Calagem & Fósforo", expanded=False):
+    menu = st.sidebar.radio("Navegação", ["🏠 Home / Onboarding", "👥 Produtores"])
+    with st.sidebar.expander("⚙️ Parâmetros Técnicos", expanded=False):
         p_prnt = st.number_input("PRNT (%)", 80.0)
-        p_cao = st.number_input("Teor $CaO$ (%)", 36.0)
-        p_mgo = st.number_input("Teor $MgO$ (%)", 9.0)
-        target_ca = st.number_input("Alvo Ca na CTC (%)", 60.0)
-        target_mg = st.number_input("Alvo Mg na CTC (%)", 18.0)
+        p_cao = st.number_input("Teor CaO (%)", 36.0)
+        p_mgo = st.number_input("Teor MgO (%)", 9.0)
+        target_ca = st.number_input("Alvo Ca (%)", 60.0)
+        target_mg = st.number_input("Alvo Mg (%)", 18.0)
         calc_extra = st.number_input("Adicional (t/ha)", 0.0)
-        st.divider()
-        niveis_p = {"0-4": 8.0, "4-10": 10.0, "10-19": 12.0, "19-30": 15.0, "30-45": 18.0, "45-60": 22.0}
-        f_text = [st.number_input("Fator Argila >60%", 10.0), st.number_input("Fator 36-60%", 8.0), st.number_input("Fator 15-36%", 4.0), st.number_input("Fator <15%", 2.0)]
-        p_teor_adubo = st.number_input("% $P_2O_5$ no Adubo", 21.0)
-    with st.sidebar.expander("💰 Balanço Financeiro", expanded=True):
-        p_calc = st.number_input("Preço Calcário (R$/t)", 185.0)
-        p_fosf = st.number_input("Preço Adubo (R$/t)", 3400.0)
-        prod_alvo = st.number_input("Produtividade Alvo (sc/ha)", 85.0)
-    return menu, {"calagem": (p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, 560, 400), "fosforo": (niveis_p, f_text, 0.8, p_teor_adubo), "financeiro": (p_calc, p_fosf, prod_alvo)}
+        niveis_p = {"0-4": 9.0, "4-10": 10.5, "10-19": 12.5, "19-30": 15.0, "30-45": 17.5, "45-60": 19.3}
+        f_text = [10.0, 8.0, 4.0, 2.0]
+    with st.sidebar.expander("💰 Financeiro", expanded=True):
+        p_calc = st.number_input("R$/t Calcário", 185.0)
+        p_fosf = st.number_input("R$/t Adubo", 3400.0)
+    return menu, {"calagem": (p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, 560, 400), "fosforo": (niveis_p, f_text, 0.8, 21.0), "financeiro": (p_calc, p_fosf, 85.0)}
 
 # --- PÁGINA HOME / ONBOARDING ---
 def pag_home():
-    st.markdown("<h2 class='section-header'>Dashboard de Controle Tríade</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 class='section-header'>Centro de Comando Tríade</h2>", unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
-    c1.markdown("<div class='kpi-card'><div class='kpi-label'>Hectares Totais</div><div class='kpi-value'>17.000</div></div>", unsafe_allow_html=True)
-    c2.markdown("<div class='kpi-card'><div class='kpi-label'>
+    # CORREÇÃO DO SYNTAX ERROR: Uso de Aspas Triplas """ para strings multi-linha
+    c1.markdown("""<div class='kpi-card'><div class='kpi-label'>Área Monitorada</div><div class='kpi-value'>17.000 ha</div></div>""", unsafe_allow_html=True)
+    c2.markdown("""<div class='kpi-card'><div class='kpi-label'>Cliente Ativo</div><div class='kpi-value'>Gilson Berneck</div></div>""", unsafe_allow_html=True)
+    c3.markdown("""<div class='kpi-card'><div class='kpi-label'>Alertas NDVI</div><div class='kpi-value' style='color:#e74c3c'>02</div></div>""", unsafe_allow_html=True)
+    c4.markdown("""<div class='kpi-card'><div class='kpi-label'>Mapas Gerados</div><div class='kpi-value'>1
