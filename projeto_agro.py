@@ -11,7 +11,7 @@ from folium.plugins import Draw
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Tríade Agro Estratégica", layout="wide", page_icon="🌱")
 
-# --- CSS CUSTOMIZADO (PADRÃO PREMIUM) ---
+# --- CSS CUSTOMIZADO PARA PADRÃO PREMIUM ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
@@ -28,7 +28,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- CLASSES E FUNÇÕES AUXILIARES (PDF E DOWNLOADS) ---
+# --- CLASSES E FUNÇÕES AUXILIARES ---
 class TriadePDF(FPDF):
     def header(self):
         try: self.image("LogoTriadeagro.png.png", 10, 8, 40)
@@ -42,25 +42,26 @@ def gerar_pdf_relatorio(df_res, produtor, area_total, params_fin):
     pdf.set_font("helvetica", "B", 16)
     pdf.cell(0, 10, f"Relatório Técnico: {produtor}", ln=True)
     pdf.ln(10)
-    # Tabela de Resultados
     pdf.set_font("helvetica", "B", 10)
     pdf.cell(20, 8, "ID", 1); pdf.cell(40, 8, "Calcário (t/ha)", 1); pdf.cell(40, 8, "P2O5 (kg/ha)", 1); pdf.cell(40, 8, "Custo (R$/ha)", 1); pdf.ln()
     pdf.set_font("helvetica", "", 10)
     for _, row in df_res.iterrows():
-        pdf.cell(20, 8, str(row['ID']), 1); pdf.cell(40, 8, str(row['REC_CALCARIO']), 1); pdf.cell(40, 8, str(row['REC_P_VRT']), 1); pdf.cell(40, 8, f"{row['CUSTO_HA']:.2f}", 1); pdf.ln()
+        pdf.cell(20, 8, str(row['id']), 1); pdf.cell(40, 8, str(row['REC_CALCARIO']), 1); pdf.cell(40, 8, str(row['REC_P_VRT']), 1); pdf.cell(40, 8, f"{row['CUSTO_HA']:.2f}", 1); pdf.ln()
     return pdf.output()
 
 def converter_csv_download(df):
-    return df.to_csv(index=False).encode('utf-8')
+    return df.to_csv(index=False, sep=';').encode('latin-1') # Padrão Excel Brasil
 
-# --- MOTOR AGRONÔMICO (NÃO ALTERADO) ---
+# --- MOTOR AGRONÔMICO ---
 def motor_calculo_vrt_v43(df, params):
     p_prnt, p_cao, p_mgo, target_ca, target_mg, calc_extra, f_ca, f_mg = params["calagem"]
     niveis_p, f_text_config, p_exp, p_teor_adubo = params["fosforo"]
     preco_calc, preco_fosf, prod_alvo = params["financeiro"]
     
-    df['NC_CA'] = ((target_ca - df['CA_PERC']).clip(lower=0) * df['CTC'] / 100)
-    df['NC_MG'] = ((target_mg - df['MG_PERC']).clip(lower=0) * df['CTC'] / 100)
+    # Mapeamento para as colunas da planilha Danilo
+    # Ca% = Ca%, Mg% = Mg%, CTC = CTC, prem = prem, Argila = Argila
+    df['NC_CA'] = ((target_ca - df['Ca%']).clip(lower=0) * df['CTC'] / 100)
+    df['NC_MG'] = ((target_mg - df['Mg%']).clip(lower=0) * df['CTC'] / 100)
     df['DOSE_CAO'] = (df['NC_CA'] * f_ca * 100) / (p_cao * p_prnt)
     df['DOSE_MGO'] = (df['NC_MG'] * f_mg * 100) / (p_mgo * p_prnt)
     df['REC_CALCARIO'] = (np.maximum(df['DOSE_CAO'], df['DOSE_MGO']) + calc_extra).round(2)
@@ -79,9 +80,9 @@ def motor_calculo_vrt_v43(df, params):
         elif argila > 150: return f_text_config[2]
         else: return f_text_config[3]
 
-    df['NC_P'] = df['PREM'].apply(buscar_nc_p)
-    df['F_TEXT'] = df['ARGILA'].apply(definir_fator_textura)
-    df['REC_P_VRT'] = (((df['NC_P'] - df['P']).clip(lower=0) * df['F_TEXT']) * 100 / p_teor_adubo).round(2)
+    df['NC_P'] = df['prem'].apply(buscar_nc_p)
+    df['F_TEXT'] = df['Argila'].apply(definir_fator_textura)
+    df['REC_P_VRT'] = (((df['NC_P'] - df['P res']).clip(lower=0) * df['F_TEXT']) * 100 / p_teor_adubo).round(2)
     df['CUSTO_HA'] = (df['REC_CALCARIO'] * preco_calc) + (df['REC_P_VRT'] * preco_fosf / 1000)
     df['SAFE_ZONE_MSG'] = df['REC_CALCARIO'].apply(lambda x: "⚠️ Dose Alta: Parcelar" if x > 6 else "✅ Segura")
     return df
@@ -122,26 +123,31 @@ def pag_home():
 
     with col_dl:
         st.write("#### 1. Preparação de Dados")
-        st.info("Baixe os modelos para preencher os dados de solo de forma compatível com o sistema.")
+        st.info("Baixe o modelo oficial Tríade para garantir que as colunas estejam na sequência correta para o motor de cálculo.")
         
-        # Gerar planilha modelo
-        df_modelo = pd.DataFrame(columns=['ID', 'CA_PERC', 'MG_PERC', 'CTC', 'PREM', 'P', 'ARGILA', 'X', 'Y'])
-        st.download_button(label="⬇️ Baixar Modelo de Planilha de Solo", data=converter_csv_download(df_modelo), file_name="modelo_solo_triade.csv", mime="text/csv")
+        # SEQUÊNCIA EXATA DA IMAGEM FORNECIDA
+        colunas_oficiais = [
+            'Latitude', 'Longitude', 'CAMPO', 'id', 'prof', 'pH', 'P res', 'P mehl', 
+            'K', 'Ca', 'Mg', 'Al', 'CTC', 'V%', 'Argila', 'Silte', 'K%', 'Ca%', 
+            'prem', 'Areia gross', 'Areia total', 'Areia fina', 'Ca/Mg', 'H/Al', 'Mg%'
+        ]
+        df_modelo = pd.DataFrame(columns=colunas_oficiais)
+        
+        st.download_button(
+            label="⬇️ Baixar Modelo de Planilha de Solo (Oficial)", 
+            data=converter_csv_download(df_modelo), 
+            file_name="modelo_solo_triade_v43.csv", 
+            mime="text/csv"
+        )
         
         st.divider()
         st.write("#### 2. Arquivos de Contorno")
-        st.write("Se você já possui o arquivo `.shp` ou `.geojson`, baixe o padrão Tríade para conferência.")
-        st.button("⬇️ Baixar Padrão de Contorno (.json)")
-        
-        st.divider()
-        st.write("#### 3. Upload Rápido")
         st.file_uploader("Subir Novo Contorno (SHP/KML/ZIP)", type=['zip', 'kml', 'geojson'])
 
     with col_map:
         st.write("#### 📍 Definição Espacial (Mapa de Contorno)")
-        st.caption("Localize a fazenda e desenhe o talhão manualmente usando a ferramenta de polígono à esquerda.")
+        st.caption("Localize a fazenda e desenhe o talhão manualmente para definir a área de trabalho.")
         
-        # Integração Folium com Desenho
         m = folium.Map(location=[-18.42, -47.41], zoom_start=13, tiles="CartoDB positron")
         Draw(
             export=True,
@@ -151,22 +157,25 @@ def pag_home():
         ).add_to(m)
         
         st_folium(m, width=800, height=450)
-        st.success("Dica: Após desenhar, o sistema processará automaticamente as coordenadas.")
+        st.success("Dica: Use as ferramentas de polígono para áreas irregulares.")
 
 # --- PÁGINA PRODUTORES ---
 def pag_produtores(params):
     st.subheader("Foco: Gilson Berneck")
     tab1, tab2, tab3 = st.tabs(["🗺️ Planejamento VRT", "📊 Visão 3D & Solo", "📄 Exportar PDF"])
+    
+    # Mock de Dados usando a nova nomenclatura das colunas
     df_gilson = pd.DataFrame({
-        'ID': range(1, 6), 'CA_PERC': [42,50,35,48,52], 'MG_PERC': [11,14,9,13,15],
-        'CTC': [12.5, 11, 14, 13, 10.5], 'PREM': [5, 12, 45, 22, 9], 'P': [4, 10, 3, 7, 5],
-        'ARGILA': [620, 410, 130, 590, 380], 'X': [1, 2, 3, 2, 1], 'Y': [1, 1, 2, 3, 3]
+        'id': range(1, 6), 'Ca%': [42,50,35,48,52], 'Mg%': [11,14,9,13,15],
+        'CTC': [12.5, 11, 14, 13, 10.5], 'prem': [5, 12, 45, 22, 9], 'P res': [4, 10, 3, 7, 5],
+        'Argila': [620, 410, 130, 590, 380], 'Latitude': [1, 2, 3, 2, 1], 'Longitude': [1, 1, 2, 3, 3]
     })
+    
     df_res = motor_calculo_vrt_v43(df_gilson, params)
-    with tab1: st.dataframe(df_res[['ID', 'REC_CALCARIO', 'REC_P_VRT', 'CUSTO_HA', 'SAFE_ZONE_MSG']])
+    with tab1: st.dataframe(df_res[['id', 'REC_CALCARIO', 'REC_P_VRT', 'CUSTO_HA', 'SAFE_ZONE_MSG']])
     with tab2:
-        fig = go.Figure(data=[go.Mesh3d(x=df_res['X'], y=df_res['Y'], z=df_res['P'], color='royalblue', opacity=0.5)])
-        fig.add_scatter3d(x=df_res['X'], y=df_res['Y'], z=df_res['P'], mode='markers', marker=dict(size=10, color=df_res['P'], colorscale='coolwarm'))
+        fig = go.Figure(data=[go.Mesh3d(x=df_res['Latitude'], y=df_res['Longitude'], z=df_res['P res'], color='royalblue', opacity=0.5)])
+        fig.add_scatter3d(x=df_res['Latitude'], y=df_res['Longitude'], z=df_res['P res'], mode='markers', marker=dict(size=10, color=df_res['P res'], colorscale='coolwarm'))
         st.plotly_chart(fig, use_container_width=True)
     with tab3:
         if st.button("Gerar PDF v43 (Padronizado)"):
