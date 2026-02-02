@@ -86,28 +86,55 @@ def motor_calculo_v43(df, params):
 
     return df
 
-# --- FUNÇÃO DE INTERPOLAÇÃO KRIGAGEM (ESTILO INCERES) ---
+# --- FUNÇÃO DE INTERPOLAÇÃO KRIGAGEM (CORRIGIDA) ---
 def plot_kriging(df, col, title):
+    # 1. Garantir dados numéricos e sem nulos
     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
     x, y, z = df['Longitude'].values, df['Latitude'].values, df[col].values
-    xi = np.linspace(x.min(), x.max(), 80)
-    yi = np.linspace(y.min(), y.max(), 80)
+    
+    # 2. Verificar se há variação nos dados (se todos os pontos forem iguais, a krigagem falha)
+    if z.max() == z.min():
+        z[0] += 0.0001 # Adiciona micro-variação para não travar o gráfico
+    
+    # 3. Criar Grade (Grid)
+    xi = np.linspace(x.min(), x.max(), 100)
+    yi = np.linspace(y.min(), y.max(), 100)
     xi, yi = np.meshgrid(xi, yi)
     
-    # Krigagem via Rbf (Radial Basis Function)
-    rbf = Rbf(x, y, z, function='linear', smooth=0.1)
-    zi = rbf(xi, yi)
+    # 4. Krigagem via Rbf
+    try:
+        rbf = Rbf(x, y, z, function='linear', smooth=0.1)
+        zi = rbf(xi, yi)
+        # Limpar valores anômalos (NaN ou Inf)
+        zi = np.nan_to_num(zi, nan=df[col].mean())
+    except:
+        # Fallback caso a matemática da krigagem falhe
+        zi = np.full(xi.shape, df[col].mean())
 
+    # 5. Criar o Mapa Profissional
     fig = go.Figure(data=go.Contour(
-        z=zi, x=np.linspace(x.min(), x.max(), 80), y=np.linspace(y.min(), y.max(), 80),
-        colorscale='coolwarm', # Padrão InCeres/Tríade
+        z=zi, 
+        x=np.linspace(x.min(), x.max(), 100), 
+        y=np.linspace(y.min(), y.max(), 100),
+        # 'RdYlBu_r' é o equivalente técnico ao 'coolwarm' que o Graph Objects aceita
+        colorscale='RdYlBu_r', 
         contours=dict(showlines=False, project_z=True),
-        line_width=0, colorbar=dict(title=col)
+        line_width=0, 
+        colorbar=dict(title=dict(text=col, font=dict(size=10)))
     ))
-    fig.update_layout(title=f"<b>{title}</b>", margin=dict(l=10, r=10, t=40, b=10), height=350,
-                      plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-    return fig
 
+    fig.update_layout(
+        title=f"<b>{title}</b>", 
+        margin=dict(l=10, r=10, t=40, b=10), 
+        height=400,
+        plot_bgcolor='rgba(0,0,0,0)', 
+        paper_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False)
+    )
+    return fig
+    
 # --- INTERFACE LATERAL (RESTAURADA) ---
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
@@ -247,3 +274,4 @@ params = configurar_interface()
 p, f, t = params["path"]
 if not p or not f or not t: st.info("Selecione os dados na lateral para processar.")
 else: pag_produtores(params)
+
