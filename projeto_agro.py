@@ -1,74 +1,69 @@
-import plotly.graph_objects as go
+import streamlit as st
+import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 from scipy.interpolate import Rbf
 
-def gerar_mapa_triade_v43(df, coluna, geojson_data, titulo="Mapa de Fertilidade"):
-    """
-    Motor de Renderização V43: Opacidade 100%, Krigagem Rbf e Rigor Geométrico.
-    """
-    # 1. Validação de Integridade (Protocolo de Segurança)
-    if coluna not in df.columns:
-        return f"Erro: Coluna {coluna} não encontrada na planilha."
+# --- 1. CONFIGURAÇÕES DE PÁGINA E ESTADO ---
+st.set_page_config(layout="wide", page_title="Tríade Agro - VRT")
 
-    # 2. Preparação do Grid de Krigagem (150x150)
-    lat, lon = df['latitude'].values, df['longitude'].values
+if 'gerar_fertilidade' not in st.session_state:
+    st.session_state.gerar_fertilidade = False
+
+# --- 2. MOTOR GEOESTATÍSTICO (PROCESSAMENTO PESADO) ---
+@st.cache_data(show_spinner="Processando Krigagem (150x150)...")
+def motor_interpolacao_v43(df, coluna, pontos=150):
+    """Gera a malha de interpolação com rigor de 150x150 pontos."""
+    x = df['longitude'].values
+    y = df['latitude'].values
     z = df[coluna].values
     
-    grid_lon = np.linspace(lon.min(), lon.max(), 150)
-    grid_lat = np.linspace(lat.min(), lat.max(), 150)
-    grid_lon, grid_lat = np.meshgrid(grid_lon, grid_lat)
+    # Criar grid cobrindo a área total
+    xi = np.linspace(x.min(), x.max(), pontos)
+    yi = np.linspace(y.min(), y.max(), pontos)
+    xi, yi = np.meshgrid(xi, yi)
     
-    # Interpolação Rbf (Mancha Suave, mas com cores sólidas)
-    rbf = Rbf(lon, lat, z, function='linear')
-    z_grid = rbf(grid_lon, grid_lat)
+    # RBF Linear para 'Manchas Suaves'
+    rbf = Rbf(x, y, z, function='linear')
+    zi = rbf(xi, yi)
+    return xi, yi, zi
 
-    # 3. Construção do Mapa
+# --- 3. COMPONENTE DE MAPA DE ALTA DEFINIÇÃO ---
+def plotar_mapa_triade(df, coluna, geojson_contorno):
+    """Renderiza o mapa com opacidade 1.0 e contorno preto sólido."""
+    if coluna not in df.columns:
+        st.warning(f"⚠️ Atributo '{coluna}' não encontrado na planilha.")
+        return
+
+    xi, yi, zi = motor_interpolacao_v43(df, coluna)
+
     fig = go.Figure()
 
-    # Camada de Dados: Opacidade 100% (Alpha = 1.0)
+    # Camada Heatmap: Opacidade Total
     fig.add_trace(go.Heatmap(
-        z=z_grid,
-        x=np.linspace(lon.min(), lon.max(), 150),
-        y=np.linspace(lat.min(), lat.max(), 150),
+        z=zi, x=xi[0, :], y=yi[:, 0],
         colorscale='Jet',
-        opacity=1.0,  # Rigor V43: Sem transparência
-        zsmooth=False, # Mantém as divisas de cores mais nítidas
-        colorbar=dict(
-            title=dict(text=f"<b>{coluna}</b>", font=dict(size=14)),
-            thickness=20,
-            x=1.02
-        )
+        opacity=1.0, # Rigor V43
+        zsmooth=False, # Divisas visíveis
+        colorbar=dict(title=f"<b>{coluna}</b>", thickness=15)
     ))
 
-    # 4. Camada de Contorno: Preto Sólido (Separação Física)
-    if geojson_data:
-        # Extrair coordenadas do GeoJSON para a linha de contorno
-        # (Lógica simplificada para exemplo)
-        lons_contorno = geojson_data['features'][0]['geometry']['coordinates'][0][:,0]
-        lats_contorno = geojson_data['features'][0]['geometry']['coordinates'][0][:,1]
-        
+    # Camada de Contorno GeoJSON: Preto Sólido
+    if geojson_contorno:
+        # Assumindo estrutura padrão de GeoJSON Features
+        coords = geojson_contorno['features'][0]['geometry']['coordinates'][0]
+        lons, lats = zip(*coords)
         fig.add_trace(go.Scattermapbox(
-            lon=lons_contorno,
-            lat=lats_contorno,
-            mode='lines',
+            lon=lons, lat=lats, mode='lines',
             line=dict(width=3, color='black'),
-            name='Contorno Talhão'
+            name='Contorno'
         ))
 
-    # 5. Configurações de Layout (Aspect Ratio 1:1 e Satélite)
+    # Layout com Razão de Aspecto Fixa (Rigor Geométrico)
     fig.update_layout(
-        title=f"<b>{titulo} - Tríade Agro Estratégica</b>",
-        margin={"r":0,"t":40,"l":0,"b":0},
-        height=600,
         mapbox=dict(
             style="satellite",
-            center={"lat": lat.mean(), "lon": lon.mean()},
+            center={"lat": df['latitude'].mean(), "lon": df['longitude'].mean()},
             zoom=15
         ),
-        yaxis=dict(scaleanchor="x", scaleratio=1) # Impede deformação do talhão
-    )
-
-    return fig
-
-# Auditoria de Saída (Box Informativo st.info)
-# Mín: {z.min()} | Máx: {z.max()} | Média: {z.mean()}
+        margin={"r":0,"t":30,"l":
