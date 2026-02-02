@@ -9,14 +9,13 @@ import json
 import io
 import zipfile
 
-# --- INICIALIZAÇÃO DO BANCO DE DADOS ---
+# --- INICIALIZAÇÃO SEGURA DO BANCO DE DADOS ---
 if 'db' not in st.session_state:
     st.session_state['db'] = {}
 
 # --- CONFIGURAÇÃO DA PÁGINA (ESTILO TRÍADE) ---
 st.set_page_config(page_title="Tríade Agro Estratégica v43", layout="wide", page_icon="🌱")
 
-# --- CSS PREMIUM ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;700&display=swap');
@@ -32,7 +31,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- MOTOR DE CÁLCULO TRÍADE V43 (INTEGRIDADE TOTAL) ---
+# --- MOTOR DE CÁLCULO TRÍADE V43 ---
 def motor_calculo_v43(df, params):
     df.columns = df.columns.str.strip().str.lower()
     mapping = {
@@ -42,7 +41,7 @@ def motor_calculo_v43(df, params):
     }
     df = df.rename(columns=mapping)
     
-    cols_nec = ['Argila', 'Ca%', 'Mg%', 'CTC', 'P mehl', 'K%', 'V%', 'pH', 'prem', 'Ca', 'Mg', 'K', 'Al', 'Longitude', 'Latitude']
+    cols_nec = ['Argila', 'Ca%', 'Mg%', 'CTC', 'P mehl', 'K%', 'V%', 'pH', 'prem', 'Longitude', 'Latitude']
     for col in cols_nec:
         if col not in df.columns: df[col] = 0.0
         else: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
@@ -53,12 +52,11 @@ def motor_calculo_v43(df, params):
     # 1. Calagem Atômica
     df['NC_CA_CMOL'] = ((c_p["target_ca"] - df['Ca%']) * df['CTC'] / 100).clip(lower=0)
     df['NC_MG_CMOL'] = ((c_p["target_mg"] - df['Mg%']) * df['CTC'] / 100).clip(lower=0)
-    df['DOSE_CA'] = (df['NC_CA_CMOL'] * 560 * 100 * 100) / (c_p["cao"] * c_p["prnt"])
-    df['DOSE_MG'] = (df['NC_MG_CMOL'] * 400 * 100 * 100) / (c_p["mgo"] * c_p["prnt"])
+    df['DOSE_CA'] = (df['NC_CA_CMOL'] * 560 * 10000) / (c_p["cao"] * c_p["prnt"] / 100 + 0.001)
+    df['DOSE_MG'] = (df['NC_MG_CMOL'] * 400 * 10000) / (c_p["mgo"] * c_p["prnt"] / 100 + 0.001)
     df['REC_CALCARIO'] = (np.maximum(df['DOSE_CA'], df['DOSE_MG']) + c_p["reserva"]).round(2)
-    df['RATIO_CA_MG'] = (df['Ca%'] + (df['NC_CA_CMOL']/df['CTC']*100)) / (df['Mg%'] + (df['NC_MG_CMOL']/df['CTC']*100 + 0.001))
 
-    # 2. Fósforo (6 Faixas + Crédito Solo)
+    # 2. Fósforo (6 Faixas)
     def calc_p(row):
         pr = row['prem']
         nc = (p_p["nc_0_4"] if pr <= 4 else p_p["nc_4_10"] if pr <= 10 else p_p["nc_10_19"] if pr <= 19 else 
@@ -69,7 +67,7 @@ def motor_calculo_v43(df, params):
         return (max(p_total, 0) * 100) / p_p["teor_adubo"]
     df['REC_P_ADUBO'] = df.apply(calc_p, axis=1).round(2)
 
-    # 3. Potássio e Gesso (Argila % * 10)
+    # 3. Potássio e Gesso
     df['REC_K_ADUBO'] = (((k_p["target_k"] - df['K%']).clip(lower=0) * df['CTC'] / 100 * 941) + (prod_esp * k_p["f_exp"])) * 100 / k_p["teor_adubo"]
     df['REC_GESSO'] = (df['Argila'] * 10 * g_p["fator"]).clip(lower=g_p["min"], upper=g_p["max"]).round(2)
 
@@ -81,7 +79,7 @@ def motor_calculo_v43(df, params):
     df['C_TOTAL'] = df['C_CALC'] + df['C_P'] + df['C_K'] + df['C_GESSO']
     return df
 
-# --- MOTOR GEOESTATÍSTICO: KRIGAGEM + CLIPPING ---
+# --- MOTOR GEOESTATÍSTICO ---
 def plot_geostats(df, col, title, geo_json=None):
     x, y, z = df['Longitude'].values, df['Latitude'].values, df[col].values
     if len(np.unique(x)) < 2: return go.Figure(), "N/A"
@@ -100,10 +98,11 @@ def plot_geostats(df, col, title, geo_json=None):
     stats = f"Mín: {np.nanmin(zi):.2f} | Máx: {np.nanmax(zi):.2f} | Méd: {np.nanmean(zi):.2f}"
     return fig, stats
 
-# --- INTERFACE DE NAVEGAÇÃO E ATRIBUTOS (PASTAS RESTAURADAS) ---
+# --- INTERFACE DE NAVEGAÇÃO ---
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
     st.sidebar.header("📍 Hierarquia de Dados")
+    
     p_names = list(st.session_state['db'].keys()) + ["+ Novo Produtor"]
     sel_p = st.sidebar.selectbox("Produtor", p_names)
     if sel_p == "+ Novo Produtor":
@@ -114,28 +113,105 @@ def configurar_interface():
     sel_f = st.sidebar.selectbox("Fazenda", faz_names)
     if sel_f == "+ Nova Fazenda":
         sel_f = st.sidebar.text_input("Nome Fazenda")
-        if sel_f and sel_f not in st.session_state['db'][sel_p]: st.session_state['db'][sel_p][sel_f] = {}
+        if sel_f and sel_f not in st.session_state['db'].get(sel_p, {}):
+            if sel_p in st.session_state['db']: st.session_state['db'][sel_p][sel_f] = {}
 
     tal_names = list(st.session_state['db'].get(sel_p, {}).get(sel_f, {}).keys()) + ["+ Novo Talhão"]
     sel_t = st.sidebar.selectbox("Talhão", tal_names)
     if sel_t == "+ Novo Talhão":
         sel_t = st.sidebar.text_input("ID Talhão")
-        if sel_t and sel_t not in st.session_state['db'][sel_p][sel_f]:
-            st.session_state['db'][sel_p][sel_f][sel_t] = {"df": None, "contorno": None}
+        if sel_t and sel_t not in st.session_state['db'].get(sel_p, {}).get(sel_f, {}):
+            if sel_p in st.session_state['db'] and sel_f in st.session_state['db'][sel_p]:
+                st.session_state['db'][sel_p][sel_f][sel_t] = {"df": None, "contorno": None}
 
     st.sidebar.divider()
     st.sidebar.header("⚙️ Atributos Técnicos (+/-)")
+    
     with st.sidebar.expander("🌍 Global & Produtividade"):
         prod = st.number_input("Produtividade (sc/ha)", 80.0, step=1.0)
+        
     with st.sidebar.expander("🪨 Calagem Atômica"):
         c_cao = st.number_input("CaO %", 36.0); c_mgo = st.number_input("MgO %", 9.0)
         c_t_ca = st.number_input("Alvo Ca %", 60.0); c_t_mg = st.number_input("Alvo Mg %", 18.0)
         c_res = st.number_input("Reserva kg", 0.0); c_preco = st.number_input("R$/Ton Calc", 280.0)
+        
     with st.sidebar.expander("🧪 Fósforo (6 Classes P-rem)"):
         nc04 = st.number_input("NC 0-4", 8.0); nc410 = st.number_input("NC 4-10", 10.0); nc1019 = st.number_input("NC 10-19", 12.0)
         nc1930 = st.number_input("NC 19-30", 15.0); nc3045 = st.number_input("NC 30-45", 18.0); nc4560 = st.number_input("NC 45-60", 22.0)
         st.write("Fatores de Argila")
         f_m_arg = st.number_input("M. Argiloso", 10.0); f_arg = st.number_input("Argiloso", 8.0); f_med = st.number_input("Médio", 4.0); f_are = st.number_input("Arenoso", 2.0)
         p_teor = st.number_input("Teor Adubo P %", 21.0); p_exp = st.number_input("Exp. P", 0.8); p_preco = st.number_input("R$/Ton P", 3200.0)
+        
     with st.sidebar.expander("🍌 Potássio & Gesso"):
-        k_target = st.number_input("Alvo K %", 3.2); k_preco =
+        k_target = st.number_input("Alvo K %", 3.2); k_preco = st.number_input("R$/Ton K", 2900.0)
+        g_fator = st.number_input("Fator Gesso", 15.0); g_min = st.number_input("Mín kg", 400.0); g_max = st.number_input("Máx kg", 900.0); g_preco = st.number_input("R$/Ton Gesso", 190.0)
+
+    params = {
+        "global": {"produtividade": prod},
+        "calagem": {"prnt": 80.0, "cao": c_cao, "mgo": c_mgo, "target_ca": c_t_ca, "target_mg": c_t_mg, "reserva": c_res, "preco": c_preco},
+        "fosforo": {"nc_0_4": nc04, "nc_4_10": nc410, "nc_10_19": nc1019, "nc_19_30": nc1930, "nc_30_45": nc3045, "nc_45_60": nc4560, "f_muito_arg": f_m_arg, "f_argiloso": f_arg, "f_medio": f_med, "f_arenoso": f_are, "teor_adubo": p_teor, "f_exp": p_exp, "preco": p_preco},
+        "potassio": {"target_k": k_target, "teor_adubo": 60.0, "f_exp": 1.2, "preco": k_preco},
+        "gesso": {"fator": g_fator, "min": g_min, "max": g_max, "preco": g_preco},
+        "path": (sel_p, sel_f, sel_t)
+    }
+    return params
+
+# --- PÁGINA PRINCIPAL ---
+def pag_produtores(params):
+    p, f, t = params["path"]
+    st.markdown(f"<h2 class='section-header'>Central Tríade: {p} | {f} | {t}</h2>", unsafe_allow_html=True)
+    tabs = st.tabs(["📁 Dados e Contorno", "📊 Fertilidade", "🗺️ VRT", "📄 Relatório", "📥 Exportar"])
+    
+    # Inicialização segura dos dados do talhão
+    talhao_data = st.session_state['db'].get(p, {}).get(f, {}).get(t, {})
+    
+    with tabs[0]:
+        c1, c2 = st.columns(2)
+        with c1:
+            up_csv = st.file_uploader("Subir CSV", type=['csv'], key=f"csv_{t}")
+            up_geo = st.file_uploader("Subir Contorno", type=['geojson','json'], key=f"geo_{t}")
+            if st.button("🚀 Processar Talhão"):
+                if up_csv: st.session_state['db'][p][f][t]["df"] = pd.read_csv(up_csv, sep=None, engine='python', encoding='utf-8-sig')
+                if up_geo: st.session_state['db'][p][f][t]["contorno"] = json.load(up_geo)
+                st.success("Dados processados!")
+        with c2:
+            if talhao_data.get("df") is not None: st.dataframe(talhao_data["df"].head())
+
+    if talhao_data.get("df") is not None:
+        df_res = motor_calculo_v43(talhao_data["df"], params)
+        contorno = talhao_data.get("contorno")
+
+        with tabs[1]:
+            attrs = ["pH", "Argila", "Ca%", "Mg%", "K%", "V%", "P mehl", "prem"]
+            for i in range(0, len(attrs), 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i+j < len(attrs):
+                        fig, stats = plot_geostats(df_res, attrs[i+j], attrs[i+j], contorno)
+                        cols[j].plotly_chart(fig, use_container_width=True, key=f"f_{attrs[i+j]}_{t}")
+                        cols[j].info(stats)
+
+        with tabs[2]:
+            k1, k2, k3, k4 = st.columns(4)
+            k1.markdown(f"<div class='kpi-card'><small>Calcário</small><div class='kpi-value'>R$ {df_res['C_CALC'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+            k2.markdown(f"<div class='kpi-card'><small>Fósforo</small><div class='kpi-value'>R$ {df_res['C_P'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+            k3.markdown(f"<div class='kpi-card'><small>Potássio</small><div class='kpi-value'>R$ {df_res['C_K'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+            k4.markdown(f"<div class='kpi-card'><small>TOTAL MÉDIO</small><div class='kpi-value' style='color:#27ae60'>R$ {df_res['C_TOTAL'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+
+            recs = [("REC_CALCARIO", "Calcário"), ("REC_P_ADUBO", "Fosfatado"), ("REC_K_ADUBO", "Potássico"), ("REC_GESSO", "Gesso")]
+            args_tec = {"Calcário": "Equilíbrio estequiométrico de bases.", "Fosfatado": "NC via P-rem com crédito de solo.", "Potássio": "Saturação ideal + exportação real.", "Gesso": "Condicionamento radicular por Argila %."}
+            for i in range(0, len(recs), 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i+j < len(recs):
+                        label = recs[i+j][1]
+                        fig, stats = plot_geostats(df_res, recs[i+j][0], f"VRT {label}", contorno)
+                        cols[j].plotly_chart(fig, use_container_width=True, key=f"v_{label}_{t}")
+                        cols[j].success(stats)
+                        cols[j].markdown(f"<div class='arg-tecnico'><b>Argumento Tríade:</b> {args_tec[label]}</div>", unsafe_allow_html=True)
+
+# --- EXECUÇÃO ---
+params = configurar_interface()
+p, f, t = params["path"]
+if not p or not f or not t: st.info("Selecione um talhão para iniciar.")
+else: pag_produtores(params)
