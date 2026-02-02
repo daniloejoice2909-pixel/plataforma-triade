@@ -1,274 +1,74 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
+import numpy as np
 from scipy.interpolate import Rbf
-from shapely.geometry import Point, shape
-from fpdf import FPDF
-import json
-import io
-import zipfile
 
-# --- 1. CONFIGURAÇÃO E ESTADO GLOBAL ---
-st.set_page_config(page_title="Tríade Agro V43 (Gold Performance)", layout="wide", page_icon="🌱")
+def gerar_mapa_triade_v43(df, coluna, geojson_data, titulo="Mapa de Fertilidade"):
+    """
+    Motor de Renderização V43: Opacidade 100%, Krigagem Rbf e Rigor Geométrico.
+    """
+    # 1. Validação de Integridade (Protocolo de Segurança)
+    if coluna not in df.columns:
+        return f"Erro: Coluna {coluna} não encontrada na planilha."
 
-# Inicialização de Variáveis de Sessão (Persistência)
-if 'cadastros' not in st.session_state:
-    st.session_state['cadastros'] = {
-        "Produtores": ["Gilson Berneck", "AgroMoreira", "Tríade Demo"],
-        "Fazendas": ["Brasnorte", "Santa Fé", "Gleba A"],
-        "Talhoes": ["T1", "T2", "Pivo 03"]
-    }
-if 'fert_ok' not in st.session_state: st.session_state['fert_ok'] = False
-if 'vrt_ok' not in st.session_state: st.session_state['vrt_ok'] = False
-if 'df_proc' not in st.session_state: st.session_state['df_proc'] = None
-
-# --- 2. ESTILO VISUAL PREMIUM ---
-st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Roboto', sans-serif; }
-    .stApp { background-color: #f4f7f6; }
-    .kpi-card { 
-        background: #ffffff; padding: 15px; border-radius: 8px; 
-        border-left: 5px solid #2e7d32; box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        text-align: center; margin-bottom: 10px;
-    }
-    .kpi-val { font-size: 20px; font-weight: 700; color: #1e3d59; }
-    .kpi-lbl { font-size: 12px; color: #666; text-transform: uppercase; }
-    .stButton>button { width: 100%; border-radius: 6px; font-weight: bold; height: 3.5em; background-color: #1e3d59; color: white; border: none; }
-    .stButton>button:hover { background-color: #2c567a; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 3. INTERFACE DINÂMICA ---
-def gerenciar_cadastro(label, chave):
-    lista = st.session_state['cadastros'][chave]
-    selecao = st.sidebar.selectbox(label, lista + ["+ Adicionar Novo"])
-    if selecao == "+ Adicionar Novo":
-        novo = st.sidebar.text_input(f"Nome do Novo {label}")
-        if st.sidebar.button(f"💾 Salvar {label}") and novo:
-            st.session_state['cadastros'][chave].append(novo)
-            st.rerun()
-        return novo if novo else lista[0]
-    return selecao
-
-def configurar_interface():
-    st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
-    st.sidebar.markdown("### 📍 Gestão do Cliente")
+    # 2. Preparação do Grid de Krigagem (150x150)
+    lat, lon = df['latitude'].values, df['longitude'].values
+    z = df[coluna].values
     
-    prod = gerenciar_cadastro("Produtor", "Produtores")
-    faz = gerenciar_cadastro("Fazenda", "Fazendas")
-    tal = gerenciar_cadastro("Talhão", "Talhoes")
+    grid_lon = np.linspace(lon.min(), lon.max(), 150)
+    grid_lat = np.linspace(lat.min(), lat.max(), 150)
+    grid_lon, grid_lat = np.meshgrid(grid_lon, grid_lat)
+    
+    # Interpolação Rbf (Mancha Suave, mas com cores sólidas)
+    rbf = Rbf(lon, lat, z, function='linear')
+    z_grid = rbf(grid_lon, grid_lat)
 
-    st.sidebar.divider()
-    with st.sidebar.expander("🌍 Produtividade Alvo", expanded=True):
-        meta = st.number_input("Meta (sc/ha)", value=80.0, step=1.0, min_value=0.0)
-
-    with st.sidebar.expander("🪨 Calagem"):
-        c_pr = st.number_input("R$/Ton Calcário", value=190.0, step=1.0)
-        c_prnt = st.number_input("PRNT %", value=80.0, step=1.0); c_res = st.number_input("Reserva (kg/ha)", value=0.0, step=10.0)
-        c_cao = st.number_input("CaO %", value=36.0, step=0.1); c_mgo = st.number_input("MgO %", value=9.0, step=0.1)
-        c_t_ca = st.number_input("Alvo Ca %", value=60.0, step=1.0); c_t_mg = st.number_input("Alvo Mg %", value=18.0, step=1.0)
-
-    with st.sidebar.expander("🧪 Fósforo"):
-        p_pr = st.number_input("R$/Ton MAP/Super", value=2200.0, step=10.0)
-        nc = [st.number_input(f"NC {f}", v, step=0.1) for f, v in zip(["0-4","4-10","10-19","19-30","30-45","45-60"], [8.0, 10.0, 12.0, 15.0, 18.0, 22.0])]
-        f_arg = [st.number_input(f, v, step=0.1) for f, v in zip(["M.Arg", "Arg", "Med", "Are"], [10.0, 8.0, 4.0, 2.0])]
-        p_t = st.number_input("Teor P %", value=21.0, step=0.1); p_e = st.number_input("Exp P (kg/sc)", value=0.8, step=0.01)
-
-    with st.sidebar.expander("🍌 Potássio"):
-        k_pr = st.number_input("R$/Ton KCl", value=2800.0, step=10.0)
-        k_t = st.number_input("Alvo K % CTC", value=3.2, step=0.1); k_e = st.number_input("Exp K (kg/sc)", value=1.2, step=0.01)
-        k_teor = st.number_input("Teor K %", value=60.0, step=0.1)
-
-    with st.sidebar.expander("📦 Gesso"):
-        g_pr = st.number_input("R$/Ton Gesso", value=400.0, step=1.0)
-        g_f = st.number_input("Fator Gesso", value=15.0, step=0.1)
-        g_mi = st.number_input("Mín kg/ha", value=400.0, step=10.0); g_ma = st.number_input("Máx kg/ha", value=900.0, step=10.0)
-
-    return {
-        "meta": {"prod": prod, "faz": faz, "tal": tal, "alvo": meta},
-        "calc": {"pr": c_pr, "prnt": c_prnt, "res": c_res, "cao": c_cao, "mgo": c_mgo, "t_ca": c_t_ca, "t_mg": c_t_mg},
-        "fosf": {"pr": p_pr, "nc": nc, "f_arg": f_arg, "teor": p_t, "exp": p_e},
-        "pot": {"pr": k_pr, "target": k_t, "exp": k_e, "teor": k_teor},
-        "gesso": {"pr": g_pr, "fator": g_f, "min": g_mi, "max": g_ma}
-    }
-
-# --- 4. MOTOR LÓGICO V43 (VETORIZADO = ZERO TRAVAMENTO) ---
-@st.cache_data(show_spinner=False)
-def motor_v43(df_raw, p):
-    df = df_raw.copy()
-    
-    # 1. Normalização e Limpeza
-    df.columns = df.columns.str.strip().str.lower().str.replace('ç','c').str.replace('ã','a').str.replace('%','')
-    df = df.loc[:, ~df.columns.duplicated()] # Remove duplicatas
-    
-    # 2. Mapeamento Inteligente
-    de_para = {
-        'ph': ['ph', 'ph_h2o', 'ph agua'],
-        'argila': ['argila', 'clay', 'argila_total'],
-        'ca_p': ['ca', 'calcio', 'ca_cmolc'],
-        'mg_p': ['mg', 'magnesio', 'mg_cmolc'],
-        'k_p': ['k', 'potassio', 'k_cmolc'],
-        'al_p': ['al', 'aluminio', 'acidez'],
-        'prem': ['p_rem', 'prem', 'p-rem'],
-        'p_mehl': ['p', 'fosforo', 'p_mehlich', 'fosforo_mehlich'],
-        'v_p': ['v', 'sat_bases', 'v_sat'],
-        'ctc': ['t', 'ctc_total', 'ctc', 'ctc_ph7']
-    }
-    
-    for padrao, variantes in de_para.items():
-        for v in variantes:
-            if v in df.columns:
-                df[padrao] = df[v]
-                break
-    
-    # Validação
-    if 'argila' not in df.columns: return df, ["Erro Crítico: Coluna 'Argila' não encontrada."]
-
-    # --- CÁLCULOS VETORIZADOS (INSTANTÂNEOS) ---
-    
-    # Gesso
-    df['rec_gesso'] = (df['argila'] * p['gesso']['fator']).clip(p['gesso']['min'], p['gesso']['max'])
-    
-    # Calagem
-    if 'ca_p' in df.columns and 'ctc' in df.columns:
-        nc_ca = ((p['calc']['t_ca'] - df['ca_p']) * df['ctc'] / 100).clip(lower=0)
-        nc_mg = ((p['calc']['t_mg'] - df['mg_p']) * df['ctc'] / 100).clip(lower=0)
-        df['rec_calcario'] = (np.maximum((nc_ca*5600000/(p['calc']['cao']*p['calc']['prnt']+0.1)), 
-                                         (nc_mg*4000000/(p['calc']['mgo']*p['calc']['prnt']+0.1))) + p['calc']['res']).round(2)
-    
-    # Potássio
-    if 'k_p' in df.columns and 'ctc' in df.columns:
-        k_elev = ((p['pot']['target'] - df['k_p']).clip(lower=0) * df['ctc'] / 100 * 391)
-        df['rec_potassio'] = (k_elev + (p['meta']['alvo'] * p['pot']['exp'])) * 100 / p['pot']['teor']
-    
-    # Fósforo (Vetorizado - 100x mais rápido que apply)
-    if 'prem' in df.columns and 'p_mehl' in df.columns:
-        # Condições P-rem
-        c_prem = [df['prem']<=4, df['prem']<=10, df['prem']<=19, df['prem']<=30, df['prem']<=45]
-        v_nc = np.select(c_prem, p['fosf']['nc'][:5], default=p['fosf']['nc'][5])
-        
-        # Condições Argila
-        c_arg = [df['argila']>60, df['argila']>35, df['argila']>15]
-        v_farg = np.select(c_arg, p['fosf']['f_arg'][:3], default=p['fosf']['f_arg'][3])
-        
-        p_nec = (v_nc - df['p_mehl']) * v_farg
-        df['rec_fosforo'] = (np.maximum(p_nec, 0) + (p['meta']['alvo'] * p['fosf']['exp'])) * 100 / p['fosf']['teor']
-    
-    return df, None
-
-# --- 5. GEOPROCESSAMENTO ---
-def plot_satelite_v43(df, col, title, poly=None):
-    if col not in df.columns: return None
-
-    x, y, z = df['longitude'].values, df['latitude'].values, df[col].values
-    
-    # Buffer 10%
-    bx, by = (x.max() - x.min()) * 0.10, (y.max() - y.min()) * 0.10
-    xi = np.linspace(x.min() - bx, x.max() + bx, 150)
-    yi = np.linspace(y.min() - by, y.max() + by, 150)
-    xi, yi = np.meshgrid(xi, yi)
-    
-    try:
-        rbf = Rbf(x, y, z, function='linear'); zi = rbf(xi, yi)
-    except: return None
-    
-    if poly:
-        for i in range(len(xi)):
-            for j in range(len(yi)):
-                if not poly.contains(Point(xi[i,j], yi[i,j])): zi[i,j] = np.nan
-
-    # Plotagem
+    # 3. Construção do Mapa
     fig = go.Figure()
-    fig.add_trace(go.Densitymapbox(
-        lat=yi.flatten(), lon=xi.flatten(), z=zi.flatten(),
-        radius=10, opacity=0.60, colorscale='Jet', showscale=True,
-        colorbar=dict(title=dict(text="Valor", font=dict(color='white')), tickfont=dict(color='white'))
-    ))
-    
-    if poly:
-        cx, cy = zip(*list(poly.exterior.coords))
-        fig.add_trace(go.Scattermapbox(lat=cy, lon=cx, mode='lines', line=dict(color='black', width=3), name='Talhão'))
 
+    # Camada de Dados: Opacidade 100% (Alpha = 1.0)
+    fig.add_trace(go.Heatmap(
+        z=z_grid,
+        x=np.linspace(lon.min(), lon.max(), 150),
+        y=np.linspace(lat.min(), lat.max(), 150),
+        colorscale='Jet',
+        opacity=1.0,  # Rigor V43: Sem transparência
+        zsmooth=False, # Mantém as divisas de cores mais nítidas
+        colorbar=dict(
+            title=dict(text=f"<b>{coluna}</b>", font=dict(size=14)),
+            thickness=20,
+            x=1.02
+        )
+    ))
+
+    # 4. Camada de Contorno: Preto Sólido (Separação Física)
+    if geojson_data:
+        # Extrair coordenadas do GeoJSON para a linha de contorno
+        # (Lógica simplificada para exemplo)
+        lons_contorno = geojson_data['features'][0]['geometry']['coordinates'][0][:,0]
+        lats_contorno = geojson_data['features'][0]['geometry']['coordinates'][0][:,1]
+        
+        fig.add_trace(go.Scattermapbox(
+            lon=lons_contorno,
+            lat=lats_contorno,
+            mode='lines',
+            line=dict(width=3, color='black'),
+            name='Contorno Talhão'
+        ))
+
+    # 5. Configurações de Layout (Aspect Ratio 1:1 e Satélite)
     fig.update_layout(
+        title=f"<b>{titulo} - Tríade Agro Estratégica</b>",
+        margin={"r":0,"t":40,"l":0,"b":0},
+        height=600,
         mapbox=dict(
-            style="white-bg",
-            layers=[{"below": 'traces', "sourcetype": "raster", "source": ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"]}],
-            center=dict(lat=y.mean(), lon=x.mean()), zoom=13.5
+            style="satellite",
+            center={"lat": lat.mean(), "lon": lon.mean()},
+            zoom=15
         ),
-        title=dict(text=f"<b>{title}</b>", font=dict(size=14)),
-        height=550, margin=dict(l=0,r=0,t=40,b=0)
+        yaxis=dict(scaleanchor="x", scaleratio=1) # Impede deformação do talhão
     )
+
     return fig
 
-# --- APP PRINCIPAL ---
-sb = configurar_interface()
-st.title(f"🌱 Tríade Agro: {sb['meta']['prod']} | {sb['meta']['faz']} - {sb['meta']['tal']}")
-
-c_up1, c_up2 = st.columns(2)
-f_csv = c_up1.file_uploader("1. Planilha Solo (CSV)", type="csv")
-f_geo = c_up2.file_uploader("2. Contorno (GeoJSON)", type="geojson")
-
-if f_csv:
-    # Processamento Seguro
-    with st.spinner("Processando dados de solo..."):
-        # Garante que p seja um dicionário válido para cache
-        # Se mudar parâmetros, o cache atualiza
-        df_proc, msg = motor_v43(pd.read_csv(f_csv), sb)
-        if msg: 
-            for m in msg: st.error(m)
-        else:
-            st.session_state['df_proc'] = df_proc
-    
-    df_res = st.session_state['df_proc']
-    poly_obj = shape(json.load(f_geo)['features'][0]['geometry']) if f_geo else None
-
-    if df_res is not None:
-        tabs = st.tabs(["📊 Fertilidade", "🗺️ Recomendações VRT", "📥 Exportar"])
-
-        with tabs[0]: 
-            if st.button("🚀 GERAR MAPAS DE FERTILIDADE"): st.session_state['fert_ok'] = True
-            if st.session_state['fert_ok']:
-                cols = [('ph', 'pH'), ('argila', 'Argila (%)'), ('v_p', 'V%'), ('prem', 'P-rem'),
-                        ('ca_p', 'Cálcio'), ('mg_p', 'Magnésio'), ('k_p', 'Potássio'), ('al_p', 'Alumínio')]
-                for c, l in cols:
-                    if c in df_res.columns:
-                        c_m, c_i = st.columns([3, 1])
-                        fig = plot_satelite_v43(df_res, c, l, poly_obj)
-                        if fig:
-                            c_m.plotly_chart(fig, use_container_width=True)
-                            v = df_res[c].dropna()
-                            c_i.markdown(f"<div class='kpi-card'><span class='kpi-val'>Méd: {v.mean():.2f}</span></div>", unsafe_allow_html=True)
-                            c_i.info(f"Mín: {v.min():.2f}\nMáx: {v.max():.2f}")
-                    else: st.warning(f"Dado ausente: {l}")
-
-        with tabs[1]:
-            if st.button("🗺️ PROCESSAR VRT"): st.session_state['vrt_ok'] = True
-            if st.session_state['vrt_ok']:
-                vrt_list = [('rec_calcario', 'Calcário', sb['calc']['pr']), ('rec_fosforo', 'Fosfatado', sb['fosf']['pr']),
-                            ('rec_potassio', 'Potássico', sb['pot']['pr']), ('rec_gesso', 'Gesso', sb['gesso']['pr'])]
-                for c, l, pr in vrt_list:
-                    if c in df_res.columns:
-                        c_m, c_i = st.columns([3, 1])
-                        fig = plot_satelite_v43(df_res, c, f"Recomendação {l}", poly_obj)
-                        if fig:
-                            c_m.plotly_chart(fig, use_container_width=True)
-                            v = df_res[c].dropna(); custo = (v.mean()/1000)*pr
-                            c_i.markdown(f"<div class='kpi-card'><span class='kpi-lbl'>CUSTO MÉDIO</span><br><span class='kpi-val'>R$ {custo:.2f}</span></div>", unsafe_allow_html=True)
-                            c_i.markdown(f"<div class='arg-tecnico'>Calculado via Protocolo V43.</div>", unsafe_allow_html=True)
-                    else: st.error(f"Sem dados para {l}")
-
-        with tabs[2]:
-            st.subheader("Central de Downloads")
-            c_p, c_z = st.columns(2)
-            pdf = FPDF(); pdf.add_page(); pdf.set_font("Helvetica", 'B', 14)
-            pdf.cell(0, 10, f"RELATORIO TRIADE - {sb['meta']['prod']}", ln=True, align='C')
-            c_p.download_button("📄 Baixar PDF", data=bytes(pdf.output()), file_name="Relatorio.pdf", mime="application/pdf")
-            
-            buf = io.BytesIO()
-            with zipfile.ZipFile(buf, 'w') as z:
-                for m in ["JOHN_DEERE", "TRIMBLE", "HORSCH", "CASE", "STARA"]:
-                    z.writestr(f"{m}/VRT_{sb['meta']['tal']}.csv", df_res.to_csv(index=False))
-            c_z.download_button("📦 Baixar ZIP", data=buf.getvalue(), file_name="Triade_VRT.zip", mime="application/zip")
+# Auditoria de Saída (Box Informativo st.info)
+# Mín: {z.min()} | Máx: {z.max()} | Média: {z.mean()}
