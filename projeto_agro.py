@@ -11,7 +11,7 @@ import zipfile
 
 # --- INICIALIZAÇÃO DO BANCO DE DADOS ---
 if 'db' not in st.session_state:
-    st.session_state['db'] = {} # {Produtor: {Fazenda: {Talhão: {df: pd.DataFrame, contorno: dict}}}}
+    st.session_state['db'] = {}
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="Tríade Agro Estratégica v43", layout="wide", page_icon="🌱")
@@ -33,9 +33,8 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- MOTOR DE CÁLCULO TRÍADE V43 (REGRAS DE OURO BLINDADAS) ---
+# --- MOTOR DE CÁLCULO TRÍADE V43 (REGRAS DE OURO) ---
 def motor_calculo_v43(df, params):
-    # 1. Normalização forçada contra KeyError
     df.columns = df.columns.str.strip().str.lower()
     mapping = {
         'ph': 'pH', 'argila': 'Argila', 'v%': 'V%', 'ctc': 'CTC', 'p mehl': 'P mehl', 
@@ -45,7 +44,6 @@ def motor_calculo_v43(df, params):
     }
     df = df.rename(columns=mapping)
     
-    # Colunas essenciais
     cols_nec = ['Argila', 'Ca%', 'Mg%', 'CTC', 'P mehl', 'K%', 'V%', 'pH', 'prem', 'Ca', 'Mg', 'K', 'Al', 'Longitude', 'Latitude']
     for col in cols_nec:
         if col not in df.columns: df[col] = 0.0
@@ -54,8 +52,7 @@ def motor_calculo_v43(df, params):
     p_p = params["fosforo"]; k_p = params["potassio"]; g_p = params["gesso"]; c_p = params["calagem"]
     prod_esp = params["global"]["produtividade"]
 
-    # --- CÁLCULOS TÉCNICOS ---
-    # 1. Calagem Atômica (Maior Dose + Alerta Relação Ca/Mg)
+    # 1. Calagem Atômica
     df['NC_CA_CMOL'] = ((c_p["target_ca"] - df['Ca%']) * df['CTC'] / 100).clip(lower=0)
     df['NC_MG_CMOL'] = ((c_p["target_mg"] - df['Mg%']) * df['CTC'] / 100).clip(lower=0)
     df['DOSE_CA'] = (df['NC_CA_CMOL'] * 560 * 100 * 100) / (c_p["cao"] * c_p["prnt"])
@@ -63,7 +60,7 @@ def motor_calculo_v43(df, params):
     df['REC_CALCARIO'] = (np.maximum(df['DOSE_CA'], df['DOSE_MG']) + c_p["reserva"]).round(2)
     df['RATIO_CA_MG'] = (df['Ca%'] + (df['NC_CA_CMOL']/df['CTC']*100)) / (df['Mg%'] + (df['NC_MG_CMOL']/df['CTC']*100 + 0.001))
 
-    # 2. Fósforo Dinâmico (Balanço P-rem)
+    # 2. Fósforo (NC P-rem)
     def calc_p(row):
         nc = p_p["nc_0_4"] if row['prem'] <= 4 else p_p["nc_4_10"] if row['prem'] <= 10 else p_p["nc_10_19"] if row['prem'] <= 19 else p_p["nc_19_30"] if row['prem'] <= 30 else p_p["nc_30_45"] if row['prem'] <= 45 else p_p["nc_45_60"]
         f_arg = p_p["f_muito_arg"] if row['Argila'] > 60 else p_p["f_argiloso"] if row['Argila'] > 35 else p_p["f_medio"] if row['Argila'] > 15 else p_p["f_arenoso"]
@@ -76,7 +73,7 @@ def motor_calculo_v43(df, params):
     df['REC_K_ADUBO'] = (((k_p["target_k"] - df['K%']).clip(lower=0) * df['CTC'] / 100 * 941) + (prod_esp * k_p["f_exp"])) * 100 / k_p["teor_adubo"]
     df['REC_GESSO'] = (df['Argila'] * 10 * g_p["fator"]).clip(lower=g_p["min"], upper=g_p["max"]).round(2)
 
-    # 4. Financeiro
+    # Financeiro
     df['C_CALC'] = (df['REC_CALCARIO']/1000) * c_p["preco"]
     df['C_P'] = (df['REC_P_ADUBO']/1000) * p_p["preco"]
     df['C_K'] = (df['REC_K_ADUBO']/1000) * k_p["preco"]
@@ -84,12 +81,12 @@ def motor_calculo_v43(df, params):
     df['C_TOTAL'] = df['C_CALC'] + df['C_P'] + df['C_K'] + df['C_GESSO']
     return df
 
-# --- MOTOR GEOESTATÍSTICO: KRIGAGEM + CLIPPING ---
+# --- MOTOR DE KRIGAGEM COM CLIPPING REAL ---
 def plot_geostats(df, col, title, geo_json=None):
     x, y, z = df['Longitude'].values, df['Latitude'].values, df[col].values
-    if len(np.unique(x)) < 2 or len(np.unique(y)) < 2: return go.Figure(), "N/A"
+    if len(np.unique(x)) < 2: return go.Figure(), "Dados Insuficientes"
     
-    xi = np.linspace(x.min(), x.max(), 80); yi = np.linspace(y.min(), y.max(), 80); xi, yi = np.meshgrid(xi, yi)
+    xi = np.linspace(x.min(), x.max(), 100); yi = np.linspace(y.min(), y.max(), 100); xi, yi = np.meshgrid(xi, yi)
     rbf = Rbf(x, y, z, function='linear', smooth=0.1); zi = rbf(xi, yi)
     
     if geo_json:
@@ -100,17 +97,16 @@ def plot_geostats(df, col, title, geo_json=None):
                     if not poly.contains(Point(xi[i,j], yi[i,j])): zi[i,j] = np.nan
         except: pass
 
-    fig = go.Figure(data=go.Contour(z=zi, x=np.linspace(x.min(), x.max(), 80), y=np.linspace(y.min(), y.max(), 80),
+    fig = go.Figure(data=go.Contour(z=zi, x=np.linspace(x.min(), x.max(), 100), y=np.linspace(y.min(), y.max(), 100),
                                     colorscale='RdYlBu_r', contours=dict(showlines=False), line_width=0))
     fig.update_layout(title=f"<b>{title}</b>", margin=dict(l=10, r=10, t=40, b=10), height=350,
                       xaxis=dict(showticklabels=False, showgrid=False), yaxis=dict(showticklabels=False, showgrid=False), plot_bgcolor='white')
     stats = f"Mín: {np.nanmin(zi):.2f} | Máx: {np.nanmax(zi):.2f} | Méd: {np.nanmean(zi):.2f}"
     return fig, stats
 
-# --- INTERFACE DE CONFIGURAÇÃO (TOTALMENTE EDITÁVEL) ---
+# --- INTERFACE DE NAVEGAÇÃO E ATRIBUTOS ---
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
-    st.sidebar.header("📍 Navegação")
     p_names = list(st.session_state['db'].keys()) + ["+ Novo Produtor"]
     sel_p = st.sidebar.selectbox("Produtor", p_names)
     if sel_p == "+ Novo Produtor":
@@ -131,25 +127,22 @@ def configurar_interface():
             st.session_state['db'][sel_p][sel_f][sel_t] = {"df": None, "contorno": None}
 
     st.sidebar.divider()
-    st.sidebar.header("⚙️ Atributos Tríade")
-    with st.sidebar.expander("🌍 Global", expanded=True):
-        prod = st.number_input("Produtividade (sc/ha)", 80.0, step=1.0)
-    with st.sidebar.expander("🪨 Calagem"):
-        c_cao = st.number_input("CaO %", 36.0, step=1.0); c_mgo = st.number_input("MgO %", 9.0, step=0.5)
+    with st.sidebar.expander("🌍 Atributos Tríade (Bidirecional)", expanded=True):
+        prod = st.number_input("Produtividade Alvo", 80.0, step=1.0)
         c_t_ca = st.number_input("Alvo Ca %", 60.0, step=1.0); c_t_mg = st.number_input("Alvo Mg %", 18.0, step=1.0)
-        c_res = st.number_input("Reserva kg", 0.0, step=50.0); c_preco = st.number_input("R$/Ton Calc", 280.0, step=10.0)
-    with st.sidebar.expander("🧪 Fósforo"):
-        st.write("Níveis Críticos (P-rem)")
-        nc04 = st.number_input("0-4 range", 8.0); nc410 = st.number_input("4-10 range", 10.0); nc4560 = st.number_input("45-60 range", 22.0)
-        f_m_arg = st.number_input("Fator M. Argiloso", 10.0); f_are = st.number_input("Fator Arenoso", 2.0)
-        p_teor = st.number_input("Teor Adubo %", 21.0); p_exp = st.number_input("Fator Exp P", 0.8); p_preco = st.number_input("R$/Ton P", 3200.0)
-    with st.sidebar.expander("🍌 Potássio & Gesso"):
-        k_target = st.number_input("Alvo K %", 3.2); k_preco = st.number_input("R$/Ton K", 2900.0)
-        g_fator = st.number_input("Fator Gesso", 15.0); g_min = st.number_input("Min Gesso", 400.0); g_max = st.number_input("Max Gesso", 900.0)
+        c_res = st.number_input("Reserva kg/ha", 0.0, step=100.0); c_preco = st.number_input("Preço Calcário R$/T", 280.0, step=10.0)
+        p_teor = st.number_input("Teor Adubo P %", 21.0, step=1.0); p_preco = st.number_input("Preço P R$/T", 3200.0, step=50.0)
+        k_preco = st.number_input("Preço K R$/T", 2900.0, step=50.0); g_fator = st.number_input("Fator Gesso", 15.0, step=1.0)
 
-    return {"global": {"produtividade": prod}, "calagem": {"prnt": 80.0, "cao": c_cao, "mgo": c_mgo, "target_ca": c_t_ca, "target_mg": c_t_mg, "reserva": c_res, "preco": c_preco},
-            "fosforo": {"nc_0_4": nc04, "nc_4_10": nc410, "nc_10_19": 12.0, "nc_19_30": 15.0, "nc_30_45": 18.0, "nc_45_60": nc4560, "f_muito_arg": f_m_arg, "f_argiloso": 8.0, "f_medio": 4.0, "f_arenoso": f_are, "teor_adubo": p_teor, "f_exp": p_exp, "preco": p_preco},
-            "potassio": {"target_k": k_target, "teor_adubo": 60.0, "f_exp": 1.2, "preco": k_preco}, "gesso": {"fator": g_fator, "min": g_min, "max": g_max, "preco": 190.0}, "path": (sel_p, sel_f, sel_t)}
+    params = {
+        "global": {"produtividade": prod},
+        "calagem": {"prnt": 80.0, "cao": 36.0, "mgo": 9.0, "target_ca": c_t_ca, "target_mg": c_t_mg, "reserva": c_res, "preco": c_preco},
+        "fosforo": {"nc_0_4": 8.0, "nc_4_10": 10.0, "nc_10_19": 12.0, "nc_19_30": 15.0, "nc_30_45": 18.0, "nc_45_60": 22.0, "f_muito_arg": 10.0, "f_argiloso": 8.0, "f_medio": 4.0, "f_arenoso": 2.0, "teor_adubo": p_teor, "f_exp": 0.8, "preco": p_preco},
+        "potassio": {"target_k": 3.2, "teor_adubo": 60.0, "f_exp": 1.2, "preco": k_preco},
+        "gesso": {"fator": g_fator, "min": 400.0, "max": 900.0, "preco": 190.0},
+        "path": (sel_p, sel_f, sel_t)
+    }
+    return params
 
 # --- PÁGINA DE OPERAÇÕES ---
 def pag_produtores(params):
@@ -165,7 +158,7 @@ def pag_produtores(params):
             if st.button("🚀 Processar Dados"):
                 if up_csv: st.session_state['db'][p][f][t]["df"] = pd.read_csv(up_csv, sep=None, engine='python', encoding='utf-8-sig')
                 if up_geo: st.session_state['db'][p][f][t]["contorno"] = json.load(up_geo)
-                st.success("Tudo carregado!")
+                st.success("Dados vinculados!")
         with c2:
             if st.session_state['db'].get(p,{}).get(f,{}).get(t,{}).get("df") is not None:
                 st.dataframe(st.session_state['db'][p][f][t]["df"].head())
@@ -180,9 +173,35 @@ def pag_produtores(params):
                 cols = st.columns(2)
                 for j in range(2):
                     if i+j < len(attrs):
-                        fig, stats = plot_geostats(df_res, attrs[i+j], f"Distribuição de {attrs[i+j]}", contorno)
+                        fig, stats = plot_geostats(df_res, attrs[i+j], attrs[i+j], contorno)
                         cols[j].plotly_chart(fig, use_container_width=True); cols[j].info(stats)
 
         with tabs[2]:
             k1, k2, k3, k4 = st.columns(4)
-            k1.markdown(f"<div class='kpi-card'><small>Calcário</small><div class='kpi-value'>R$ {df_res['C_CALC'].mean():.2f}/ha</div>
+            k1.markdown(f"<div class='kpi-card'><small>Calcário</small><div class='kpi-value'>R$ {df_res['C_CALC'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+            k2.markdown(f"<div class='kpi-card'><small>Fósforo</small><div class='kpi-value'>R$ {df_res['C_P'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+            k3.markdown(f"<div class='kpi-card'><small>Potássio</small><div class='kpi-value'>R$ {df_res['C_K'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+            k4.markdown(f"<div class='kpi-card'><small>INVESTIMENTO TOTAL</small><div class='kpi-value' style='color:#27ae60'>R$ {df_res['C_TOTAL'].mean():.2f}/ha</div></div>", unsafe_allow_html=True)
+            
+            recs = [("REC_CALCARIO", "Calcário"), ("REC_P_ADUBO", "Fosfatado"), ("REC_K_ADUBO", "Potássico"), ("REC_GESSO", "Gesso")]
+            args_tec = {"Calcário": "Equilíbrio atômico individual de Ca e Mg.", "Fosfatado": "NC via P-rem com crédito de solo.", "Potássio": "Saturação ideal + exportação.", "Gesso": "Melhoria baseada em Argila %."}
+            for i in range(0, len(recs), 2):
+                cols = st.columns(2)
+                for j in range(2):
+                    if i+j < len(recs):
+                        fig, stats = plot_geostats(df_res, recs[i+j][0], f"VRT {recs[i+j][1]} (kg/ha)", contorno)
+                        cols[j].plotly_chart(fig, use_container_width=True); cols[j].success(stats)
+                        cols[j].markdown(f"<div class='arg-tecnico'><b>Vantagem Tríade:</b> {args_tec[recs[i+j][1]]}</div>", unsafe_allow_html=True)
+
+        with tabs[3]:
+            st.button("📝 Gerar Relatório PDF A4")
+
+        with tabs[4]:
+            st.selectbox("Monitor", ["John Deere", "Case", "Trimble"])
+            st.button("📦 Exportar Shapefiles (ZIP)")
+
+# --- EXECUÇÃO ---
+params = configurar_interface()
+p, f, t = params["path"]
+if not p or not f or not t: st.info("Selecione o talhão na barra lateral.")
+else: pag_produtores(params)
