@@ -9,7 +9,7 @@ import json
 import io
 import zipfile
 
-# --- 1. CONFIGURAÇÃO E ESTADO GLOBAL ---
+# --- 1. CONFIGURAÇÃO E ESTADO ---
 st.set_page_config(page_title="Tríade Agro V43 (Gold)", layout="wide", page_icon="🌱")
 
 # Inicialização de Variáveis de Sessão (Persistência)
@@ -41,7 +41,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 3. INTERFACE DINÂMICA (CORRIGIDA) ---
+# --- 3. INTERFACE DINÂMICA (HIERARQUIA + PARÂMETROS) ---
 def gerenciar_cadastro(label, chave):
     lista = st.session_state['cadastros'][chave]
     selecao = st.sidebar.selectbox(label, lista + ["+ Adicionar Novo"])
@@ -53,7 +53,6 @@ def gerenciar_cadastro(label, chave):
         return novo if novo else lista[0]
     return selecao
 
-# NOME CORRIGIDO AQUI PARA EVITAR NameError
 def configurar_interface():
     st.sidebar.image("LogoTriadeagro.png.png", use_container_width=True)
     st.sidebar.markdown("### 📍 Gestão do Cliente")
@@ -96,12 +95,17 @@ def configurar_interface():
         "gesso": {"pr": g_pr, "fator": g_f, "min": g_mi, "max": g_ma}
     }
 
-# --- 4. MOTOR LÓGICO V43 (MAPEAMENTO INTELIGENTE) ---
+# --- 4. MOTOR LÓGICO V43 (BLINDAGEM DUPLICATAS + MAPEAMENTO) ---
 def motor_v43(df_raw, p):
     df = df_raw.copy()
+    
+    # 1. Normalização de Nomes
     df.columns = df.columns.str.strip().str.lower().str.replace('ç','c').str.replace('ã','a').str.replace('%','')
     
-    # Dicionário de Sinônimos (De -> Para Padrão Interno)
+    # 2. BLINDAGEM CONTRA DUPLICATAS (SOLUÇÃO DO ERRO)
+    df = df.loc[:, ~df.columns.duplicated()]
+    
+    # 3. Dicionário de Sinônimos
     de_para = {
         'ph': ['ph', 'ph_h2o', 'ph agua'],
         'argila': ['argila', 'clay', 'argila_total'],
@@ -119,166 +123,15 @@ def motor_v43(df_raw, p):
         for v in variantes:
             if v in df.columns:
                 df[padrao] = df[v]
-                break
+                break # Encontrou, para e vai para o próximo padrão
     
-    # Validação Básica
+    # 4. Validação Básica
     erros = []
     if 'argila' not in df.columns: erros.append("ATENÇÃO: Coluna 'Argila' não encontrada.")
 
-    # CÁLCULOS
+    # 5. CÁLCULOS
     # Gesso
     if 'argila' in df.columns:
         df['rec_gesso'] = (df['argila'] * p['gesso']['fator']).clip(p['gesso']['min'], p['gesso']['max'])
     
     # Calagem
-    if 'ca_p' in df.columns and 'ctc' in df.columns:
-        nc_ca = ((p['calc']['t_ca'] - df['ca_p']) * df['ctc'] / 100).clip(lower=0)
-        nc_mg = ((p['calc']['t_mg'] - df['mg_p']) * df['ctc'] / 100).clip(lower=0)
-        df['rec_calcario'] = (np.maximum((nc_ca*5600000/(p['calc']['cao']*p['calc']['prnt']+0.1)), 
-                                         (nc_mg*4000000/(p['calc']['mgo']*p['calc']['prnt']+0.1))) + p['calc']['res']).round(2)
-    
-    # Potássio
-    if 'k_p' in df.columns and 'ctc' in df.columns:
-        k_elev = ((p['pot']['target'] - df['k_p']).clip(lower=0) * df['ctc'] / 100 * 391)
-        df['rec_potassio'] = (k_elev + (p['meta']['alvo'] * p['pot']['exp'])) * 100 / p['pot']['teor']
-    
-    # Fósforo (Obrigatório na VRT)
-    if 'prem' in df.columns and 'p_mehl' in df.columns:
-        def calc_p(row):
-            idx = 0 if row['prem']<=4 else 1 if row['prem']<=10 else 2 if row['prem']<=19 else 3 if row['prem']<=30 else 4 if row['prem']<=45 else 5
-            f_idx = 0 if row['argila']>60 else 1 if row['argila']>35 else 2 if row['argila']>15 else 3
-            p_nec = (p['fosf']['nc'][idx] - row['p_mehl']) * p['fosf']['f_arg'][f_idx]
-            return (max(p_nec, 0) + (p['meta']['alvo'] * p['fosf']['exp'])) * 100 / p['fosf']['teor']
-        df['rec_fosforo'] = df.apply(calc_p, axis=1)
-    
-    return df, erros
-
-# --- 5. GEOPROCESSAMENTO (SATÉLITE + BUFFER 100% + MAPBOX) ---
-def plot_satelite_v43(df, col, title, poly=None):
-    if col not in df.columns: return None
-
-    x, y, z = df['longitude'].values, df['latitude'].values, df[col].values
-    
-    # --- REGRA DO BUFFER 10% (Preenchimento Total) ---
-    bx = (x.max() - x.min()) * 0.10
-    by = (y.max() - y.min()) * 0.10
-    xi = np.linspace(x.min() - bx, x.max() + bx, 150)
-    yi = np.linspace(y.min() - by, y.max() + by, 150)
-    xi, yi = np.meshgrid(xi, yi)
-    
-    try:
-        rbf = Rbf(x, y, z, function='linear'); zi = rbf(xi, yi)
-    except: return None
-    
-    if poly:
-        for i in range(len(xi)):
-            for j in range(len(yi)):
-                if not poly.contains(Point(xi[i,j], yi[i,j])): zi[i,j] = np.nan
-
-    # PLOTAGEM
-    fig = go.Figure()
-    
-    # Heatmap Jet Suave
-    fig.add_trace(go.Densitymapbox(
-        lat=yi.flatten(), lon=xi.flatten(), z=zi.flatten(),
-        radius=10, opacity=0.60, colorscale='Jet', showscale=True,
-        colorbar=dict(title=dict(text="Valor", font=dict(color='white')), tickfont=dict(color='white'))
-    ))
-    
-    # Contorno
-    if poly:
-        cx, cy = zip(*list(poly.exterior.coords))
-        fig.add_trace(go.Scattermapbox(lat=cy, lon=cx, mode='lines', line=dict(color='black', width=3), name='Talhão'))
-
-    # Configuração Mapbox (ESRI Satellite)
-    fig.update_layout(
-        mapbox=dict(
-            style="white-bg",
-            layers=[{"below": 'traces', "sourcetype": "raster", "source": ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"]}],
-            center=dict(lat=y.mean(), lon=x.mean()), zoom=13.5
-        ),
-        title=dict(text=f"<b>{title}</b>", font=dict(size=14)),
-        height=550, margin=dict(l=0,r=0,t=40,b=0)
-    )
-    return fig
-
-# --- APP PRINCIPAL ---
-sb = configurar_interface() # NOME CORRIGIDO!
-st.title(f"🌱 Tríade Agro: {sb['meta']['prod']} | {sb['meta']['faz']} - {sb['meta']['tal']}")
-
-c_up1, c_up2 = st.columns(2)
-f_csv = c_up1.file_uploader("1. Planilha Solo (CSV)", type="csv")
-f_geo = c_up2.file_uploader("2. Contorno (GeoJSON)", type="geojson")
-
-if f_csv:
-    # Processamento Único (Blindagem contra travamento)
-    if st.session_state['df_proc'] is None:
-        df_proc, msg = motor_v43(pd.read_csv(f_csv), sb)
-        if msg: 
-            for m in msg: st.warning(m)
-        st.session_state['df_proc'] = df_proc
-    
-    df_res = st.session_state['df_proc']
-    poly_obj = shape(json.load(f_geo)['features'][0]['geometry']) if f_geo else None
-
-    tabs = st.tabs(["📊 Fertilidade", "🗺️ Recomendações VRT", "📥 Exportar"])
-
-    with tabs[0]: # FERTILIDADE (COMPLETA)
-        if st.button("🚀 GERAR MAPAS DE FERTILIDADE"): st.session_state['fert_ok'] = True
-        
-        if st.session_state['fert_ok']:
-            # Lista completa conforme REGRA 2
-            cols = [
-                ('ph', 'pH'), ('argila', 'Argila (%)'), ('v_p', 'V%'), ('prem', 'P-rem'),
-                ('ca_p', 'Cálcio'), ('mg_p', 'Magnésio'), ('k_p', 'Potássio'), ('al_p', 'Alumínio')
-            ]
-            for c, l in cols:
-                if c in df_res.columns:
-                    c_m, c_i = st.columns([3, 1])
-                    fig = plot_satelite_v43(df_res, c, l, poly_obj)
-                    if fig:
-                        c_m.plotly_chart(fig, use_container_width=True)
-                        v = df_res[c].dropna()
-                        c_i.markdown(f"<div class='kpi-card'><span class='kpi-val'>Méd: {v.mean():.2f}</span></div>", unsafe_allow_html=True)
-                        c_i.info(f"Mín: {v.min():.2f}\nMáx: {v.max():.2f}")
-                else:
-                    st.warning(f"Dado ausente: {l}")
-
-    with tabs[1]: # VRT (COM FÓSFORO)
-        if st.button("🗺️ PROCESSAR VRT"): st.session_state['vrt_ok'] = True
-        
-        if st.session_state['vrt_ok']:
-            vrt_list = [
-                ('rec_calcario', 'Calcário', sb['calc']['pr']),
-                ('rec_fosforo', 'Fosfatado', sb['fosf']['pr']), # FÓSFORO INCLUÍDO
-                ('rec_potassio', 'Potássico', sb['pot']['pr']),
-                ('rec_gesso', 'Gesso', sb['gesso']['pr'])
-            ]
-            for c, l, pr in vrt_list:
-                if c in df_res.columns:
-                    c_m, c_i = st.columns([3, 1])
-                    fig = plot_satelite_v43(df_res, c, f"Recomendação {l}", poly_obj)
-                    if fig:
-                        c_m.plotly_chart(fig, use_container_width=True)
-                        v = df_res[c].dropna(); custo = (v.mean()/1000)*pr
-                        c_i.markdown(f"<div class='kpi-card'><span class='kpi-lbl'>CUSTO MÉDIO</span><br><span class='kpi-val'>R$ {custo:.2f}</span></div>", unsafe_allow_html=True)
-                        c_i.markdown(f"<div class='arg-tecnico'>Calculado conforme Protocolo V43.</div>", unsafe_allow_html=True)
-                else:
-                    st.error(f"Impossível calcular {l}. Verifique os dados.")
-
-    with tabs[2]: # EXPORTAÇÃO
-        st.subheader("Central de Downloads")
-        c_p, c_z = st.columns(2)
-        
-        # PDF CORRIGIDO (BYTES)
-        pdf = FPDF(); pdf.add_page(); pdf.set_font("Helvetica", 'B', 14)
-        pdf.cell(0, 10, f"RELATORIO TRIADE - {sb['meta']['prod']}", ln=True, align='C')
-        pdf_bytes = bytes(pdf.output()) 
-        c_p.download_button("📄 Baixar PDF", data=pdf_bytes, file_name="Relatorio.pdf", mime="application/pdf")
-        
-        # ZIP
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, 'w') as z:
-            for m in ["JOHN_DEERE", "TRIMBLE", "HORSCH", "CASE", "STARA"]:
-                z.writestr(f"{m}/VRT_{sb['meta']['tal']}.csv", df_res.to_csv(index=False))
-        c_z.download_button("📦 Baixar ZIP", data=buf.getvalue(), file_name="Triade_VRT.zip", mime="application/zip")
