@@ -32,8 +32,24 @@ st.markdown("""
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
 
-# Upload do CSV
-file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
+if file_csv and file_geojson:
+    # Carregamento Blindado
+    df_raw = carregar_dados_blindado(file_csv)
+    
+    # --- CORREÇÃO DE NOMES (NOVO) ---
+    # Isso padroniza qualquer jeito que a lat/lon esteja escrita para o padrão do sistema
+    df_raw = df_raw.rename(columns={
+        'Lat': 'latitude', 'LAT': 'latitude', 'lat': 'latitude', 'LATITUDE': 'latitude',
+        'Lon': 'longitude', 'LON': 'longitude', 'lon': 'longitude', 'LONGITUDE': 'longitude', 'long': 'longitude'
+    })
+    # -------------------------------
+
+    geojson_data = json.load(file_geojson)
+    st.session_state['geojson_data'] = geojson_data
+    
+    # Validação Básica de Colunas
+    cols_geo = ['latitude', 'longitude']
+    # ... resto do código continua igual
 # Upload do GeoJSON
 file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
 
