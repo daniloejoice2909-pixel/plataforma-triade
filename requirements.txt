@@ -12,8 +12,8 @@ openpyxl
 Pillow
 streamlit
 pandas
-numpy
 plotly
 fpdf2
 pip install
+
 
