@@ -46,50 +46,95 @@ if 'geojson_data' not in st.session_state:
 # ==============================================================================
 # 3. MOTOR GEOESTATÍSTICO (Núcleo Pesado)
 # ==============================================================================
-@st.cache_data(show_spinner="Rodando Krigagem (Protocolo v43)...")
-def processar_matrizes_interpolacao(df, resolucao_grid=150):
+from pykrige.ok import OrdinaryKriging
+from matplotlib.path import Path as MplPath
+import numpy as np
+import pandas as pd
+
+@st.cache_data(show_spinner="⚙️ Processando Geoestatística (Protocolo v43)...")
+def processar_matrizes_interpolacao(df, geojson_data, resolucao_grid=150):
     """
-    Simula/Executa a Krigagem para TODAS as colunas numéricas relevantes.
-    RETORNA: Um DataFrame denso com Lat/Lon e valores interpolados.
+    Executa Krigagem Ordinária para todas as colunas numéricas e
+    aplica o recorte (mask) do talhão para não gerar mapas quadrados.
     """
-    # 1. Identificar colunas interpoláveis (Numéricas)
-    cols_para_interpolar = [c for c in df.columns if c not in ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude']]
+    # 1. Preparação do Grid (Grade de Pontos)
+    # Define os limites baseados nos dados ou no contorno (preferência pelos dados para margem)
+    x_min, x_max = df['longitude'].min(), df['longitude'].max()
+    y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # [SIMULAÇÃO DA KRIGAGEM PARA EXEMPLO] 
-    # No seu código real, aqui entram suas funções do PyKrige ou SciKit-Learn.
-    # Vou criar um Grid fictício para o código rodar e você ver a exportação funcionando.
+    # Adiciona uma pequena margem (buffer) para garantir que cobre as bordas
+    buffer = 0.001 
+    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
+    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
-    # Criando grid baseado nas coordenadas min/max do input
-    # (Adapte isso para usar seu algoritmo real de grid + máscara do polígono)
-    lat_min, lat_max = df['latitude'].min(), df['latitude'].max()
-    lon_min, lon_max = df['longitude'].min(), df['longitude'].max()
-    
-    lats = np.linspace(lat_min, lat_max, resolucao_grid)
-    lons = np.linspace(lon_min, lon_max, resolucao_grid)
-    grid_lat, grid_lon = np.meshgrid(lats, lons)
-    
+    # 2. Criação da Máscara do Polígono (O "Cortador de Biscoito")
+    # Transforma o GeoJSON em um objeto Path do Matplotlib para verificação rápida
+    try:
+        coords_poligono = geojson_data['features'][0]['geometry']['coordinates'][0]
+        poligono_path = MplPath(coords_poligono)
+        
+        # Gera a malha 2D para verificar ponto a ponto
+        xx, yy = np.meshgrid(grid_x, grid_y)
+        points_flat = np.vstack((xx.flatten(), yy.flatten())).T
+        
+        # Cria a máscara booleana (True = Dentro do talhão, False = Fora)
+        mask = poligono_path.contains_points(points_flat)
+        # Remodela para o formato do grid (matriz)
+        mask_matrix = mask.reshape(xx.shape)
+        
+    except Exception as e:
+        st.error(f"Erro ao processar contorno do GeoJSON: {e}")
+        return None
+
+    # DataFrame final que vai guardar tudo
     df_result = pd.DataFrame({
-        'latitude': grid_lat.flatten(),
-        'longitude': grid_lon.flatten()
+        'latitude': yy.flatten(),
+        'longitude': xx.flatten()
     })
-    
-    # Interpolação (Simulada com Nearest para performance do exemplo)
-    from scipy.interpolate import griddata
-    points = df[['longitude', 'latitude']].values
-    
+
+    # 3. Loop de Krigagem (Blindado)
+    # Lista de colunas para ignorar (não são nutrientes)
+    cols_ignorar = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y']
+    cols_para_interpolar = [c for c in df.columns if c.lower() not in cols_ignorar]
+
     for col in cols_para_interpolar:
-        values = df[col].values
-        # Bloco Try para evitar crash em coluna com NaN
         try:
-            grid_z = griddata(points, values, (grid_lon, grid_lat), method='linear')
-            df_result[col] = grid_z.flatten()
-        except Exception as e:
-            pass # Ignora colunas problemáticas
+            # Pega os dados limpos (remove NaNs dessa coluna específica se houver)
+            dados_coluna = df[['longitude', 'latitude', col]].dropna()
             
-    # Remove NaNs gerados fora do convex hull (opcional)
-    df_result = df_result.dropna()
+            if len(dados_coluna) < 5: # Proteção: Krigagem precisa de mínimo de pontos
+                continue
+
+            # Configura o Modelo de Krigagem Ordinária
+            OK = OrdinaryKriging(
+                dados_coluna['longitude'], 
+                dados_coluna['latitude'], 
+                dados_coluna[col], 
+                variogram_model='linear', # Ou 'spherical', ajustável se quiser evoluir
+                verbose=False, 
+                enable_plotting=False
+            )
+            
+            # Executa a interpolação no Grid
+            z, ss = OK.execute('grid', grid_x, grid_y)
+            
+            # Aplica a MÁSCARA (Zera o que está fora do talhão)
+            # O PyKrige devolve um MaskedArray, mas forçamos nossa máscara geométrica
+            z_data = z.data # Pega os dados brutos
+            z_data[~mask_matrix] = np.nan # Aplica NaN onde está fora do polígono
+            
+            # Salva no DataFrame (achatando a matriz 2D para coluna 1D)
+            df_result[col] = z_data.flatten()
+            
+        except Exception as e:
+            # Não trava o app se um atributo falhar (ex: coluna vazia)
+            print(f"Aviso: Não foi possível interpolar {col}. Erro: {e}")
+
+    # 4. Limpeza Final (Remove linhas que são puramente NaN fora do mapa)
+    # Isso deixa o arquivo muito mais leve para o App 2
+    df_final = df_result.dropna(subset=cols_para_interpolar, how='all')
     
-    return df_result
+    return df_final
 
 # ==============================================================================
 # 4. LÓGICA DE EXECUÇÃO
