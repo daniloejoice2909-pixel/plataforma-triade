@@ -1,6 +1,6 @@
 streamlit
 pandas
-numpy
+numpy<2.0.0
 folium
 streamlit-folium
 pykrige
@@ -16,3 +16,4 @@ numpy
 plotly
 fpdf2
 pip install
+
