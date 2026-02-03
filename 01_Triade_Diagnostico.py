@@ -33,25 +33,60 @@ st.markdown("""
 st.sidebar.header("1. Arquivos de Entrada")
 
 if file_csv and file_geojson:
-    # Carregamento Blindado
+    # 1. Carregamento Blindado
     df_raw = carregar_dados_blindado(file_csv)
     
-    # --- CORREÇÃO DE NOMES (NOVO) ---
-    # Isso padroniza qualquer jeito que a lat/lon esteja escrita para o padrão do sistema
-    df_raw = df_raw.rename(columns={
-        'Lat': 'latitude', 'LAT': 'latitude', 'lat': 'latitude', 'LATITUDE': 'latitude',
-        'Lon': 'longitude', 'LON': 'longitude', 'lon': 'longitude', 'LONGITUDE': 'longitude', 'long': 'longitude'
-    })
-    # -------------------------------
+    # 2. Limpeza de Nomes de Colunas (Remove espaços extras e coloca minúsculo)
+    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
+    
+    # Diagnóstico Visual (Para você ver o que o Python está lendo)
+    with st.expander("🔍 Ver Tabela Carregada (Clique para conferir)", expanded=False):
+        st.dataframe(df_raw.head())
+        st.write(f"Colunas detectadas: {list(df_raw.columns)}")
 
+    # 3. Mapeamento Manual de Colunas (O Segredo para não travar)
+    col1, col2 = st.columns(2)
+    
+    # Tenta achar automático, se não achar, pega o primeiro da lista
+    idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
+    idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1
+
+    with col1:
+        # Seletor Manual: O usuário aponta qual é a coluna Latitude
+        col_lat_nome = st.selectbox(
+            "Qual coluna é a LATITUDE (Y)?", 
+            options=df_raw.columns,
+            index=idx_lat,
+            help="Selecione a coluna que contém a coordenada Latitude (ex: Lat, Y, Latitude)"
+        )
+
+    with col2:
+        # Seletor Manual: O usuário aponta qual é a coluna Longitude
+        col_lon_nome = st.selectbox(
+            "Qual coluna é a LONGITUDE (X)?", 
+            options=df_raw.columns,
+            index=idx_lon,
+            help="Selecione a coluna que contém a coordenada Longitude (ex: Lon, X, Longitude)"
+        )
+
+    # Renomeação Forçada (Agora o Python sabe com certeza quem é quem)
+    df_raw = df_raw.rename(columns={col_lat_nome: 'latitude', col_lon_nome: 'longitude'})
+
+    # 4. Continua o Processo Normal...
     geojson_data = json.load(file_geojson)
     st.session_state['geojson_data'] = geojson_data
     
-    # Validação Básica de Colunas
+    # Agora a validação vai passar com certeza
     cols_geo = ['latitude', 'longitude']
-    # ... resto do código continua igual
-# Upload do GeoJSON
-file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
+    valido, faltantes = validar_colunas(df_raw, cols_geo)
+    
+    if not valido:
+        st.error(f"Erro Crítico: Ainda faltam colunas: {faltantes}")
+    else:
+        st.success(f"✅ Arquivos Mapeados! {len(df_raw)} pontos prontos.")
+        
+        # --- BOTÃO GATILHO ---
+        # (O resto do seu código continua aqui igualzinha estava antes...)
 
 # Inicialização de Session State para persistência
 if 'dados_processados' not in st.session_state:
