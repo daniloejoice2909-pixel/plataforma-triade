@@ -9,11 +9,6 @@ scipy
 matplotlib
 fpdf2
 openpyxl
-Pillow
-streamlit
-pandas
+pillow
 plotly
-fpdf2
-pip install
-
-
+scikit-learn
