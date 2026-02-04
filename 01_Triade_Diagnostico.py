@@ -39,11 +39,11 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     """
     Executa Krigagem Ordinária com limpeza numérica automática.
     """
-    # --- ETAPA 1: LIMPEZA E CONVERSÃO NUMÉRICA (O SEGREDO) ---
-    df = df_input.copy() # Não altera o original
+    # --- ETAPA 1: LIMPEZA E CONVERSÃO NUMÉRICA ---
+    df = df_input.copy() 
     
-    # Lista de colunas que NUNCA devem ser interpoladas (Metadados)
-    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona']
+    # Lista de colunas que NUNCA devem ser interpoladas (Metadados/Texto)
+    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
     
     cols_validas = []
     
@@ -57,7 +57,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             if df[col].dtype == 'object':
                 df[col] = df[col].astype(str).str.replace(',', '.')
             
-            # 2. Força converter para número (O que for texto vira NaN e o sistema ignora)
+            # 2. Força converter para número (O que for texto vira NaN)
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
             # 3. Se a coluna tiver números válidos suficientes, entra na lista
@@ -100,7 +100,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     # Loop de Krigagem apenas nas colunas numéricas validadas
     for col in cols_validas:
         try:
-            # Pega os dados limpos (remove NaNs dessa coluna)
             dados_coluna = df[['longitude', 'latitude', col]].dropna()
             
             if len(dados_coluna) < 5: 
@@ -145,7 +144,7 @@ if file_csv and file_geojson:
     # Limpeza básica dos nomes
     df_raw.columns = [c.strip().lower() for c in df_raw.columns]
 
-    # 4.2 Carregamento GeoJSON Blindado (CORREÇÃO DO JSON ERROR)
+    # 4.2 Carregamento GeoJSON Blindado
     try:
         file_geojson.seek(0)
         geojson_data = json.load(file_geojson)
@@ -160,7 +159,7 @@ if file_csv and file_geojson:
             
     st.session_state['geojson_data'] = geojson_data
 
-    # 4.3 Seletor Manual de Colunas (CORREÇÃO DA LATITUDE)
+    # 4.3 Seletor Manual de Colunas
     st.info("📍 Confirme as colunas de coordenadas para evitar erros:")
     c1, c2 = st.columns(2)
     
@@ -186,7 +185,7 @@ if file_csv and file_geojson:
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
-                # Chama a função passando o GEOJSON (CORREÇÃO DE ARGUMENTO)
+                # Chama a função passando o GEOJSON
                 df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
                 st.session_state['dados_processados'] = df_krig
                 st.toast("Krigagem concluída!", icon="✅")
@@ -196,24 +195,61 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. VISUALIZAÇÃO E EXPORTAÇÃO
+# 5. VISUALIZAÇÃO E EXPORTAÇÃO BLINDADA
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
-    df_final = st.session_state['dados_processados']
+    # Cria uma cópia para não alterar a session_state original durante a plotagem
+    df_final = st.session_state['dados_processados'].copy()
     
     st.divider()
     st.subheader("📊 Visualização de Diagnóstico")
     
+    # Filtra colunas visuais
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
+    
     if cols_ver:
         atributo = st.selectbox("Selecione o mapa:", cols_ver)
         
-       # Plotagem com Chave Única
-        fig = go.Figure(go.Heatmap(
-            lon=df_final['longitude'], 
-            lat=df_final['latitude'], 
-            z=df_final[atributo],
-            colorscale='Jet',
-            opacity=1.0,
-            zsmooth='best'  # <--- O erro estava aqui (faltava fechar as aspas)
-        ))
+        # --- BLINDAGEM DO GRÁFICO (EVITA VALUE ERROR) ---
+        # Converte para numérico novamente antes de plotar para garantir que Plotly não receba lixo
+        df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
+        df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
+        
+        if not df_plot.empty:
+            # Plotagem com Chave Única
+            try:
+                fig = go.Figure(go.Heatmap(
+                    lon=df_plot['longitude'], 
+                    lat=df_plot['latitude'], 
+                    z=df_plot[atributo],
+                    colorscale='Jet',
+                    opacity=1.0,
+                    zsmooth='best'
+                ))
+                
+                fig = aplicar_layout_v43(fig, f"Diagnóstico: {atributo}")
+                
+                if st.session_state['geojson_data']:
+                    fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
+                
+                st.plotly_chart(fig, use_container_width=True, key=f"mapa_{atributo}")
+            except Exception as e:
+                st.error(f"Erro na renderização visual: {e}")
+        else:
+            st.warning("Mapa vazio após limpeza de dados.")
+            
+        # --- EXPORTAÇÃO DA PONTE ---
+        st.markdown("---")
+        st.info("🏁 **Próximo Passo:** Exporte os dados processados para usar no App de Prescrição.")
+        
+        csv_ponte = df_final.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="💾 Baixar Arquivo Ponte (.csv)",
+            data=csv_ponte,
+            file_name="ponte_triade_solo.csv",
+            mime="text/csv",
+            type="primary"
+        )
+
+elif file_csv:
+    st.info("👆 Clique no botão 'Processar Matrizes' para iniciar.")
