@@ -32,14 +32,44 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (Deve vir antes de ser usada)
+# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (CORRIGIDA E BLINDADA)
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Processando Geoestatística (Protocolo v43)...")
-def processar_matrizes_interpolacao(df, geojson_data, resolucao_grid=150):
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     """
-    Executa Krigagem Ordinária com recorte (mask) pelo GeoJSON.
+    Executa Krigagem Ordinária com limpeza numérica automática.
     """
-    # 1. Preparação do Grid
+    # --- ETAPA 1: LIMPEZA E CONVERSÃO NUMÉRICA (O SEGREDO) ---
+    df = df_input.copy() # Não altera o original
+    
+    # Lista de colunas que NUNCA devem ser interpoladas (Metadados)
+    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona']
+    
+    cols_validas = []
+    
+    for col in df.columns:
+        # Pula colunas de coordenadas ou identificação
+        if col.lower() in cols_proibidas:
+            continue
+            
+        try:
+            # 1. Se for texto, tenta trocar vírgula por ponto (Padrão Brasil -> EUA)
+            if df[col].dtype == 'object':
+                df[col] = df[col].astype(str).str.replace(',', '.')
+            
+            # 2. Força converter para número (O que for texto vira NaN e o sistema ignora)
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # 3. Se a coluna tiver números válidos suficientes, entra na lista
+            if df[col].notna().sum() > 5:
+                cols_validas.append(col)
+                
+        except Exception:
+            pass # Se der erro na conversão, apenas ignora a coluna
+
+    # ---------------------------------------------------------
+
+    # Preparação do Grid
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
@@ -47,7 +77,7 @@ def processar_matrizes_interpolacao(df, geojson_data, resolucao_grid=150):
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
-    # 2. Criação da Máscara do Polígono
+    # Criação da Máscara do Polígono
     try:
         coords_poligono = geojson_data['features'][0]['geometry']['coordinates'][0]
         poligono_path = MplPath(coords_poligono)
@@ -67,12 +97,10 @@ def processar_matrizes_interpolacao(df, geojson_data, resolucao_grid=150):
         'longitude': xx.flatten()
     })
 
-    # 3. Loop de Krigagem
-    cols_ignorar = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y']
-    cols_para_interpolar = [c for c in df.columns if c.lower() not in cols_ignorar]
-
-    for col in cols_para_interpolar:
+    # Loop de Krigagem apenas nas colunas numéricas validadas
+    for col in cols_validas:
         try:
+            # Pega os dados limpos (remove NaNs dessa coluna)
             dados_coluna = df[['longitude', 'latitude', col]].dropna()
             
             if len(dados_coluna) < 5: 
@@ -96,7 +124,7 @@ def processar_matrizes_interpolacao(df, geojson_data, resolucao_grid=150):
         except Exception as e:
             print(f"Aviso: Não foi possível interpolar {col}. Erro: {e}")
 
-    df_final = df_result.dropna(subset=cols_para_interpolar, how='all')
+    df_final = df_result.dropna(subset=cols_validas, how='all')
     return df_final
 
 # ==============================================================================
