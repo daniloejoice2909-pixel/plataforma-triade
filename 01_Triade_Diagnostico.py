@@ -32,7 +32,7 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (CORRIGIDA E ALINHADA)
+# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (CORRIGIDA v43.2)
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Processando Geoestatística (Protocolo v43)...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
@@ -53,7 +53,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             continue
             
         try:
-            # --- BLOCO CORRIGIDO (LINHA 81) ---
             # 1. Se for texto, tenta trocar vírgula por ponto (Padrão Brasil -> EUA)
             if df[col].dtype == 'object':
                 df[col] = df[col].astype(str).str.replace(',', '.')
@@ -64,7 +63,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             # 3. Se a coluna tiver números válidos suficientes, entra na lista
             if df[col].notna().sum() > 5:
                 cols_validas.append(col)
-            # ----------------------------------
                 
         except Exception:
             pass # Se der erro na conversão, apenas ignora a coluna
@@ -91,4 +89,4 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         mask_matrix = mask.reshape(xx.shape)
         
     except Exception as e:
-        st.
+        # --- CORREÇÃO DO
