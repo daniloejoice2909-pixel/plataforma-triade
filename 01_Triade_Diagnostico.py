@@ -4,6 +4,8 @@ import numpy as np
 import plotly.graph_objects as go
 import json
 from io import BytesIO
+from pykrige.ok import OrdinaryKriging
+from matplotlib.path import Path as MplPath
 
 # Importando nossa caixa de ferramentas v43
 from utils_v43 import (
@@ -16,21 +18,12 @@ from utils_v43 import (
 )
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO INICIAL
+# 1. CONFIGURAÇÃO E INICIALIZAÇÃO
 # ==============================================================================
 configurar_pagina("Diagnóstico de Solo")
 renderizar_cabecalho_sidebar()
 
 st.title("🚜 Tríade: Diagnóstico de Fertilidade (App 1)")
-
-# ==============================================================================
-# 2. INPUT DE DADOS (O ERRO ESTAVA AQUI - ISTO PRECISA VIR ANTES DO IF)
-# ==============================================================================
-st.sidebar.header("1. Arquivos de Entrada")
-
-# Estas duas linhas são OBRIGATÓRIAS para definir as variáveis:
-file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
-file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
 
 # Inicialização de Session State
 if 'dados_processados' not in st.session_state:
@@ -39,280 +32,159 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 3. LÓGICA DE CARREGAMENTO (Aqui entra o bloco que te passei antes)
+# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (Deve vir antes de ser usada)
 # ==============================================================================
-if file_csv and file_geojson:
-    # 1. Carregamento Blindado
-    df_raw = carregar_dados_blindado(file_csv)
-    
-    # 2. Limpeza de Nomes
-    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
-    
-    # 3. Mapeamento Manual de Colunas
-    col1, col2 = st.columns(2)
-    
-    # Tenta achar automático
-    idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
-    idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1
-
-    with col1:
-        col_lat_nome = st.selectbox("Qual coluna é a LATITUDE (Y)?", options=df_raw.columns, index=idx_lat)
-
-    with col2:
-        col_lon_nome = st.selectbox("Qual coluna é a LONGITUDE (X)?", options=df_raw.columns, index=idx_lon)
-
-    # Renomeação Forçada
-    df_raw = df_raw.rename(columns={col_lat_nome: 'latitude', col_lon_nome: 'longitude'})
-
-    # ... (O resto do seu código continua daqui para baixo) ...
-
-# ==============================================================================
-# 2. INPUT DE DADOS (SIDEBAR)
-# ==============================================================================
-st.sidebar.header("1. Arquivos de Entrada")
-
-if file_csv and file_geojson:
-    # 1. Carregamento Blindado
-    df_raw = carregar_dados_blindado(file_csv)
-    
-    # 2. Limpeza de Nomes de Colunas (Remove espaços extras e coloca minúsculo)
-    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
-    
-    # Diagnóstico Visual (Para você ver o que o Python está lendo)
-    with st.expander("🔍 Ver Tabela Carregada (Clique para conferir)", expanded=False):
-        st.dataframe(df_raw.head())
-        st.write(f"Colunas detectadas: {list(df_raw.columns)}")
-
-    # 3. Mapeamento Manual de Colunas (O Segredo para não travar)
-    col1, col2 = st.columns(2)
-    
-    # Tenta achar automático, se não achar, pega o primeiro da lista
-    idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
-    idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1
-
-    with col1:
-        # Seletor Manual: O usuário aponta qual é a coluna Latitude
-        col_lat_nome = st.selectbox(
-            "Qual coluna é a LATITUDE (Y)?", 
-            options=df_raw.columns,
-            index=idx_lat,
-            help="Selecione a coluna que contém a coordenada Latitude (ex: Lat, Y, Latitude)"
-        )
-
-    with col2:
-        # Seletor Manual: O usuário aponta qual é a coluna Longitude
-        col_lon_nome = st.selectbox(
-            "Qual coluna é a LONGITUDE (X)?", 
-            options=df_raw.columns,
-            index=idx_lon,
-            help="Selecione a coluna que contém a coordenada Longitude (ex: Lon, X, Longitude)"
-        )
-
-    # Renomeação Forçada (Agora o Python sabe com certeza quem é quem)
-    df_raw = df_raw.rename(columns={col_lat_nome: 'latitude', col_lon_nome: 'longitude'})
-
-    # 4. Continua o Processo Normal...
-    geojson_data = json.load(file_geojson)
-    st.session_state['geojson_data'] = geojson_data
-    
-    # Agora a validação vai passar com certeza
-    cols_geo = ['latitude', 'longitude']
-    valido, faltantes = validar_colunas(df_raw, cols_geo)
-    
-    if not valido:
-        st.error(f"Erro Crítico: Ainda faltam colunas: {faltantes}")
-    else:
-        st.success(f"✅ Arquivos Mapeados! {len(df_raw)} pontos prontos.")
-        
-        # --- BOTÃO GATILHO ---
-        # (O resto do seu código continua aqui igualzinha estava antes...)
-
-# Inicialização de Session State para persistência
-if 'dados_processados' not in st.session_state:
-    st.session_state['dados_processados'] = None
-if 'geojson_data' not in st.session_state:
-    st.session_state['geojson_data'] = None
-
-# ==============================================================================
-# 3. MOTOR GEOESTATÍSTICO (Núcleo Pesado)
-# ==============================================================================
-from pykrige.ok import OrdinaryKriging
-from matplotlib.path import Path as MplPath
-import numpy as np
-import pandas as pd
-
 @st.cache_data(show_spinner="⚙️ Processando Geoestatística (Protocolo v43)...")
 def processar_matrizes_interpolacao(df, geojson_data, resolucao_grid=150):
     """
-    Executa Krigagem Ordinária para todas as colunas numéricas e
-    aplica o recorte (mask) do talhão para não gerar mapas quadrados.
+    Executa Krigagem Ordinária com recorte (mask) pelo GeoJSON.
     """
-    # 1. Preparação do Grid (Grade de Pontos)
-    # Define os limites baseados nos dados ou no contorno (preferência pelos dados para margem)
+    # 1. Preparação do Grid
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Adiciona uma pequena margem (buffer) para garantir que cobre as bordas
     buffer = 0.001 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
-    # 2. Criação da Máscara do Polígono (O "Cortador de Biscoito")
-    # Transforma o GeoJSON em um objeto Path do Matplotlib para verificação rápida
+    # 2. Criação da Máscara do Polígono
     try:
         coords_poligono = geojson_data['features'][0]['geometry']['coordinates'][0]
         poligono_path = MplPath(coords_poligono)
         
-        # Gera a malha 2D para verificar ponto a ponto
         xx, yy = np.meshgrid(grid_x, grid_y)
         points_flat = np.vstack((xx.flatten(), yy.flatten())).T
         
-        # Cria a máscara booleana (True = Dentro do talhão, False = Fora)
         mask = poligono_path.contains_points(points_flat)
-        # Remodela para o formato do grid (matriz)
         mask_matrix = mask.reshape(xx.shape)
         
     except Exception as e:
         st.error(f"Erro ao processar contorno do GeoJSON: {e}")
         return None
 
-    # DataFrame final que vai guardar tudo
     df_result = pd.DataFrame({
         'latitude': yy.flatten(),
         'longitude': xx.flatten()
     })
 
-    # 3. Loop de Krigagem (Blindado)
-    # Lista de colunas para ignorar (não são nutrientes)
+    # 3. Loop de Krigagem
     cols_ignorar = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y']
     cols_para_interpolar = [c for c in df.columns if c.lower() not in cols_ignorar]
 
     for col in cols_para_interpolar:
         try:
-            # Pega os dados limpos (remove NaNs dessa coluna específica se houver)
             dados_coluna = df[['longitude', 'latitude', col]].dropna()
             
-            if len(dados_coluna) < 5: # Proteção: Krigagem precisa de mínimo de pontos
+            if len(dados_coluna) < 5: 
                 continue
 
-            # Configura o Modelo de Krigagem Ordinária
             OK = OrdinaryKriging(
                 dados_coluna['longitude'], 
                 dados_coluna['latitude'], 
                 dados_coluna[col], 
-                variogram_model='linear', # Ou 'spherical', ajustável se quiser evoluir
+                variogram_model='linear',
                 verbose=False, 
                 enable_plotting=False
             )
             
-            # Executa a interpolação no Grid
             z, ss = OK.execute('grid', grid_x, grid_y)
+            z_data = z.data 
+            z_data[~mask_matrix] = np.nan 
             
-            # Aplica a MÁSCARA (Zera o que está fora do talhão)
-            # O PyKrige devolve um MaskedArray, mas forçamos nossa máscara geométrica
-            z_data = z.data # Pega os dados brutos
-            z_data[~mask_matrix] = np.nan # Aplica NaN onde está fora do polígono
-            
-            # Salva no DataFrame (achatando a matriz 2D para coluna 1D)
             df_result[col] = z_data.flatten()
             
         except Exception as e:
-            # Não trava o app se um atributo falhar (ex: coluna vazia)
             print(f"Aviso: Não foi possível interpolar {col}. Erro: {e}")
 
-    # 4. Limpeza Final (Remove linhas que são puramente NaN fora do mapa)
-    # Isso deixa o arquivo muito mais leve para o App 2
     df_final = df_result.dropna(subset=cols_para_interpolar, how='all')
-    
     return df_final
 
 # ==============================================================================
-# 4. LÓGICA DE EXECUÇÃO
+# 3. INPUT DE DADOS (SIDEBAR)
 # ==============================================================================
+st.sidebar.header("1. Arquivos de Entrada")
 
+file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
+file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
+
+# ==============================================================================
+# 4. LÓGICA DE CARREGAMENTO E MAPEAMENTO
+# ==============================================================================
 if file_csv and file_geojson:
-    # Carregamento Blindado
+    # 4.1 Carregamento CSV Blindado
     df_raw = carregar_dados_blindado(file_csv)
-    geojson_data = json.load(file_geojson)
+    
+    # Limpeza básica dos nomes
+    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
+
+    # 4.2 Carregamento GeoJSON Blindado (CORREÇÃO DO JSON ERROR)
+    try:
+        file_geojson.seek(0)
+        geojson_data = json.load(file_geojson)
+    except Exception:
+        try:
+            file_geojson.seek(0)
+            conteudo = file_geojson.getvalue().decode("utf-8")
+            geojson_data = json.loads(conteudo)
+        except Exception as e:
+            st.error(f"❌ GeoJSON inválido/corrompido. Erro: {e}")
+            st.stop()
+            
     st.session_state['geojson_data'] = geojson_data
+
+    # 4.3 Seletor Manual de Colunas (CORREÇÃO DA LATITUDE)
+    st.info("📍 Confirme as colunas de coordenadas para evitar erros:")
+    c1, c2 = st.columns(2)
     
-    # Validação Básica de Colunas
-    cols_geo = ['latitude', 'longitude']
-    valido, faltantes = validar_colunas(df_raw, cols_geo)
-    
-    if not valido:
-        st.error(f"Erro: Seu CSV não tem as colunas de coordenadas: {faltantes}")
-    else:
-        st.success(f"✅ Arquivos Carregados. {len(df_raw)} pontos de amostragem identificados.")
+    # Tenta adivinhar o index inicial
+    idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
+    idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1 if len(df_raw.columns) > 1 else 0
+
+    with c1:
+        lat_col = st.selectbox("Coluna LATITUDE (Y):", df_raw.columns, index=idx_lat)
+    with c2:
+        lon_col = st.selectbox("Coluna LONGITUDE (X):", df_raw.columns, index=idx_lon)
         
-        # --- BOTÃO GATILHO (Protocolo v43) ---
-        col_btn, col_info = st.columns([1, 2])
+    # Renomeia para o padrão do sistema
+    df_raw = df_raw.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
+
+    # 4.4 Validação Final
+    valido, faltantes = validar_colunas(df_raw, ['latitude', 'longitude'])
+    
+    if valido:
+        st.success(f"✅ Dados Prontos: {len(df_raw)} pontos mapeados.")
+        
+        # --- GATILHO DE PROCESSAMENTO ---
+        col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
-                # Chama a função pesada (que tem @st.cache_data)
-                df_krig = processar_matrizes_interpolacao(df_raw)
+                # Chama a função passando o GEOJSON (CORREÇÃO DE ARGUMENTO)
+                df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
                 st.session_state['dados_processados'] = df_krig
-                st.toast("Processamento Concluído com Sucesso!", icon="✅")
+                st.toast("Krigagem concluída!", icon="✅")
             except Exception as e:
-                st.error(f"Erro na Krigagem: {e}")
+                st.error(f"Erro fatal na Krigagem: {e}")
+    else:
+        st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. VISUALIZAÇÃO E EXPORTAÇÃO (A PONTE)
+# 5. VISUALIZAÇÃO E EXPORTAÇÃO
 # ==============================================================================
-
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados']
     
     st.divider()
-    st.subheader("📊 Validação Visual dos Mapas")
+    st.subheader("📊 Visualização de Diagnóstico")
     
-    # Seletor de visualização (para não renderizar 10 mapas de uma vez e travar o browser aqui também)
-    cols_disponiveis = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
-    atributo_selecionado = st.selectbox("Selecione o Atributo para Conferência:", cols_disponiveis)
-    
-    # Plotagem Única de Conferência
-    if atributo_selecionado:
+    cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
+    if cols_ver:
+        atributo = st.selectbox("Selecione o mapa:", cols_ver)
+        
+        # Plotagem com Chave Única (Evita erro removeChild)
         fig = go.Figure(go.Heatmap(
             lon=df_final['longitude'], 
             lat=df_final['latitude'], 
-            z=df_final[atributo_selecionado],
+            z=df_final[atributo],
             colorscale='Jet',
-            opacity=1.0, # Regra v43
-            zsmooth='best',
-            colorbar=dict(title=atributo_selecionado)
-        ))
-        
-        # Aplica Layout v43 (Aspect Ratio e Mapbox)
-        fig = aplicar_layout_v43(fig, f"Mapa de {atributo_selecionado}")
-        fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
-        
-        st.plotly_chart(fig, use_container_width=True, key="mapa_diagnostico")
-    
-    st.divider()
-    
-    # --- ÁREA DE EXPORTAÇÃO DA PONTE ---
-    st.info("🏁 **Próximo Passo:** Exporte os dados processados para usar no App de Prescrição.")
-    
-    c1, c2 = st.columns(2)
-    
-    # Conversão para CSV em memória
-    csv_buffer = df_final.to_csv(index=False).encode('utf-8')
-    
-    c1.download_button(
-        label="💾 Baixar ARQUIVO PONTE (.csv)",
-        data=csv_buffer,
-        file_name="ponte_triade_solo.csv",
-        mime="text/csv",
-        help="Use este arquivo no App 02 - Prescrição",
-        type="primary"
-    )
-    
-    c2.markdown("""
-    **O que este arquivo contém?**
-    * Coordenadas densas (Grid interpolado).
-    * Valores de Argila, pH, P, K, etc. já calculados.
-    * Pronto para gerar Zonas de Manejo.
-    """)
-
-elif file_csv:
-    st.info("👆 Clique no botão 'Processar Matrizes' para iniciar a Geoestatística.")
+            opacity=1.0,
+            zsmooth='
