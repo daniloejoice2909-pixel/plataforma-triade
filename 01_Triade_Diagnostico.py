@@ -16,16 +16,55 @@ from utils_v43 import (
 )
 
 # ==============================================================================
-# 1. CONFIGURAÇÃO INICIAL (Protocolo v43.1)
+# 1. CONFIGURAÇÃO INICIAL
 # ==============================================================================
 configurar_pagina("Diagnóstico de Solo")
 renderizar_cabecalho_sidebar()
 
 st.title("🚜 Tríade: Diagnóstico de Fertilidade (App 1)")
-st.markdown("""
-> **Protocolo v43.1:** Este ambiente é dedicado ao **Processamento Pesado**. 
-> Aqui realizamos a validação dos dados de laboratório e a geração das matrizes interpoladas.
-""")
+
+# ==============================================================================
+# 2. INPUT DE DADOS (O ERRO ESTAVA AQUI - ISTO PRECISA VIR ANTES DO IF)
+# ==============================================================================
+st.sidebar.header("1. Arquivos de Entrada")
+
+# Estas duas linhas são OBRIGATÓRIAS para definir as variáveis:
+file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
+file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
+
+# Inicialização de Session State
+if 'dados_processados' not in st.session_state:
+    st.session_state['dados_processados'] = None
+if 'geojson_data' not in st.session_state:
+    st.session_state['geojson_data'] = None
+
+# ==============================================================================
+# 3. LÓGICA DE CARREGAMENTO (Aqui entra o bloco que te passei antes)
+# ==============================================================================
+if file_csv and file_geojson:
+    # 1. Carregamento Blindado
+    df_raw = carregar_dados_blindado(file_csv)
+    
+    # 2. Limpeza de Nomes
+    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
+    
+    # 3. Mapeamento Manual de Colunas
+    col1, col2 = st.columns(2)
+    
+    # Tenta achar automático
+    idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
+    idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1
+
+    with col1:
+        col_lat_nome = st.selectbox("Qual coluna é a LATITUDE (Y)?", options=df_raw.columns, index=idx_lat)
+
+    with col2:
+        col_lon_nome = st.selectbox("Qual coluna é a LONGITUDE (X)?", options=df_raw.columns, index=idx_lon)
+
+    # Renomeação Forçada
+    df_raw = df_raw.rename(columns={col_lat_nome: 'latitude', col_lon_nome: 'longitude'})
+
+    # ... (O resto do seu código continua daqui para baixo) ...
 
 # ==============================================================================
 # 2. INPUT DE DADOS (SIDEBAR)
