@@ -31,7 +31,7 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (REVISADA)
+# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Processando Geoestatística (Protocolo v43)...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
@@ -79,9 +79,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         'longitude': xx.flatten()
     })
 
-    # --- ETAPA 3: INTERPOLAÇÃO (BLOCO CRÍTICO) ---
+    # --- ETAPA 3: INTERPOLAÇÃO ---
     for col in cols_validas:
-        # AQUI COMEÇA O BLOCO TRY QUE ESTAVA DANDO ERRO
         try:
             dados_coluna = df[['longitude', 'latitude', col]].dropna()
             
@@ -104,7 +103,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             df_result[col] = z_data.flatten()
             
         except Exception as e:
-            # O EXCEPT AGORA ESTÁ ALINHADO PERFEITAMENTE COM O TRY
             print(f"Aviso: Falha ao interpolar {col}: {e}")
 
     df_final = df_result.dropna(subset=cols_validas, how='all')
@@ -123,7 +121,6 @@ file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", t
 # ==============================================================================
 if file_csv and file_geojson:
     df_raw = carregar_dados_blindado(file_csv)
-    # Remove espaços em branco dos nomes das colunas
     df_raw.columns = [c.strip().lower() for c in df_raw.columns]
 
     try:
@@ -171,14 +168,14 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. EXPORTAÇÃO E VISUALIZAÇÃO (COM DIAGNÓSTICO DE MAPA VAZIO)
+# 5. EXPORTAÇÃO E VISUALIZAÇÃO (COM TRAVA ANTI-ERRO)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
     
     st.divider()
     
-    # --- DOWNLOAD ---
+    # --- DOWNLOAD (PRIORIDADE) ---
     c_down1, c_down2 = st.columns([2, 1])
     with c_down1:
         st.subheader("🏁 1. Exportação")
@@ -199,35 +196,29 @@ if st.session_state['dados_processados'] is not None:
 
     st.divider()
 
-    # --- VISUALIZAÇÃO ---
+    # --- MAPA COM DIAGNÓSTICO ---
     st.subheader("📊 2. Validação Visual")
     
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
     
     if cols_ver:
-        atributo = st.selectbox("Selecione o mapa:", cols_ver)
+        # AQUI ESTAVA O ERRO: Adicionei key='seletor_atributo_final' para evitar duplicidade
+        atributo = st.selectbox("Selecione o mapa:", cols_ver, key='seletor_atributo_final')
         
-        # Limpeza e Conversão
+        # Limpeza Forçada para Plotagem
         df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
         df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
         
         if not df_plot.empty:
-            # --- ÁREA DE DIAGNÓSTICO (PARA VOCÊ VER O ERRO) ---
-            with st.expander("🕵️‍♂️ Clique aqui se o mapa estiver vazio (Raio-X dos Dados)", expanded=False):
-                st.write("**O que o Python está tentando plotar:**")
+            
+            # RAIO-X DE COORDENADAS (Diagnóstico)
+            with st.expander("🕵️‍♂️ Clique aqui se o mapa estiver vazio (Raio-X)", expanded=False):
+                st.write("**Dados lidos pelo sistema:**")
                 st.dataframe(df_plot[['latitude', 'longitude', atributo]].head())
-                
-                lat_min = df_plot['latitude'].min()
-                lon_min = df_plot['longitude'].min()
-                st.write(f"📍 Latitude Média: {lat_min:.5f} | Longitude Média: {lon_min:.5f}")
-                
-                if lat_min > 0:
-                    st.warning("⚠️ ALERTA: Latitude Positiva detectada! Se for no Brasil, deveria ser NEGATIVA (ex: -18.0).")
-                if abs(lat_min) > 90 or abs(lon_min) > 180:
-                    st.error("❌ ERRO CRÍTICO: Coordenadas parecem estar em UTM (milhares/milhões). O mapa só aceita Graus Decimais (Lat/Lon).")
+                st.write(f"Lat Min: {df_plot['latitude'].min()} | Lon Min: {df_plot['longitude'].min()}")
 
             try:
-                # Centro dinâmico baseado nos PONTOS (não no GeoJSON)
+                # Centro dinâmico
                 centro_lat = df_plot['latitude'].mean()
                 centro_lon = df_plot['longitude'].mean()
 
@@ -236,7 +227,7 @@ if st.session_state['dados_processados'] is not None:
                     lon=df_plot['longitude'], 
                     mode='markers',
                     marker=dict(
-                        size=8, # Aumentei o tamanho para garantir visibilidade
+                        size=8, 
                         color=df_plot[atributo],
                         colorscale='Jet',
                         opacity=0.9,
@@ -250,67 +241,23 @@ if st.session_state['dados_processados'] is not None:
                 # Layout forçando o foco nos pontos
                 fig.update_layout(
                     mapbox=dict(
-                        style="carto-positron", # Fundo leve para destacar os pontos (pode mudar para satélite depois)
+                        style="carto-positron", 
                         center=dict(lat=centro_lat, lon=centro_lon),
-                        zoom=12
+                        zoom=13
                     ),
                     margin={"r":0,"t":30,"l":0,"b":0},
                     height=500
                 )
                 
-                # Adiciona GeoJSON apenas como referência (linha preta)
                 if st.session_state['geojson_data']:
                     fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
                 
-                st.plotly_chart(fig, use_container_width=True, key=f"mapa_{atributo}")
+                st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
             
             except Exception as e:
                 st.error(f"Erro visual: {e}")
         else:
-            st.warning(f"O atributo '{atributo}' está vazio.")
-    else:
-        st.warning("Sem dados numéricos para exibir.")
-
-    # --- MAPA (VALIDAÇÃO) ---
-    st.subheader("📊 2. Validação Visual")
-    
-    cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
-    
-    if cols_ver:
-        atributo = st.selectbox("Selecione o mapa:", cols_ver)
-        
-        df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
-        df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
-        
-        if not df_plot.empty:
-            try:
-                fig = go.Figure(go.Scattermapbox(
-                    lat=df_plot['latitude'], 
-                    lon=df_plot['longitude'], 
-                    mode='markers',
-                    marker=dict(
-                        size=6, 
-                        color=df_plot[atributo],
-                        colorscale='Jet',
-                        opacity=0.8,
-                        showscale=True,
-                        colorbar=dict(title=atributo)
-                    ),
-                    text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
-                    hoverinfo='lat+lon+text'
-                ))
-                
-                fig = aplicar_layout_v43(fig, f"Diagnóstico: {atributo}")
-                
-                if st.session_state['geojson_data']:
-                    fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
-                
-                st.plotly_chart(fig, use_container_width=True, key=f"mapa_{atributo}")
-            
-            except Exception as e:
-                st.error(f"Erro visual: {e}")
-        else:
-            st.warning(f"O atributo '{atributo}' está vazio.")
+            st.warning(f"O atributo '{atributo}' ficou vazio após a limpeza.")
     else:
         st.warning("Sem dados numéricos para exibir.")
 
