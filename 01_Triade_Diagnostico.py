@@ -55,3 +55,26 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         try:
             # 1. Se for texto, tenta trocar vírgula por ponto (Padrão Brasil -> EUA)
             if df[col].dtype == 'object':
+                df[col] = df[col].astype(str).str.replace(',', '.')
+            
+            # 2. Força converter para número (O que for texto vira NaN)
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # 3. Se a coluna tiver números válidos suficientes, entra na lista
+            if df[col].notna().sum() > 5:
+                cols_validas.append(col)
+                
+        except Exception:
+            pass # Se der erro na conversão, apenas ignora a coluna
+
+    # ---------------------------------------------------------
+
+    # Preparação do Grid
+    x_min, x_max = df['longitude'].min(), df['longitude'].max()
+    y_min, y_max = df['latitude'].min(), df['latitude'].max()
+    
+    buffer = 0.001 
+    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
+    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
+    
+    # Criação da Máscara do Polígono
