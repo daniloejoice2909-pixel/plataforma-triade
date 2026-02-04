@@ -78,3 +78,4 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
     # Criação da Máscara do Polígono
+    try:
