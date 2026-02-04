@@ -171,14 +171,14 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. EXPORTAÇÃO E VISUALIZAÇÃO
+# 5. EXPORTAÇÃO E VISUALIZAÇÃO (COM DIAGNÓSTICO DE MAPA VAZIO)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
     
     st.divider()
     
-    # --- DOWNLOAD (PRIORIDADE) ---
+    # --- DOWNLOAD ---
     c_down1, c_down2 = st.columns([2, 1])
     with c_down1:
         st.subheader("🏁 1. Exportação")
@@ -198,6 +198,78 @@ if st.session_state['dados_processados'] is not None:
         )
 
     st.divider()
+
+    # --- VISUALIZAÇÃO ---
+    st.subheader("📊 2. Validação Visual")
+    
+    cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
+    
+    if cols_ver:
+        atributo = st.selectbox("Selecione o mapa:", cols_ver)
+        
+        # Limpeza e Conversão
+        df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
+        df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
+        
+        if not df_plot.empty:
+            # --- ÁREA DE DIAGNÓSTICO (PARA VOCÊ VER O ERRO) ---
+            with st.expander("🕵️‍♂️ Clique aqui se o mapa estiver vazio (Raio-X dos Dados)", expanded=False):
+                st.write("**O que o Python está tentando plotar:**")
+                st.dataframe(df_plot[['latitude', 'longitude', atributo]].head())
+                
+                lat_min = df_plot['latitude'].min()
+                lon_min = df_plot['longitude'].min()
+                st.write(f"📍 Latitude Média: {lat_min:.5f} | Longitude Média: {lon_min:.5f}")
+                
+                if lat_min > 0:
+                    st.warning("⚠️ ALERTA: Latitude Positiva detectada! Se for no Brasil, deveria ser NEGATIVA (ex: -18.0).")
+                if abs(lat_min) > 90 or abs(lon_min) > 180:
+                    st.error("❌ ERRO CRÍTICO: Coordenadas parecem estar em UTM (milhares/milhões). O mapa só aceita Graus Decimais (Lat/Lon).")
+
+            try:
+                # Centro dinâmico baseado nos PONTOS (não no GeoJSON)
+                centro_lat = df_plot['latitude'].mean()
+                centro_lon = df_plot['longitude'].mean()
+
+                fig = go.Figure(go.Scattermapbox(
+                    lat=df_plot['latitude'], 
+                    lon=df_plot['longitude'], 
+                    mode='markers',
+                    marker=dict(
+                        size=8, # Aumentei o tamanho para garantir visibilidade
+                        color=df_plot[atributo],
+                        colorscale='Jet',
+                        opacity=0.9,
+                        showscale=True,
+                        colorbar=dict(title=atributo)
+                    ),
+                    text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
+                    hoverinfo='lat+lon+text'
+                ))
+                
+                # Layout forçando o foco nos pontos
+                fig.update_layout(
+                    mapbox=dict(
+                        style="carto-positron", # Fundo leve para destacar os pontos (pode mudar para satélite depois)
+                        center=dict(lat=centro_lat, lon=centro_lon),
+                        zoom=12
+                    ),
+                    margin={"r":0,"t":30,"l":0,"b":0},
+                    height=500
+                )
+                
+                # Adiciona GeoJSON apenas como referência (linha preta)
+                if st.session_state['geojson_data']:
+                    fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
+                
+                st.plotly_chart(fig, use_container_width=True, key=f"mapa_{atributo}")
+            
+            except Exception as e:
+                st.error(f"Erro visual: {e}")
+        else:
+            st.warning(f"O atributo '{atributo}' está vazio.")
+    else:
+        st.warning("Sem dados numéricos para exibir.")
 
     # --- MAPA (VALIDAÇÃO) ---
     st.subheader("📊 2. Validação Visual")
