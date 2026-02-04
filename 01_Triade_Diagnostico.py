@@ -180,11 +180,12 @@ if st.session_state['dados_processados'] is not None:
     if cols_ver:
         atributo = st.selectbox("Selecione o mapa:", cols_ver)
         
-        # Plotagem com Chave Única (Evita erro removeChild)
+       # Plotagem com Chave Única
         fig = go.Figure(go.Heatmap(
             lon=df_final['longitude'], 
             lat=df_final['latitude'], 
             z=df_final[atributo],
             colorscale='Jet',
             opacity=1.0,
-            zsmooth='
+            zsmooth='best'  # <--- O erro estava aqui (faltava fechar as aspas)
+        ))
