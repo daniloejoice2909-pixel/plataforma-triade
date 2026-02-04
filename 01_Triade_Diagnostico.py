@@ -56,7 +56,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    buffer = 0.001 
+    # Buffer levemente aumentado para garantir cobertura nas bordas
+    buffer = 0.0015 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -168,7 +169,7 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. EXPORTAÇÃO E VISUALIZAÇÃO (COM TRAVA ANTI-ERRO)
+# 5. EXPORTAÇÃO E VISUALIZAÇÃO REFINADA (V44)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -196,26 +197,24 @@ if st.session_state['dados_processados'] is not None:
 
     st.divider()
 
-    # --- MAPA COM DIAGNÓSTICO ---
+    # --- MAPA REFINADO ---
     st.subheader("📊 2. Validação Visual")
     
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
     
     if cols_ver:
-        # AQUI ESTAVA O ERRO: Adicionei key='seletor_atributo_final' para evitar duplicidade
         atributo = st.selectbox("Selecione o mapa:", cols_ver, key='seletor_atributo_final')
         
-        # Limpeza Forçada para Plotagem
+        # Limpeza Forçada
         df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
         df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
         
         if not df_plot.empty:
             
-            # RAIO-X DE COORDENADAS (Diagnóstico)
-            with st.expander("🕵️‍♂️ Clique aqui se o mapa estiver vazio (Raio-X)", expanded=False):
-                st.write("**Dados lidos pelo sistema:**")
-                st.dataframe(df_plot[['latitude', 'longitude', atributo]].head())
-                st.write(f"Lat Min: {df_plot['latitude'].min()} | Lon Min: {df_plot['longitude'].min()}")
+            # --- CÁLCULO DE ESTATÍSTICAS ---
+            val_min = df_plot[atributo].min()
+            val_med = df_plot[atributo].mean()
+            val_max = df_plot[atributo].max()
 
             try:
                 # Centro dinâmico
@@ -225,27 +224,34 @@ if st.session_state['dados_processados'] is not None:
                 fig = go.Figure(go.Scattermapbox(
                     lat=df_plot['latitude'], 
                     lon=df_plot['longitude'], 
-                    mode='markers',
+                    mode='markers', # Usa marcadores para preencher
                     marker=dict(
-                        size=8, 
+                        # TRUQUE DE PREENCHIMENTO:
+                        size=14,            # Tamanho grande para sobrepor e fechar buracos
+                        symbol='square',    # Quadrado preenche melhor que círculo (azulejo)
                         color=df_plot[atributo],
                         colorscale='Jet',
-                        opacity=0.9,
+                        opacity=1.0,        # Sólido (Cores brutas)
                         showscale=True,
-                        colorbar=dict(title=atributo)
+                        colorbar=dict(
+                            title=dict(text=atributo, font=dict(size=12)),
+                            tickfont=dict(size=10), # Legenda pequena
+                            len=0.7, # Barra menor
+                            thickness=15
+                        )
                     ),
                     text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
-                    hoverinfo='lat+lon+text'
+                    hoverinfo='text' # Limpa o hover, mostra só o valor
                 ))
                 
-                # Layout forçando o foco nos pontos
+                # Layout
                 fig.update_layout(
                     mapbox=dict(
-                        style="carto-positron", 
+                        style="satellite", # Volta para Satélite (Visual rico)
                         center=dict(lat=centro_lat, lon=centro_lon),
-                        zoom=13
+                        zoom=13.5
                     ),
-                    margin={"r":0,"t":30,"l":0,"b":0},
+                    margin={"r":0,"t":0,"l":0,"b":0},
                     height=500
                 )
                 
@@ -253,6 +259,27 @@ if st.session_state['dados_processados'] is not None:
                     fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
+                
+                # --- FAIXA DE ESTATÍSTICAS DISCRETA (EMBAIXO DO MAPA) ---
+                st.markdown(
+                    f"""
+                    <div style="
+                        background-color: #f0f2f6; 
+                        padding: 10px; 
+                        border-radius: 5px; 
+                        text-align: center; 
+                        font-size: 14px; 
+                        color: #31333F;
+                        margin-top: -10px;
+                        border: 1px solid #d6d6d6;">
+                        <b>📏 Estatísticas do Talhão:</b> &nbsp;&nbsp;&nbsp; 
+                        Mínimo: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
+                        Média: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
+                        Máximo: <b>{val_max:.2f}</b>
+                    </div>
+                    """, 
+                    unsafe_allow_html=True
+                )
             
             except Exception as e:
                 st.error(f"Erro visual: {e}")
