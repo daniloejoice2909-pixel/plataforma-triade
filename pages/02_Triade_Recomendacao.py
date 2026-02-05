@@ -14,6 +14,7 @@ st.title("🚜 Tríade VRT - Motor de Recomendação")
 def limpar_e_padronizar_dados(df):
     df_novo = df.copy()
     
+    # Dicionário de sinônimos
     sinonimos = {
         'lat': ['latitude', 'lat', 'y', 'lat_wgs84'],
         'lon': ['longitude', 'long', 'lon', 'x', 'lon_wgs84'],
@@ -96,8 +97,11 @@ with st.sidebar:
     with st.expander("🔴 3. Fósforo", expanded=False):
         p_export = st.number_input("Exportação P (kg/sc):", value=0.8)
         p_teor = st.number_input("Teor P2O5 (%):", value=52.0)
-        nc_a, nc_b = 8.4, 0.21
-        fct_a, fct_b = 56.5, -0.52
+        # Nova fórmula calibrada
+        nc_a = 8.4
+        nc_b = 0.21
+        fct_a = 56.5
+        fct_b = -0.52
         st.caption(f"Eq. NC: {nc_a} + {nc_b} * Prem")
 
     with st.expander("🟣 4. Potássio", expanded=False):
@@ -111,9 +115,9 @@ with st.sidebar:
         gesso_max = st.number_input("Max (kg/ha):", value=2000.0)
         
     st.markdown("---")
-    st.markdown("### 🎨 Visualização (Anti-Travamento)")
-    # Slider de Pixel: Maior = Fecha mais buracos. Menor = Mais detalhe.
-    pixel_size = st.slider("Tamanho do Pixel (Preenchimento)", 10, 40, 22, help="Aumente para fechar os buracos do mapa")
+    st.markdown("### 🎨 Visualização (Estilo App 1)")
+    # Slider ajustado para fechar buracos
+    pixel_size = st.slider("Preenchimento (Aumente para fechar o mapa)", 10, 50, 22)
 
 # ==============================================================================
 # 2. CÁLCULO
@@ -129,6 +133,7 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
         def_mg = (meta_mg - dfr['Mg']).clip(lower=0)
         ap_ca = max((cao * 10 / 560.0) * (prnt_val / 100.0), 0.001)
         ap_mg = max((mgo * 10 / 403.0) * (prnt_val / 100.0), 0.001)
+        
         dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
         
         ca_f = dfr['Ca'] + (dfr['Dose_Calcario'] * ap_ca)
@@ -146,6 +151,7 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
         nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
         fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
+        
         dfr['NC_Calculado'] = nc.round(2)
         dfr['FCT_Calculado'] = fct.round(2)
         
@@ -183,18 +189,18 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
 # 3. EXECUÇÃO
 # ==============================================================================
 if st.button("🚀 Processar Recomendação VRT", type="primary"):
-    with st.spinner("Calculando doses e gerando mapas..."):
+    with st.spinner("Calculando doses..."):
         try:
             res = calcular(df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
                            p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max)
             st.session_state['vrt_final'] = res
-            st.success("Concluído!")
+            st.success("Cálculo Finalizado!")
             st.rerun()
         except Exception as e:
             st.error(f"Erro no cálculo: {e}")
 
 # ==============================================================================
-# 4. VISUALIZAÇÃO SÓLIDA (PLOTLY ESTILO LEAFLET)
+# 4. VISUALIZAÇÃO SÓLIDA (ESTILO LEAFLET/APP 1)
 # ==============================================================================
 if 'vrt_final' in st.session_state:
     df_show = st.session_state['vrt_final']
@@ -205,31 +211,31 @@ if 'vrt_final' in st.session_state:
     else:
         t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
         
-        def mapa_solido_rapido(d, col, tit):
-            # 1. Filtro Anti-Zero (Evita tela branca)
+        def mapa_estilo_app1(d, col, tit):
+            # 1. Limpeza de coordenadas (Evita tela branca)
             d_clean = d[(d['lat'] != 0) & (d['lon'] != 0)].copy()
             if d_clean.empty: return go.Figure()
 
-            # 2. Centro do Mapa
+            # 2. Centro Automático
             center_lat, center_lon = d_clean['lat'].mean(), d_clean['lon'].mean()
             
-            # 3. Amostragem Inteligente (Sem travar)
-            # WebGL aguenta 50k tranquilo, mas vamos garantir 30k para ser ultra rápido
+            # 3. Amostragem de Alta Performance (WebGL)
+            # Permite até 30.000 pontos sem travar (diferente do Folium)
             n_max = 30000 
             if len(d_clean) > n_max:
                 amostra = d_clean.sample(n=n_max, random_state=42)
             else:
                 amostra = d_clean
             
-            # 4. Construção do Mapa
+            # 4. Construção do Mapa Sólido
             fig = go.Figure(go.Scattermapbox(
                 lat=amostra['lat'], lon=amostra['lon'],
                 mode='markers',
                 marker=go.scattermapbox.Marker(
-                    size=pixel_size, # Controlado pelo Slider
-                    symbol='square', # Quadrados para fechar buracos
+                    size=pixel_size, # Slider controla o preenchimento
+                    symbol='square', # Quadrado fecha os buracos
                     color=amostra[col], 
-                    colorscale='Jet', # Padrão Agronômico
+                    colorscale='Jet', # Cores do App 1 (Azul->Vermelho)
                     showscale=True, 
                     opacity=1.0       # Sólido
                 ),
@@ -237,9 +243,9 @@ if 'vrt_final' in st.session_state:
                 hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
             ))
             
-            # 5. Configuração Visual IGUAL ao Leaflet
+            # 5. Configuração Visual IGUAL ao App 1 (Leaflet)
             fig.update_layout(
-                mapbox_style="open-street-map", # <--- ESTE É O SEGREDO DO APP 1
+                mapbox_style="open-street-map", # <--- O Visual do App 1
                 mapbox_center={"lat": center_lat, "lon": center_lon},
                 mapbox_zoom=13, 
                 title=f"{tit} - Recomendação",
@@ -249,7 +255,7 @@ if 'vrt_final' in st.session_state:
 
         with t1:
             st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton")
-            st.plotly_chart(mapa_solido_rapido(df_show, 'Dose_Calcario', "Calcário"), use_container_width=True)
+            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_Calcario', "Calcário"), use_container_width=True)
 
         with t2:
             st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg")
@@ -259,7 +265,16 @@ if 'vrt_final' in st.session_state:
             cols_existentes = [c for c in cols_audit if c in df_show.columns]
             st.dataframe(df_show[cols_existentes].head(100), height=250, use_container_width=True)
             
-            st.plotly_chart(mapa_solido_rapido(df_show, 'Dose_P2O5_Kg', "Fósforo"), use_container_width=True)
+            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_P2O5_Kg', "Fósforo"), use_container_width=True)
 
         with t3:
-            st.
+            st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg")
+            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_K2O_Kg', "Potássio"), use_container_width=True)
+
+        with t4:
+            st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
+            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_Gesso_Kg', "Gesso"), use_container_width=True)
+
+        st.markdown("---")
+        csv = df_show.to_csv(index=False).encode('utf-8')
+        st.download_button("💾 Baixar CSV Final (Monitor)", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
