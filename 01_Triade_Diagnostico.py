@@ -56,8 +56,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer levemente aumentado para garantir cobertura nas bordas
-    buffer = 0.0015 
+    # Buffer levemente aumentado para cobrir bordas
+    buffer = 0.002 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -169,7 +169,7 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. EXPORTAÇÃO E VISUALIZAÇÃO REFINADA (V44)
+# 5. EXPORTAÇÃO E VISUALIZAÇÃO REFINADA (V45 FINAL)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -211,43 +211,45 @@ if st.session_state['dados_processados'] is not None:
         
         if not df_plot.empty:
             
-            # --- CÁLCULO DE ESTATÍSTICAS ---
+            # Estatísticas para a barra inferior
             val_min = df_plot[atributo].min()
             val_med = df_plot[atributo].mean()
             val_max = df_plot[atributo].max()
 
             try:
-                # Centro dinâmico
                 centro_lat = df_plot['latitude'].mean()
                 centro_lon = df_plot['longitude'].mean()
 
                 fig = go.Figure(go.Scattermapbox(
                     lat=df_plot['latitude'], 
                     lon=df_plot['longitude'], 
-                    mode='markers', # Usa marcadores para preencher
+                    mode='markers', 
                     marker=dict(
-                        # TRUQUE DE PREENCHIMENTO:
-                        size=14,            # Tamanho grande para sobrepor e fechar buracos
-                        symbol='square',    # Quadrado preenche melhor que círculo (azulejo)
+                        # --- SEGREDO DO PREENCHIMENTO ---
+                        size=14,            # Grande para sobreposição total (cria massa sólida)
+                        symbol='circle',    # O único que funciona nativamente
                         color=df_plot[atributo],
-                        colorscale='Jet',
-                        opacity=1.0,        # Sólido (Cores brutas)
+                        colorscale='Jet',   # Padrão agronômico
+                        cmin=val_min,       # Força o extremo azul
+                        cmax=val_max,       # Força o extremo vermelho
+                        opacity=1.0,        # Sem transparência (Cor Bruta)
                         showscale=True,
                         colorbar=dict(
                             title=dict(text=atributo, font=dict(size=12)),
-                            tickfont=dict(size=10), # Legenda pequena
-                            len=0.7, # Barra menor
-                            thickness=15
+                            tickfont=dict(size=10),
+                            len=0.7,
+                            thickness=15,
+                            x=1.02 # Posiciona bem na direita
                         )
                     ),
                     text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
-                    hoverinfo='text' # Limpa o hover, mostra só o valor
+                    hoverinfo='text' 
                 ))
                 
                 # Layout
                 fig.update_layout(
                     mapbox=dict(
-                        style="satellite", # Volta para Satélite (Visual rico)
+                        style="satellite", 
                         center=dict(lat=centro_lat, lon=centro_lon),
                         zoom=13.5
                     ),
@@ -260,22 +262,23 @@ if st.session_state['dados_processados'] is not None:
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
                 
-                # --- FAIXA DE ESTATÍSTICAS DISCRETA (EMBAIXO DO MAPA) ---
+                # --- FAIXA DE ESTATÍSTICAS (NOVO PEDIDO) ---
                 st.markdown(
                     f"""
                     <div style="
-                        background-color: #f0f2f6; 
-                        padding: 10px; 
-                        border-radius: 5px; 
+                        background-color: #ffffff; 
+                        padding: 12px; 
+                        border-radius: 8px; 
                         text-align: center; 
-                        font-size: 14px; 
-                        color: #31333F;
+                        font-size: 15px; 
+                        color: #000000;
                         margin-top: -10px;
-                        border: 1px solid #d6d6d6;">
+                        box-shadow: 0px 2px 5px rgba(0,0,0,0.1);
+                        border: 1px solid #e0e0e0;">
                         <b>📏 Estatísticas do Talhão:</b> &nbsp;&nbsp;&nbsp; 
-                        Mínimo: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
-                        Média: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
-                        Máximo: <b>{val_max:.2f}</b>
+                        🔹 Mínimo: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
+                        🔸 Média: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
+                        🔺 Máximo: <b>{val_max:.2f}</b>
                     </div>
                     """, 
                     unsafe_allow_html=True
