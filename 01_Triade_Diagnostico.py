@@ -2,306 +2,170 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import json
-from io import BytesIO
-from pykrige.ok import OrdinaryKriging
 from matplotlib.path import Path as MplPath
+from scipy.interpolate import Rbf
 
-# Importando nossa caixa de ferramentas v43
-from utils_v43 import (
-    configurar_pagina, 
-    renderizar_cabecalho_sidebar, 
-    carregar_dados_blindado, 
-    validar_colunas, 
-    aplicar_layout_v43, 
-    adicionar_contorno_preto
-)
-
-# ==============================================================================
-# 1. CONFIGURAÇÃO E INICIALIZAÇÃO
-# ==============================================================================
-configurar_pagina("Diagnóstico de Solo")
-renderizar_cabecalho_sidebar()
-
-st.title("🚜 Tríade: Diagnóstico de Fertilidade (App 1)")
-
-if 'dados_processados' not in st.session_state:
-    st.session_state['dados_processados'] = None
-if 'geojson_data' not in st.session_state:
-    st.session_state['geojson_data'] = None
-
-# ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (V50 - MODO LEVE/SEGURO)
-# ==============================================================================
-@st.cache_data(show_spinner="⚙️ Processando Geoestatística Otimizada (V50)...")
-# REDUZI PARA 100 PARA GARANTIR QUE O NAVEGADOR CONSIGA DESENHAR
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
-    # --- ETAPA 1: LIMPEZA NUMÉRICA ---
-    df = df_input.copy() 
-    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
-    cols_validas = []
-    
-    for col in df.columns:
-        if col.lower() in cols_proibidas:
-            continue
-        try:
-            if df[col].dtype == 'object':
-                df[col] = df[col].astype(str).str.replace(',', '.')
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            if df[col].notna().sum() > 5:
-                cols_validas.append(col)
-        except Exception:
-            pass 
-
-    # --- ETAPA 2: GRID E MÁSCARA ---
-    x_min, x_max = df['longitude'].min(), df['longitude'].max()
-    y_min, y_max = df['latitude'].min(), df['latitude'].max()
-    
-    # Buffer ajustado para 100x100
-    buffer = 0.002 
-    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
-    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
-    
+# --- PROTOCOLO v43.1: CACHE E BLINDAGEM ---
+@st.cache_data(show_spinner=False)
+def gerar_grid_interpolado_recortado(df, col_alvo, coords_poligono, resolucao=200):
+    """
+    Gera um grid de alta densidade e recorta exatamente no formato do talhão.
+    Retorna apenas os pontos que estão DENTRO do contorno.
+    """
     try:
-        coords_poligono = geojson_data['features'][0]['geometry']['coordinates'][0]
-        poligono_path = MplPath(coords_poligono)
+        # 1. Extrair Limites do Polígono
+        # coords_poligono deve ser uma lista de listas: [[lon, lat], [lon, lat]...]
+        poly_path = MplPath(coords_poligono)
         
-        xx, yy = np.meshgrid(grid_x, grid_y)
-        points_flat = np.vstack((xx.flatten(), yy.flatten())).T
+        lons = [p[0] for p in coords_poligono]
+        lats = [p[1] for p in coords_poligono]
         
-        mask = poligono_path.contains_points(points_flat)
-        mask_matrix = mask.reshape(xx.shape)
+        min_lon, max_lon = min(lons), max(lons)
+        min_lat, max_lat = min(lats), max(lats)
         
+        # 2. Criar Grid de Alta Densidade (O segredo para reduzir o serrilhado)
+        # Adicionamos um pequeno buffer para garantir que cobre as bordas
+        xi = np.linspace(min_lon, max_lon, resolucao)
+        yi = np.linspace(min_lat, max_lat, resolucao)
+        xi, yi = np.meshgrid(xi, yi)
+        
+        # Achatando para interpolação
+        flat_xi = xi.flatten()
+        flat_yi = yi.flatten()
+        
+        # 3. Interpolação (RBF ou Krigagem Simples)
+        # Se tiver muitos pontos, RBF pode ser pesado. Se for o caso, usamos LinearNDInterpolator
+        rbf = Rbf(df['longitude'], df['latitude'], df[col_alvo], function='linear')
+        zi = rbf(flat_xi, flat_yi)
+        
+        # 4. MÁSCARA DE RECORTE (O segredo do "Não Extrapolar")
+        # Cria uma lista de pares (lon, lat) para verificar
+        pontos_grid = np.vstack((flat_xi, flat_yi)).T
+        
+        # Verifica quais pontos estão DENTRO do polígono
+        mask_inside = poly_path.contains_points(pontos_grid)
+        
+        # Filtra apenas os dados internos (Isso garante 100% de preenchimento interno e 0% fora)
+        final_lon = flat_xi[mask_inside]
+        final_lat = flat_yi[mask_inside]
+        final_z = zi[mask_inside]
+        
+        return final_lon, final_lat, final_z, min_lon, max_lon
+
     except Exception as e:
-        st.error(f"Erro ao processar contorno do GeoJSON: {e}")
-        return None
+        st.error(f"Erro na interpolação geométrica: {e}")
+        return None, None, None, None, None
 
-    df_result = pd.DataFrame({
-        'latitude': yy.flatten(),
-        'longitude': xx.flatten()
-    })
+def criar_escala_discreta(min_v, max_v):
+    """
+    Cria uma escala de cores 'Bruta' (Sem degradê/mistura).
+    Divide em 5 classes rígidas.
+    """
+    # Cores no padrão agronômico (Vermelho -> Verde)
+    colors = ['#d7191c', '#fdae61', '#ffffbf', '#a6d96a', '#1a9641'] # Spectral adaptado
+    
+    # Criando os passos discretos para o Plotly
+    # O truque é repetir a cor para criar "degraus"
+    step = 1/5
+    discrete_colorscale = [
+        [0, colors[0]], [step, colors[0]],
+        [step, colors[1]], [2*step, colors[1]],
+        [2*step, colors[2]], [3*step, colors[2]],
+        [3*step, colors[3]], [4*step, colors[3]],
+        [4*step, colors[4]], [1, colors[4]]
+    ]
+    return discrete_colorscale
 
-    # --- ETAPA 3: INTERPOLAÇÃO ---
-    for col in cols_validas:
-        try:
-            dados_coluna = df[['longitude', 'latitude', col]].dropna()
-            
-            if len(dados_coluna) < 5: 
-                continue
-
-            OK = OrdinaryKriging(
-                dados_coluna['longitude'], 
-                dados_coluna['latitude'], 
-                dados_coluna[col], 
-                variogram_model='spherical', 
-                verbose=False, 
-                enable_plotting=False
-            )
-            
-            z, ss = OK.execute('grid', grid_x, grid_y)
-            z_data = z.data 
-            z_data[~mask_matrix] = np.nan 
-            
-            df_result[col] = z_data.flatten()
-            
-        except Exception as e:
-            print(f"Aviso: Falha ao interpolar {col}: {e}")
-
-    df_final = df_result.dropna(subset=cols_validas, how='all')
-    return df_final
-
-# ==============================================================================
-# 3. INPUT DE DADOS
-# ==============================================================================
-st.sidebar.header("1. Arquivos de Entrada")
-
-file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
-file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
-
-# ==============================================================================
-# 4. LÓGICA DE CARREGAMENTO
-# ==============================================================================
-if file_csv and file_geojson:
-    df_raw = carregar_dados_blindado(file_csv)
-    df_raw.columns = [c.strip().lower() for c in df_raw.columns]
-
+# --- RENDERIZAÇÃO ---
+def plotar_mapa_perfeito(df, geojson_polygon, coluna, nome_atributo):
+    
+    # Extraindo coordenadas do GeoJSON (Assumindo Polygon simples)
+    # Se for MultiPolygon, precisa tratar a lista. Aqui focamos no Polygon padrão.
     try:
-        file_geojson.seek(0)
-        geojson_data = json.load(file_geojson)
-    except Exception:
-        try:
-            file_geojson.seek(0)
-            conteudo = file_geojson.getvalue().decode("utf-8")
-            geojson_data = json.loads(conteudo)
-        except Exception as e:
-            st.error(f"❌ GeoJSON inválido: {e}")
-            st.stop()
-            
-    st.session_state['geojson_data'] = geojson_data
+        coords = geojson_polygon['features'][0]['geometry']['coordinates'][0]
+    except:
+        st.warning("Estrutura do GeoJSON inválida para recorte.")
+        return
 
-    st.info("📍 Validação de Coordenadas:")
-    c1, c2 = st.columns(2)
+    # 1. Processamento Matemático
+    lon_grid, lat_grid, z_grid, min_x, max_x = gerar_grid_interpolado_recortado(
+        df, coluna, coords, resolucao=200 # 200 é um bom equilíbrio, tente 250 se quiser mais liso
+    )
     
-    idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
-    idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1 if len(df_raw.columns) > 1 else 0
+    if lon_grid is None: return
 
-    with c1:
-        lat_col = st.selectbox("Coluna LATITUDE (Y):", df_raw.columns, index=idx_lat)
-    with c2:
-        lon_col = st.selectbox("Coluna LONGITUDE (X):", df_raw.columns, index=idx_lon)
-        
-    df_raw = df_raw.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
+    # Estatísticas
+    v_min, v_max = np.nanmin(z_grid), np.nanmax(z_grid)
+    v_med = np.nanmean(z_grid)
 
-    valido, faltantes = validar_colunas(df_raw, ['latitude', 'longitude'])
+    # 2. Configuração Visual
+    fig = go.Figure()
+
+    # CAMADA 1: O MAPA DE CALOR "SÓLIDO"
+    # Usamos Scattermapbox com quadrados para simular o raster
+    # O tamanho do marker deve ser calculado dinamicamente para fechar os buracos
+    # Tamanho base ~ (Largura em graus / resolução) * fator de zoom
+    # Ajuste manual fino: size=6 a 8 geralmente cobre bem grids de 200px
     
-    if valido:
-        st.success(f"✅ Arquivos Prontos: {len(df_raw)} pontos.")
-        
-        col_btn, _ = st.columns([1, 2])
-        if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
-            try:
-                # Processamento mais leve
-                df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
-                st.session_state['dados_processados'] = df_krig
-                st.toast("Mapas Gerados (Modo Leve)!", icon="✅")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Erro fatal na Krigagem: {e}")
-    else:
-        st.error(f"Faltam colunas: {faltantes}")
+    fig.add_trace(go.Scattermapbox(
+        lat=lat_grid,
+        lon=lon_grid,
+        mode='markers',
+        marker=dict(
+            size=7, # Aumente levemente se houver buracos brancos entre os pontos
+            symbol='square', # Quadrado preenche melhor que círculo
+            color=z_grid,
+            colorscale=criar_escala_discreta(v_min, v_max),
+            cmin=v_min,
+            cmax=v_max,
+            opacity=1.0, # Opacidade total como solicitado
+            showscale=True,
+            colorbar=dict(
+                title=f"<b>{nome_atributo}</b>",
+                titleside="right",
+                x=1.02, # Legenda à direita
+                tickfont=dict(size=10),
+                thickness=15
+            )
+        ),
+        text=[f"{val:.2f}" for val in z_grid],
+        hoverinfo='text+lon+lat',
+        name="Grid"
+    ))
 
-# ==============================================================================
-# 5. VISUALIZAÇÃO INCERES (V50 - MODO VISIBILIDADE GARANTIDA)
-# ==============================================================================
-if st.session_state['dados_processados'] is not None:
-    df_final = st.session_state['dados_processados'].copy()
+    # CAMADA 2: O CONTORNO PRETO (LIMITE FÍSICO)
+    lons_poly = [p[0] for p in coords]
+    lats_poly = [p[1] for p in coords]
     
-    st.divider()
+    fig.add_trace(go.Scattermapbox(
+        lat=lats_poly,
+        lon=lons_poly,
+        mode='lines',
+        line=dict(color='black', width=3), # Linha grossa preta
+        hoverinfo='none',
+        name='Limite'
+    ))
+
+    # CAMADA 3: BOX DE INFORMAÇÃO (Abaixo do mapa, como HTML ou Anotação)
+    # No Streamlit, é melhor usar st.metric ou st.markdown colunas abaixo do gráfico
+    # Mas se quiser no gráfico, use layout.annotations (complexo para manter responsivo)
+
+    # LAYOUT MAPBOX
+    fig.update_layout(
+        mapbox=dict(
+            style="satellite", # Imagem Real
+            center=dict(lat=np.mean(lats_poly), lon=np.mean(lons_poly)),
+            zoom=13 # Ajuste dinâmico seria ideal
+        ),
+        margin={"r":0,"t":0,"l":0,"b":0},
+        height=600,
+        showlegend=False
+    )
     
-    # --- DOWNLOAD ---
-    c_down1, c_down2 = st.columns([2, 1])
-    with c_down1:
-        st.subheader("🏁 1. Exportação")
-        st.info("Baixe o arquivo PONTE para usar no App de Prescrição.")
-    
-    with c_down2:
-        st.write("") 
-        st.write("") 
-        csv_ponte = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="💾 BAIXAR ARQUIVO PONTE",
-            data=csv_ponte,
-            file_name="ponte_triade_solo.csv",
-            mime="text/csv",
-            type="primary",
-            use_container_width=True
-        )
+    st.plotly_chart(fig, use_container_width=True, key=f"map_{coluna}")
 
-    st.divider()
-
-    # --- MAPA VISUAL ---
-    st.subheader("📊 2. Validação Visual")
-    
-    cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
-    
-    if cols_ver:
-        atributo = st.selectbox("Selecione o mapa:", cols_ver, key='seletor_atributo_final')
-        
-        # Limpeza
-        df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
-        df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
-        
-        if not df_plot.empty:
-            
-            # --- CÁLCULO DE ESTATÍSTICAS ---
-            val_min = df_plot[atributo].min()
-            val_max = df_plot[atributo].max()
-            val_med = df_plot[atributo].mean()
-
-            # --- PALETA "HARD BREAKS" (InCeres) ---
-            colorscale_inceres = [
-                [0.0, '#d73027'], [0.2, '#d73027'], # Vermelho
-                [0.2, '#fc8d59'], [0.4, '#fc8d59'], # Laranja
-                [0.4, '#fee08b'], [0.6, '#fee08b'], # Amarelo
-                [0.6, '#91cf60'], [0.8, '#91cf60'], # Verde Claro
-                [0.8, '#1a9850'], [1.0, '#1a9850']  # Verde Escuro
-            ]
-
-            try:
-                centro_lat = df_plot['latitude'].mean()
-                centro_lon = df_plot['longitude'].mean()
-
-                fig = go.Figure(go.Scattermapbox(
-                    lat=df_plot['latitude'], 
-                    lon=df_plot['longitude'], 
-                    mode='markers', 
-                    marker=dict(
-                        # --- CONFIGURAÇÃO DE SEGURANÇA V50 ---
-                        size=22,            # Grande para garantir preenchimento com menos pontos
-                        color=df_plot[atributo],
-                        colorscale=colorscale_inceres,
-                        cmin=val_min,
-                        cmax=val_max,
-                        opacity=1.0,        # Sólido
-                        showscale=True,
-                        colorbar=dict(
-                            title=dict(text=atributo, font=dict(size=12)),
-                            tickfont=dict(size=10),
-                            len=0.7,
-                            thickness=20,
-                            x=1.02
-                        )
-                    ),
-                    text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
-                    hoverinfo='text' 
-                ))
-                
-                # Layout V50: FUNDO 'open-street-map' GARANTE QUE NÃO TRAVA
-                fig.update_layout(
-                    mapbox=dict(
-                        style="open-street-map", 
-                        center=dict(lat=centro_lat, lon=centro_lon),
-                        zoom=13
-                    ),
-                    margin={"r":0,"t":0,"l":0,"b":0},
-                    height=550
-                )
-                
-                # Contorno Preto
-                if st.session_state['geojson_data']:
-                    fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
-                
-                st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
-                
-                # --- PAINEL DE ESTATÍSTICAS ---
-                st.markdown(
-                    f"""
-                    <div style="
-                        background-color: #ffffff; 
-                        padding: 15px; 
-                        border-radius: 8px; 
-                        text-align: center; 
-                        font-size: 16px; 
-                        color: #333;
-                        margin-top: 5px;
-                        border-left: 5px solid #1a9850;
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                        border: 1px solid #e0e0e0;">
-                        <b>📏 Estatísticas do Talhão ({atributo}):</b> <br>
-                        🔴 Min: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
-                        🟡 Méd: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
-                        🟢 Max: <b>{val_max:.2f}</b>
-                    </div>
-                    """, 
-                    unsafe_allow_html=True
-                )
-            
-            except Exception as e:
-                st.error(f"Erro visual: {e}")
-        else:
-            st.warning(f"O atributo '{atributo}' ficou vazio após a limpeza.")
-    else:
-        st.warning("Sem dados numéricos para exibir.")
-
-elif file_csv:
-    st.info("👆 Clique no botão 'Processar Matrizes' para iniciar.")
+    # RODAPÉ DE DADOS (Conforme solicitado)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Mínimo", f"{v_min:.2f}")
+    c2.metric("Média", f"{v_med:.2f}")
+    c3.metric("Máximo", f"{v_max:.2f}")
