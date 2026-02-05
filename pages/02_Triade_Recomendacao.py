@@ -19,15 +19,15 @@ def limpar_e_padronizar_dados(df):
     
     # --- ETAPA 1: TRADUÇÃO DE COLUNAS ---
     sinonimos = {
-        'lat': ['latitude', 'lat', 'y'],
-        'lon': ['longitude', 'long', 'lon', 'x'],
-        'Ca': ['ca', 'calcio', 'ca_cmolc'],
-        'Mg': ['mg', 'magnesio', 'mg_cmolc'],
-        'K':  ['k', 'potassio', 'k_mg'],
-        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo', 'p'], 
-        'P_Rem': ['prem', 'p_rem', 'p-rem', 'fosforo_remanescente'],
-        'Argila': ['argila', 'clay', 'argila_total'],
-        'CTC': ['ctc', 't', 'ctc_ph7']
+        'lat': ['latitude', 'lat', 'y', 'lat_wgs84'],
+        'lon': ['longitude', 'long', 'lon', 'x', 'lon_wgs84'],
+        'Ca': ['ca', 'calcio', 'cálcio', 'ca_cmolc', 'ca (cmolc/dm3)'],
+        'Mg': ['mg', 'magnesio', 'magnésio', 'mg_cmolc', 'mg (cmolc/dm3)'],
+        'K':  ['k', 'potassio', 'potássio', 'k_mg', 'k (mg/dm3)'],
+        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo', 'fósforo', 'p', 'p (mg/dm3)'], 
+        'P_Rem': ['prem', 'p_rem', 'p-rem', 'fosforo_remanescente', 'prem.'],
+        'Argila': ['argila', 'clay', 'argila_total', 'argila %'],
+        'CTC': ['ctc', 't', 'ctc_ph7', 'ctc (cmolc/dm3)']
     }
     
     mapa_final = {}
@@ -53,7 +53,7 @@ def limpar_e_padronizar_dados(df):
             if df_novo[col].dtype == 'object':
                 df_novo[col] = df_novo[col].astype(str).str.replace(',', '.')
             
-            # Força conversão para número
+            # Força conversão para número (Onde for erro vira 0)
             df_novo[col] = pd.to_numeric(df_novo[col], errors='coerce').fillna(0)
 
     return df_novo
@@ -69,11 +69,11 @@ with st.sidebar:
 
     if uploaded_file is not None:
         try:
-            # Lê o CSV. Se for separado por ponto e vírgula, o engine 'python' resolve melhor
+            # Tenta ler detectando separador (vírgula ou ponto e vírgula) automaticamente
             try:
                 df_raw = pd.read_csv(uploaded_file, sep=None, engine='python')
             except:
-                df_raw = pd.read_csv(uploaded_file) # Tenta padrão
+                df_raw = pd.read_csv(uploaded_file) 
                 
             df_input = limpar_e_padronizar_dados(df_raw)
             st.success(f"Arquivo carregado! {len(df_input)} pontos.")
@@ -88,20 +88,19 @@ with st.sidebar:
         st.warning("⚠️ Faça upload do CSV.")
         st.stop()
 
-    # --- RAIO-X DOS DADOS (PARA VOCÊ VER SE ESTÁ LENDO CERTO) ---
-    with st.expander("🕵️ Raio-X dos Dados (Clique aqui se der Zero)"):
-        st.write("Primeiras 3 linhas processadas:")
-        st.dataframe(df_input.head(3))
-        
-        st.write("Médias detectadas (Se for 0, o dado não entrou):")
-        cols_check = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC']
-        for c in cols_check:
-            if c in df_input.columns:
-                val = df_input[c].mean()
-                icon = "✅" if val > 0 else "❌"
-                st.write(f"{icon} {c}: {val:.2f}")
-            else:
-                st.write(f"❌ {c}: Coluna NÃO encontrada")
+    # --- RAIO-X DOS DADOS (PARA DIAGNÓSTICO) ---
+    with st.expander("🕵️ Raio-X dos Dados (Conferência)"):
+        if df_input is not None:
+            st.write("Colunas Identificadas:")
+            cols_check = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC']
+            for c in cols_check:
+                if c in df_input.columns:
+                    val = df_input[c].mean()
+                    # Se média for > 0, leu certo. Se for 0, pode estar zerado ou erro de leitura.
+                    icon = "✅" if val > 0 else "⚠️ (Média 0)"
+                    st.write(f"{icon} {c}: Média {val:.2f}")
+                else:
+                    st.write(f"❌ {c}: NÃO encontrada")
 
     st.markdown("---")
     st.header("⚙️ Parâmetros")
@@ -157,13 +156,10 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
         ap_ca = max((cao * 10 / 560.0) * (prnt_val / 100.0), 0.001)
         ap_mg = max((mgo * 10 / 403.0) * (prnt_val / 100.0), 0.001)
         
-        # Maior dose entre os dois
         dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
         
-        # Check Ratio
         ca_f = dfr['Ca'] + (dfr['Dose_Calcario'] * ap_ca)
         mg_f = dfr['Mg'] + (dfr['Dose_Calcario'] * ap_mg)
-        # Evita divisão por zero
         mg_f = mg_f.replace(0, 0.01)
         
         ratio = ca_f / mg_f
@@ -176,12 +172,9 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
 
     # FÓSFORO (5ª APROX)
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
-        # Nível Crítico
         nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
-        # Fator Tampão
         fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
         
-        # Dose Fosfatagem + Manutenção
         dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
         dose_manu = prod * p_exp
         total_p = dose_const + dose_manu
@@ -193,14 +186,12 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
     # POTÁSSIO
     if 'K' in dfr.columns and 'CTC' in dfr.columns:
         k_meta = dfr['CTC'] * (k_alvo_val/100.0)
-        
-        # Detecção automática de unidade do K
         k_vals = dfr['K'].copy()
         # Se média > 10, assume mg/dm3 e converte para cmol
         if k_vals.mean() > 10:
             k_vals = k_vals / 391.0
             
-        dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0 # Fator K cmol->kg K2O
+        dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0
         dose_k_manu = prod * k_exp
         total_k = dose_k_const + dose_k_manu
         
@@ -268,13 +259,4 @@ if 'vrt_final' in st.session_state:
             st.plotly_chart(mapa(df_show, 'Dose_Calcario', "Calcário", "Reds"), use_container_width=True)
 
         with t2:
-            st.metric("Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa(df_show, 'Dose_P2O5_Kg', "Fósforo", "Viridis"), use_container_width=True)
-
-        with t3:
-            st.metric("Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa(df_show, 'Dose_K2O_Kg', "Potássio", "Plasma"), use_container_width=True)
-
-        with t4:
-            st.metric("Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa(df_
+            st.metric("Média", f"{df_show['Dose_P2O5_
