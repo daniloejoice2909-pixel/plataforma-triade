@@ -31,11 +31,11 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (CALIBRAÇÃO V52 - 175x)
+# 2. KRIGAGEM COM RECUO DE BORDA (ANTI-VAZAMENTO)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Processando Geoestatística de Alta Definição (175x)...")
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=175):
-    # --- ETAPA 1: LIMPEZA NUMÉRICA ---
+@st.cache_data(show_spinner="⚙️ Geoestatística de Alta Definição (V53)...")
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
+    # --- ETAPA 1: LIMPEZA ---
     df = df_input.copy() 
     cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
     cols_validas = []
@@ -56,10 +56,12 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=175):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer MÍNIMO (0.0005) para evitar que o grid saia da linha preta
-    buffer = 0.0005 
-    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
-    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
+    # TRUQUE 1: Buffer NEGATIVO (Recuo). 
+    # Ao invés de expandir, encolhemos minimamente a área de geração de pontos.
+    # Isso garante que o centro do ponto não fique na borda exata.
+    margem_seguranca = 0.000 
+    grid_x = np.linspace(x_min + margem_seguranca, x_max - margem_seguranca, resolucao_grid)
+    grid_y = np.linspace(y_min + margem_seguranca, y_max - margem_seguranca, resolucao_grid)
     
     try:
         coords_poligono = geojson_data['features'][0]['geometry']['coordinates'][0]
@@ -68,7 +70,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=175):
         xx, yy = np.meshgrid(grid_x, grid_y)
         points_flat = np.vstack((xx.flatten(), yy.flatten())).T
         
-        mask = poligono_path.contains_points(points_flat)
+        # O raio do Contains é estrito (True/False)
+        mask = poligono_path.contains_points(points_flat) 
         mask_matrix = mask.reshape(xx.shape)
         
     except Exception as e:
@@ -88,7 +91,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=175):
             if len(dados_coluna) < 5: 
                 continue
 
-            # Variograma Linear (Melhor custo-benefício para grids densos)
+            # Linear é mais rápido para 200x200
             OK = OrdinaryKriging(
                 dados_coluna['longitude'], 
                 dados_coluna['latitude'], 
@@ -160,10 +163,10 @@ if file_csv and file_geojson:
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
-                # Processamento com 175 de resolução
-                df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
+                # 200 de Resolução para suavizar o serrilhado
+                df_krig = processar_matrizes_interpolacao(df_raw, geojson_data, resolucao_grid=200)
                 st.session_state['dados_processados'] = df_krig
-                st.toast("Mapas de Alta Definição Gerados!", icon="✅")
+                st.toast("Mapas de Alta Definição Gerados!", icon="✨")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro fatal na Krigagem: {e}")
@@ -171,7 +174,7 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. VISUALIZAÇÃO REFINADA (V52 - 175x / Size 15)
+# 5. VISUALIZAÇÃO "MOLDURA PERFEITA" (V53)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -217,7 +220,7 @@ if st.session_state['dados_processados'] is not None:
             val_max = df_plot[atributo].max()
             val_med = df_plot[atributo].mean()
 
-            # --- PALETA INCERES (Hard Breaks) ---
+            # --- PALETA INCERES ---
             colorscale_inceres = [
                 [0.0, '#d73027'], [0.2, '#d73027'], # Vermelho
                 [0.2, '#fc8d59'], [0.4, '#fc8d59'], # Laranja
@@ -230,20 +233,22 @@ if st.session_state['dados_processados'] is not None:
                 centro_lat = df_plot['latitude'].mean()
                 centro_lon = df_plot['longitude'].mean()
 
-                fig = go.Figure(go.Scattermapbox(
+                fig = go.Figure()
+
+                # 1. CAMADA DE DADOS (PONTOS)
+                fig.add_trace(go.Scattermapbox(
                     lat=df_plot['latitude'], 
                     lon=df_plot['longitude'], 
                     mode='markers', 
                     marker=dict(
-                        # --- CALIBRAÇÃO V52 (PEDIDO DO USUÁRIO) ---
-                        # Size 15: Menor vazamento nas bordas.
-                        # Res 175: Maior densidade, os pontos se tocam.
-                        size=15,             
+                        # TRUQUE 2: Tamanho 11 em Grid 200.
+                        # Isso é "ponto a ponto" (Pixel Perfect). O overlap é mínimo.
+                        size=11,             
                         color=df_plot[atributo],
                         colorscale=colorscale_inceres,
                         cmin=val_min,
                         cmax=val_max,
-                        opacity=1.0,        # Cores Brutas
+                        opacity=1.0, 
                         showscale=True,
                         colorbar=dict(
                             title=dict(text=atributo, font=dict(size=12)),
@@ -254,10 +259,29 @@ if st.session_state['dados_processados'] is not None:
                         )
                     ),
                     text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
-                    hoverinfo='text' 
+                    hoverinfo='text',
+                    name='Dados'
                 ))
+
+                # 2. CAMADA "MOLDURA" (CONTORNO GROSSO)
+                # O segredo: Desenhamos a linha PRETA GROSSA por cima de tudo.
+                # Isso esconde os "vazamentos" dos pontos na borda.
+                if st.session_state['geojson_data']:
+                    coords = st.session_state['geojson_data']['features'][0]['geometry']['coordinates'][0]
+                    # Inverte para lat/lon se necessário (GeoJSON padrão é Lon/Lat)
+                    lons_geo = [p[0] for p in coords]
+                    lats_geo = [p[1] for p in coords]
+
+                    fig.add_trace(go.Scattermapbox(
+                        lat=lats_geo,
+                        lon=lons_geo,
+                        mode='lines',
+                        line=dict(width=5, color='black'), # Moldura Grossa (5px)
+                        hoverinfo='none',
+                        name='Limite'
+                    ))
                 
-                # Layout V52: Mantém o 'open-street-map' para garantir performance e contraste
+                # Layout
                 fig.update_layout(
                     mapbox=dict(
                         style="open-street-map", 
@@ -265,11 +289,9 @@ if st.session_state['dados_processados'] is not None:
                         zoom=13.5
                     ),
                     margin={"r":0,"t":0,"l":0,"b":0},
-                    height=550
+                    height=550,
+                    showlegend=False # Esconde legenda de camadas para limpar visual
                 )
-                
-                if st.session_state['geojson_data']:
-                    fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
                 
