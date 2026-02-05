@@ -1,50 +1,61 @@
-# -*- coding: utf-8 -*-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import json
+from io import BytesIO
+import base64
 
-# Configuração da Página
+# --- 1. CONFIGURAÇÃO DE BACKEND (VACINA ANTI-TRAVAMENTO) ---
+import matplotlib
+matplotlib.use('Agg') # Essencial para não travar o servidor
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.patches import PathPatch
+from matplotlib.path import Path as MplPath
+
+import folium
+from streamlit_folium import st_folium
+
+# ==============================================================================
+# 2. CONFIGURAÇÃO DA PÁGINA
+# ==============================================================================
 st.set_page_config(page_title="Tríade VRT", layout="wide")
 st.title("🚜 Tríade VRT - Motor de Recomendação")
 
 # ==============================================================================
-# 0. FUNÇÕES DE LIMPEZA E PADRONIZAÇÃO
+# 3. FUNÇÕES UTILITÁRIAS (LIMPEZA E CÁLCULO)
 # ==============================================================================
 def limpar_e_padronizar_dados(df):
     df_novo = df.copy()
     
-    # Dicionário de sinônimos
+    # Padroniza nomes das colunas
+    df_novo.columns = [c.lower().strip() for c in df_novo.columns]
+    
+    # Dicionário de sinônimos para encontrar os nutrientes
     sinonimos = {
-        'lat': ['latitude', 'lat', 'y', 'lat_wgs84'],
-        'lon': ['longitude', 'long', 'lon', 'x', 'lon_wgs84'],
-        'Ca': ['ca', 'calcio', 'cálcio', 'ca_cmolc', 'ca (cmolc/dm3)'],
-        'Mg': ['mg', 'magnesio', 'magnésio', 'mg_cmolc', 'mg (cmolc/dm3)'],
-        'K':  ['k', 'potassio', 'potássio', 'k_mg', 'k (mg/dm3)'],
-        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo', 'fósforo', 'p', 'p (mg/dm3)'], 
+        'latitude': ['latitude', 'lat', 'y', 'lat_wgs84'],
+        'longitude': ['longitude', 'long', 'lon', 'x', 'lon_wgs84'],
+        'Ca': ['ca', 'calcio', 'cálcio', 'ca_cmolc'],
+        'Mg': ['mg', 'magnesio', 'magnésio', 'mg_cmolc'],
+        'K':  ['k', 'potassio', 'potássio', 'k_mg'],
+        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo', 'fósforo', 'p'], 
         'P_Rem': ['prem', 'p_rem', 'p-rem', 'fosforo_remanescente', 'prem.'],
-        'Argila': ['argila', 'clay', 'argila_total', 'argila %'],
-        'CTC': ['ctc', 't', 'ctc_ph7', 'ctc (cmolc/dm3)']
+        'Argila': ['argila', 'clay', 'argila_total'],
+        'CTC': ['ctc', 't', 'ctc_ph7']
     }
     
     mapa_final = {}
-    cols_originais = list(df_novo.columns)
-    
-    for col_real in cols_originais:
-        c_clean = col_real.lower().strip()
+    for col_real in df_novo.columns:
         for padrao, lista in sinonimos.items():
-            if c_clean in lista:
+            if col_real in lista:
                 mapa_final[col_real] = padrao
                 break
-            for s in lista:
-                if c_clean == s:
-                    mapa_final[col_real] = padrao
     
     if mapa_final:
         df_novo = df_novo.rename(columns=mapa_final)
 
-    # Correção de vírgulas e conversão
-    cols_numericas = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC', 'lat', 'lon']
+    # Garante numérico e corrige vírgulas
+    cols_numericas = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC', 'latitude', 'longitude']
     for col in cols_numericas:
         if col in df_novo.columns:
             if df_novo[col].dtype == 'object':
@@ -53,32 +64,174 @@ def limpar_e_padronizar_dados(df):
 
     return df_novo
 
+def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max, nc_a, nc_b):
+    dfr = df.copy()
+    
+    # CALAGEM
+    if all(c in dfr.columns for c in ['Ca','Mg','CTC']):
+        meta_ca = dfr['CTC'] * (ca_alvo / 100.0)
+        meta_mg = dfr['CTC'] * (mg_alvo / 100.0)
+        def_ca = (meta_ca - dfr['Ca']).clip(lower=0)
+        def_mg = (meta_mg - dfr['Mg']).clip(lower=0)
+        ap_ca = max((cao * 10 / 560.0) * (prnt_val / 100.0), 0.001)
+        ap_mg = max((mgo * 10 / 403.0) * (prnt_val / 100.0), 0.001)
+        dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
+    else: dfr['Dose_Calcario'] = 0.0
+
+    # FÓSFORO
+    if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
+        nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
+        fct = (56.5 * dfr['P_Rem']**-0.52).clip(4, 40)
+        # Auditoria
+        dfr['NC_Calculado'] = nc.round(2)
+        dfr['FCT_Calculado'] = fct.round(2)
+        
+        dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
+        dose_manu = prod * p_exp
+        total_p = dose_const + dose_manu
+        dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
+        dfr['Dose_P2O5_Kg'] = dfr['Dose_P2O5_Kg'].round(0)
+    else: dfr['Dose_P2O5_Kg'] = 0.0
+
+    # POTÁSSIO
+    if 'K' in dfr.columns and 'CTC' in dfr.columns:
+        k_meta = dfr['CTC'] * (k_alvo_val/100.0)
+        k_vals = dfr['K'].copy()
+        if k_vals.mean() > 10: k_vals = k_vals / 391.0 # Converte mg/dm3 p/ cmol se necessário
+        dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0
+        dose_k_manu = prod * k_exp
+        total_k = dose_k_const + dose_k_manu
+        dfr['Dose_K2O_Kg'] = (total_k / (k_teor_val/100.0)) if k_teor_val > 0 else 0
+    else: dfr['Dose_K2O_Kg'] = 0.0
+
+    # GESSO
+    if 'Argila' in dfr.columns:
+        dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
+    else: dfr['Dose_Gesso_Kg'] = 0.0
+
+    return dfr
+
 # ==============================================================================
-# 1. SIDEBAR
+# 4. MOTOR VISUAL DO APP 1 (GERADOR DE IMAGEM RECORTADA)
+# ==============================================================================
+def gerar_mapa_app1(df, atributo, titulo, geojson_data):
+    # 1. Pivotar dados (Transformar lista de pontos em matriz grid)
+    # Como os dados vêm da interpolação, eles já devem estar em grid.
+    try:
+        pivot = df.pivot_table(index='latitude', columns='longitude', values=atributo)
+    except Exception as e:
+        st.error(f"Erro ao gerar grid para mapa: {e}")
+        return None
+
+    Z = pivot.values
+    X = pivot.columns.values 
+    Y = pivot.index.values   
+    
+    # 2. Configura Cores (JET para Doses - Padrão Agronômico)
+    # Azul (Baixo) -> Verde -> Amarelo -> Vermelho (Alto)
+    cmap = plt.get_cmap('jet') 
+    
+    # Normalização
+    z_min, z_max = np.nanmin(Z), np.nanmax(Z)
+    if z_min == z_max: z_max += 0.001
+    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
+
+    # 3. Gera Figura Matplotlib (Backend Agg)
+    plt.close('all') 
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_axis_off()
+    
+    # 4. Desenha Contourf (Suave e Sólido)
+    # levels=100 garante que fique bem liso, parecendo imagem
+    cf = ax.contourf(X, Y, Z, levels=100, cmap=cmap, norm=norm, extend='both', alpha=1.0)
+    
+    # 5. Aplica Recorte (Clipping) usando o GeoJSON
+    if geojson_data:
+        try:
+            # Pega a geometria do primeiro polígono
+            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+            poly_path = MplPath(coords)
+            patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', linewidth=0)
+            ax.add_patch(patch)
+            
+            # Recorta a imagem
+            for col in cf.collections: 
+                col.set_clip_path(patch)
+        except Exception as e:
+            print(f"Erro no recorte: {e}")
+
+    # 6. Salva em Memória
+    ax.set_xlim(X.min(), X.max())
+    ax.set_ylim(Y.min(), Y.max())
+    
+    img_data = BytesIO()
+    plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=150)
+    plt.close(fig)
+    img_data.seek(0)
+    
+    # 7. Monta Mapa Folium (Google Hybrid)
+    centro = [Y.mean(), X.mean()]
+    m = folium.Map(location=centro, zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google')
+    
+    # Overlay da Imagem
+    img_b64 = base64.b64encode(img_data.getvalue()).decode()
+    bounds = [[Y.min(), X.min()], [Y.max(), X.max()]]
+    
+    folium.raster_layers.ImageOverlay(
+        image=f"data:image/png;base64,{img_b64}",
+        bounds=bounds, opacity=0.8
+    ).add_to(m)
+    
+    # Contorno Preto
+    if geojson_data:
+        folium.GeoJson(
+            geojson_data,
+            style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}
+        ).add_to(m)
+    
+    # Legenda HTML Flutuante
+    legend_html = f"""
+    <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px;">
+    <b>{titulo}</b><br>
+    Média: {np.nanmean(Z):.1f}<br>
+    Máx: {z_max:.1f}<br>
+    Min: {z_min:.1f}
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(legend_html))
+    
+    return m
+
+# ==============================================================================
+# 5. SIDEBAR: UPLOAD DUPLO (CSV + GEOJSON)
 # ==============================================================================
 with st.sidebar:
-    st.header("📂 Entrada de Dados")
-    uploaded_file = st.file_uploader("Carregar Malha Interpolada (.csv)", type=["csv"])
+    st.header("📂 Arquivos de Entrada")
+    
+    st.info("⚠️ Para o mapa ficar igual ao App 1, preciso do CSV e do Contorno (GeoJSON).")
+    
+    uploaded_csv = st.file_uploader("1. Malha Interpolada (.csv)", type=["csv"])
+    uploaded_geojson = st.file_uploader("2. Contorno (.geojson)", type=["geojson", "json"])
     
     df_input = None
+    geojson_data = None
 
-    if uploaded_file is not None:
+    if uploaded_csv and uploaded_geojson:
         try:
-            try:
-                df_raw = pd.read_csv(uploaded_file, sep=None, engine='python')
-            except:
-                df_raw = pd.read_csv(uploaded_file) 
+            # Carrega CSV
+            try: df_raw = pd.read_csv(uploaded_csv, sep=None, engine='python')
+            except: df_raw = pd.read_csv(uploaded_csv)
             df_input = limpar_e_padronizar_dados(df_raw)
-            st.success(f"Carregado: {len(df_input)} pontos.")
+            
+            # Carrega GeoJSON
+            geojson_data = json.load(uploaded_geojson)
+            
+            st.success(f"Dados prontos! {len(df_input)} pontos.")
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.error(f"Erro ao carregar arquivos: {e}")
             st.stop()
-    elif 'df_interpolado' in st.session_state:
-        df_raw = st.session_state['df_interpolado']
-        df_input = limpar_e_padronizar_dados(df_raw)
-        st.info("Usando memória.")
     else:
-        st.warning("⚠️ Faça upload do CSV.")
+        st.warning("Aguardando uploads...")
         st.stop()
 
     st.markdown("---")
@@ -97,12 +250,8 @@ with st.sidebar:
     with st.expander("🔴 3. Fósforo", expanded=False):
         p_export = st.number_input("Exportação P (kg/sc):", value=0.8)
         p_teor = st.number_input("Teor P2O5 (%):", value=52.0)
-        # Nova fórmula calibrada
-        nc_a = 8.4
-        nc_b = 0.21
-        fct_a = 56.5
-        fct_b = -0.52
-        st.caption(f"Eq. NC: {nc_a} + {nc_b} * Prem")
+        nc_a, nc_b = 8.4, 0.21
+        fct_a, fct_b = 56.5, -0.52
 
     with st.expander("🟣 4. Potássio", expanded=False):
         k_alvo_ctc = st.number_input("K Alvo CTC (%):", value=3.0)
@@ -113,168 +262,56 @@ with st.sidebar:
         gesso_fator = st.number_input("Fator x Argila:", value=50.0)
         gesso_min = st.number_input("Min (kg/ha):", value=0.0)
         gesso_max = st.number_input("Max (kg/ha):", value=2000.0)
-        
-    st.markdown("---")
-    st.markdown("### 🎨 Visualização (Estilo App 1)")
-    # Slider ajustado para fechar buracos
-    pixel_size = st.slider("Preenchimento (Aumente para fechar o mapa)", 10, 50, 22)
 
 # ==============================================================================
-# 2. CÁLCULO
+# 6. EXECUÇÃO E VISUALIZAÇÃO
 # ==============================================================================
-def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max):
-    dfr = df.copy()
-    
-    # CALAGEM
-    if all(c in dfr.columns for c in ['Ca','Mg','CTC']):
-        meta_ca = dfr['CTC'] * (ca_alvo / 100.0)
-        meta_mg = dfr['CTC'] * (mg_alvo / 100.0)
-        def_ca = (meta_ca - dfr['Ca']).clip(lower=0)
-        def_mg = (meta_mg - dfr['Mg']).clip(lower=0)
-        ap_ca = max((cao * 10 / 560.0) * (prnt_val / 100.0), 0.001)
-        ap_mg = max((mgo * 10 / 403.0) * (prnt_val / 100.0), 0.001)
-        
-        dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
-        
-        ca_f = dfr['Ca'] + (dfr['Dose_Calcario'] * ap_ca)
-        mg_f = dfr['Mg'] + (dfr['Dose_Calcario'] * ap_mg)
-        mg_f = mg_f.replace(0, 0.01)
-        ratio = ca_f / mg_f
-        dfr['Status_Calagem'] = 'OK'
-        dfr.loc[ratio < 2, 'Status_Calagem'] = '⚠️ Risco: Excesso Mg'
-        dfr.loc[ratio > 4, 'Status_Calagem'] = '⚠️ Risco: Falta Mg'
-    else:
-        dfr['Dose_Calcario'] = 0.0
-        dfr['Status_Calagem'] = 'S/ Dados'
-
-    # FÓSFORO (Com Auditoria)
-    if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
-        nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
-        fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
-        
-        dfr['NC_Calculado'] = nc.round(2)
-        dfr['FCT_Calculado'] = fct.round(2)
-        
-        dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
-        dose_manu = prod * p_exp
-        total_p = dose_const + dose_manu
-        dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
-        dfr['Dose_P2O5_Kg'] = dfr['Dose_P2O5_Kg'].round(0)
-    else:
-        dfr['Dose_P2O5_Kg'] = 0.0
-        dfr['NC_Calculado'] = 0.0
-        dfr['FCT_Calculado'] = 0.0
-
-    # POTÁSSIO
-    if 'K' in dfr.columns and 'CTC' in dfr.columns:
-        k_meta = dfr['CTC'] * (k_alvo_val/100.0)
-        k_vals = dfr['K'].copy()
-        if k_vals.mean() > 10: k_vals = k_vals / 391.0
-        dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0
-        dose_k_manu = prod * k_exp
-        total_k = dose_k_const + dose_k_manu
-        dfr['Dose_K2O_Kg'] = (total_k / (k_teor_val/100.0)) if k_teor_val > 0 else 0
-    else:
-        dfr['Dose_K2O_Kg'] = 0.0
-
-    # GESSO
-    if 'Argila' in dfr.columns:
-        dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
-    else:
-        dfr['Dose_Gesso_Kg'] = 0.0
-
-    return dfr
-
-# ==============================================================================
-# 3. EXECUÇÃO
-# ==============================================================================
-if st.button("🚀 Processar Recomendação VRT", type="primary"):
-    with st.spinner("Calculando doses..."):
+if st.button("🚀 Calcular e Gerar Mapas", type="primary"):
+    with st.spinner("Calculando doses e desenhando mapas..."):
         try:
-            res = calcular(df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
-                           p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max)
+            res = calcular_recomendacao(
+                df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
+                p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max, nc_a, nc_b
+            )
             st.session_state['vrt_final'] = res
-            st.success("Cálculo Finalizado!")
+            st.success("Processamento concluído!")
             st.rerun()
         except Exception as e:
-            st.error(f"Erro no cálculo: {e}")
+            st.error(f"Erro no processamento: {e}")
 
-# ==============================================================================
-# 4. VISUALIZAÇÃO SÓLIDA (ESTILO LEAFLET/APP 1)
-# ==============================================================================
 if 'vrt_final' in st.session_state:
     df_show = st.session_state['vrt_final']
     st.markdown("---")
     
-    if df_show.empty:
-        st.error("Erro: Tabela vazia.")
-    else:
-        t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
+    t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
+    
+    with t1:
+        st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton/ha")
+        mapa = gerar_mapa_app1(df_show, 'Dose_Calcario', "Calcário (ton/ha)", geojson_data)
+        if mapa: st_folium(mapa, height=500, use_container_width=True)
+
+    with t2:
+        st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg/ha")
         
-        def mapa_estilo_app1(d, col, tit):
-            # 1. Limpeza de coordenadas (Evita tela branca)
-            d_clean = d[(d['lat'] != 0) & (d['lon'] != 0)].copy()
-            if d_clean.empty: return go.Figure()
+        st.markdown("##### 📋 Auditoria (P-rem)")
+        cols_audit = ['P_Rem', 'P', 'NC_Calculado', 'FCT_Calculado', 'Dose_P2O5_Kg']
+        # Filtra colunas existentes (case insensitive safe)
+        cols_final = [c for c in cols_audit if c in df_show.columns]
+        st.dataframe(df_show[cols_final].head(50), height=200)
 
-            # 2. Centro Automático
-            center_lat, center_lon = d_clean['lat'].mean(), d_clean['lon'].mean()
-            
-            # 3. Amostragem de Alta Performance (WebGL)
-            # Permite até 30.000 pontos sem travar (diferente do Folium)
-            n_max = 30000 
-            if len(d_clean) > n_max:
-                amostra = d_clean.sample(n=n_max, random_state=42)
-            else:
-                amostra = d_clean
-            
-            # 4. Construção do Mapa Sólido
-            fig = go.Figure(go.Scattermapbox(
-                lat=amostra['lat'], lon=amostra['lon'],
-                mode='markers',
-                marker=go.scattermapbox.Marker(
-                    size=pixel_size, # Slider controla o preenchimento
-                    symbol='square', # Quadrado fecha os buracos
-                    color=amostra[col], 
-                    colorscale='Jet', # Cores do App 1 (Azul->Vermelho)
-                    showscale=True, 
-                    opacity=1.0       # Sólido
-                ),
-                text=amostra[col].round(1),
-                hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
-            ))
-            
-            # 5. Configuração Visual IGUAL ao App 1 (Leaflet)
-            fig.update_layout(
-                mapbox_style="open-street-map", # <--- O Visual do App 1
-                mapbox_center={"lat": center_lat, "lon": center_lon},
-                mapbox_zoom=13, 
-                title=f"{tit} - Recomendação",
-                margin={"r":0,"t":30,"l":0,"b":0}, height=550
-            )
-            return fig
+        mapa = gerar_mapa_app1(df_show, 'Dose_P2O5_Kg', "Fósforo (kg/ha)", geojson_data)
+        if mapa: st_folium(mapa, height=500, use_container_width=True)
 
-        with t1:
-            st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton")
-            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_Calcario', "Calcário"), use_container_width=True)
+    with t3:
+        st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg/ha")
+        mapa = gerar_mapa_app1(df_show, 'Dose_K2O_Kg', "Potássio (kg/ha)", geojson_data)
+        if mapa: st_folium(mapa, height=500, use_container_width=True)
 
-        with t2:
-            st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg")
-            
-            st.markdown("##### 📋 Auditoria (P-rem)")
-            cols_audit = ['P_Rem', 'P', 'NC_Calculado', 'FCT_Calculado', 'Dose_P2O5_Kg']
-            cols_existentes = [c for c in cols_audit if c in df_show.columns]
-            st.dataframe(df_show[cols_existentes].head(100), height=250, use_container_width=True)
-            
-            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_P2O5_Kg', "Fósforo"), use_container_width=True)
+    with t4:
+        st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg/ha")
+        mapa = gerar_mapa_app1(df_show, 'Dose_Gesso_Kg', "Gesso (kg/ha)", geojson_data)
+        if mapa: st_folium(mapa, height=500, use_container_width=True)
 
-        with t3:
-            st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_K2O_Kg', "Potássio"), use_container_width=True)
-
-        with t4:
-            st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_estilo_app1(df_show, 'Dose_Gesso_Kg', "Gesso"), use_container_width=True)
-
-        st.markdown("---")
-        csv = df_show.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 Baixar CSV Final (Monitor)", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
+    st.markdown("---")
+    csv = df_show.to_csv(index=False).encode('utf-8')
+    st.download_button("💾 Baixar CSV Final (Monitor)", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
