@@ -6,6 +6,28 @@ import plotly.graph_objects as go
 # Título
 st.title("🚜 Tríade VRT - Motor de Recomendação")
 
+# --- BLOCO DE DADOS DE TESTE (Adicione isso logo após o st.title) ---
+if 'df_interpolado' not in st.session_state:
+    st.info("🛠️ Modo de Desenvolvimento: Gerando dados fictícios para teste...")
+    
+    # Cria 1000 pontos aleatórios simulando uma fazenda
+    dados_teste = pd.DataFrame({
+        'lat': np.random.uniform(-18.00, -18.02, 1000),
+        'lon': np.random.uniform(-48.00, -48.02, 1000),
+        'Argila': np.random.uniform(15, 60, 1000), # 15% a 60%
+        'Ca': np.random.uniform(1.0, 5.0, 1000),   # cmol
+        'Mg': np.random.uniform(0.5, 2.0, 1000),   # cmol
+        'K': np.random.uniform(30, 150, 1000),     # mg/dm3
+        'P': np.random.uniform(2, 30, 1000),       # mg/dm3
+        'P_Rem': np.random.uniform(10, 40, 1000),  # mg/L
+        'CTC': np.random.uniform(8, 15, 1000)      # cmol
+    })
+    
+    # Salva na memória para o motor de cálculo usar
+    st.session_state['df_interpolado'] = dados_teste
+    
+    st.rerun() # Recarrega a página automaticamente
+    
 # --- 1. VERIFICAÇÃO DE DADOS ---
 if 'df_interpolado' not in st.session_state:
     st.warning("⚠️ Volte para a aba 'Interpolação' e gere a malha primeiro.")
