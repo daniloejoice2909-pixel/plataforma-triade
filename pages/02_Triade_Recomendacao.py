@@ -14,7 +14,6 @@ st.title("🚜 Tríade VRT - Motor de Recomendação")
 def limpar_e_padronizar_dados(df):
     df_novo = df.copy()
     
-    # --- TRADUÇÃO DE COLUNAS ---
     sinonimos = {
         'lat': ['latitude', 'lat', 'y', 'lat_wgs84'],
         'lon': ['longitude', 'long', 'lon', 'x', 'lon_wgs84'],
@@ -43,7 +42,6 @@ def limpar_e_padronizar_dados(df):
     if mapa_final:
         df_novo = df_novo.rename(columns=mapa_final)
 
-    # --- CORREÇÃO DE VÍRGULAS ---
     cols_numericas = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC', 'lat', 'lon']
     for col in cols_numericas:
         if col in df_novo.columns:
@@ -112,8 +110,7 @@ with st.sidebar:
         
     st.markdown("---")
     st.markdown("### 🎨 Visualização")
-    # SLIDER PARA AJUSTAR O MAPA
-    pixel_size = st.slider("Preenchimento (Aumente para fechar buracos)", 10, 50, 25)
+    pixel_size = st.slider("Preenchimento do Mapa", 5, 40, 20)
 
 # ==============================================================================
 # 2. CÁLCULO
@@ -145,14 +142,23 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
 
     # FÓSFORO
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
+        # Cálculos Intermediários (AUDITORIA)
         nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
         fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
+        
+        # Salva na tabela para o usuário conferir
+        dfr['NC_Calculado'] = nc.round(2)
+        dfr['FCT_Calculado'] = fct.round(2)
+        
         dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
         dose_manu = prod * p_exp
         total_p = dose_const + dose_manu
         dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
+        dfr['Dose_P2O5_Kg'] = dfr['Dose_P2O5_Kg'].round(0)
     else:
         dfr['Dose_P2O5_Kg'] = 0.0
+        dfr['NC_Calculado'] = 0.0
+        dfr['FCT_Calculado'] = 0.0
 
     # POTÁSSIO
     if 'K' in dfr.columns and 'CTC' in dfr.columns:
@@ -189,7 +195,7 @@ if st.button("🚀 Processar Recomendação VRT", type="primary"):
             st.error(f"Erro no cálculo: {e}")
 
 # ==============================================================================
-# 4. VISUALIZAÇÃO BLINDADA (AUTO-ZOOM + FILTRO ZERO)
+# 4. VISUALIZAÇÃO
 # ==============================================================================
 if 'vrt_final' in st.session_state:
     df_show = st.session_state['vrt_final']
@@ -200,63 +206,36 @@ if 'vrt_final' in st.session_state:
     else:
         t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
         
-        # Função para Mapa Sólido com Auto-Zoom
-        def mapa_solido(d, col, tit, chave_unica):
-            # 1. Filtra lixo (pontos 0,0) que quebram o zoom
+        def mapa_solido(d, col, tit, chave):
+            # Filtro Anti-Zero
             d_clean = d[(d['lat'] != 0) & (d['lon'] != 0)]
-            
-            if d_clean.empty:
-                return go.Figure().update_layout(title="Erro: Sem coordenadas válidas")
+            if d_clean.empty: return go.Figure()
 
-            # 2. Calcula Centro Real da Fazenda
-            center_lat = d_clean['lat'].mean()
-            center_lon = d_clean['lon'].mean()
-            
-            # 3. Amostra segura
-            n_amostra = min(4000, len(d_clean))
-            amostra = d_clean.sample(n=n_amostra, random_state=42)
+            center_lat, center_lon = d_clean['lat'].mean(), d_clean['lon'].mean()
+            amostra = d_clean.sample(n=min(4000, len(d_clean)), random_state=42)
             
             fig = go.Figure(go.Scattermapbox(
                 lat=amostra['lat'], lon=amostra['lon'],
                 mode='markers',
                 marker=go.scattermapbox.Marker(
-                    size=pixel_size, # Slider
-                    symbol='square', 
-                    color=amostra[col], 
-                    colorscale='Jet', # Padrão Agronômico
-                    showscale=True, 
-                    opacity=1.0
+                    size=pixel_size, symbol='square', color=amostra[col], 
+                    colorscale='Jet', showscale=True, opacity=1.0
                 ),
                 text=amostra[col].round(1),
                 hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
             ))
             
-            # 4. Layout Forçando o Centro
             fig.update_layout(
-                mapbox_style="carto-positron", # Estilo limpo e leve
-                mapbox_center={"lat": center_lat, "lon": center_lon}, # FOCA AQUI
-                mapbox_zoom=13, # ZOOM INICIAL BOM
-                title=f"{tit} - Mapa de Aplicação",
+                mapbox_style="carto-positron", 
+                mapbox_center={"lat": center_lat, "lon": center_lon},
+                mapbox_zoom=13, title=f"{tit} - Mapa de Aplicação",
                 margin={"r":0,"t":30,"l":0,"b":0}, height=500
             )
             return fig
 
         with t1:
             st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_Calcario', "Calcário", "map_ca"), use_container_width=True)
+            st.plotly_chart(mapa_solido(df_show, 'Dose_Calcario', "Calcário", "m1"), use_container_width=True)
 
         with t2:
-            st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_P2O5_Kg', "Fósforo", "map_p"), use_container_width=True)
-
-        with t3:
-            st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_K2O_Kg', "Potássio", "map_k"), use_container_width=True)
-
-        with t4:
-            st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_Gesso_Kg', "Gesso", "map_g"), use_container_width=True)
-
-        st.markdown("---")
-        csv = df_show.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 Baixar CSV Completo", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
+            st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f}
