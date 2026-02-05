@@ -88,8 +88,12 @@ def calcular_recomendacao_completa(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_va
         ap_ca = (cao * 10 / 560) * (prnt_val / 100)
         ap_mg = (mgo * 10 / 403) * (prnt_val / 100)
         
-        dose_ca = def_ca / max(ap_ca, 0.001)
-        dose_mg = def_mg / max(ap_mg, 0.001)
+        # Evitar divisão por zero
+        ap_ca = max(ap_ca, 0.001)
+        ap_mg = max(ap_mg, 0.001)
+        
+        dose_ca = def_ca / ap_ca
+        dose_mg = def_mg / ap_mg
         
         dfr['Dose_Calcario'] = np.maximum(dose_ca, dose_mg).round(2)
         
@@ -127,11 +131,9 @@ def calcular_recomendacao_completa(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_va
     else:
         dfr['Dose_K2O_Kg'] = 0.0
 
-    # --- D. GESSO (Lógica Recuperada) ---
+    # --- D. GESSO ---
     if 'Argila' in dfr.columns:
         # Dose = Argila * Fator
-        # Assumindo que Argila está em % (ex: 40.0). Se estiver em g/kg, ajustar para %.
-        # O padrão agronômico aqui é Argila em %.
         dfr['Dose_Gesso_Kg'] = dfr['Argila'] * g_fat
         dfr['Dose_Gesso_Kg'] = dfr['Dose_Gesso_Kg'].clip(lower=g_min, upper=g_max)
     else:
@@ -144,18 +146,11 @@ def calcular_recomendacao_completa(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_va
 # ==============================================================================
 
 if st.button("🚀 Processar Recomendação VRT", type="primary"):
-    with st.spinner("Calculando doses..."):
-        # Roda o cálculo
-        df_result = calcular_recomendacao_completa(
-            df_input, produtividade_alvo,
-            alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
-            p_export, p_teor,
-            k_alvo_ctc, k_export, k_teor,
-            gesso_fator, gesso_min, gesso_max
-        )
-        
-        st.session_state['vrt_final'] = df_result
-        st.success("Cálculo concluído com sucesso!")
-
-# ==============================================================================
-# 4. VISUALIZAÇÃO E EXPORTAÇÃO
+    with st.spinner("O Tríade está calculando as doses..."):
+        try:
+            # Roda o cálculo
+            df_result = calcular_recomendacao_completa(
+                df_input, produtividade_alvo,
+                alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
+                p_export, p_teor,
+                k_alvo_ctc, k_export, k_teor,
