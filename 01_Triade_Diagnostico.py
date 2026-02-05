@@ -1,11 +1,16 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import json
 from io import BytesIO
 from pykrige.ok import OrdinaryKriging
 from matplotlib.path import Path as MplPath
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.patches import PathPatch
+import folium
+from folium import plugins
+from streamlit_folium import st_folium
 
 # Importando nossa caixa de ferramentas v43
 from utils_v43 import (
@@ -13,8 +18,7 @@ from utils_v43 import (
     renderizar_cabecalho_sidebar, 
     carregar_dados_blindado, 
     validar_colunas, 
-    aplicar_layout_v43, 
-    adicionar_contorno_preto
+    adicionar_contorno_preto # (Mantemos para retrocompatibilidade, mas usaremos Folium agora)
 )
 
 # ==============================================================================
@@ -31,10 +35,10 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. KRIGAGEM COM RECUO DE BORDA (ANTI-VAZAMENTO)
+# 2. KRIGAGEM (MATRIZ PURA)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Geoestatística de Alta Definição (V53)...")
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
+@st.cache_data(show_spinner="⚙️ Processando Geoestatística...")
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     # --- ETAPA 1: LIMPEZA ---
     df = df_input.copy() 
     cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
@@ -56,12 +60,11 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # TRUQUE 1: Buffer NEGATIVO (Recuo). 
-    # Ao invés de expandir, encolhemos minimamente a área de geração de pontos.
-    # Isso garante que o centro do ponto não fique na borda exata.
-    margem_seguranca = 0.000 
-    grid_x = np.linspace(x_min + margem_seguranca, x_max - margem_seguranca, resolucao_grid)
-    grid_y = np.linspace(y_min + margem_seguranca, y_max - margem_seguranca, resolucao_grid)
+    # Buffer pequeno apenas para garantir a interpolação nas bordas
+    # O RECORTE PERFEITO SERÁ FEITO NO FOLIUM DEPOIS
+    buffer = 0.001 
+    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
+    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
     try:
         coords_poligono = geojson_data['features'][0]['geometry']['coordinates'][0]
@@ -70,8 +73,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
         xx, yy = np.meshgrid(grid_x, grid_y)
         points_flat = np.vstack((xx.flatten(), yy.flatten())).T
         
-        # O raio do Contains é estrito (True/False)
-        mask = poligono_path.contains_points(points_flat) 
+        mask = poligono_path.contains_points(points_flat)
         mask_matrix = mask.reshape(xx.shape)
         
     except Exception as e:
@@ -91,7 +93,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
             if len(dados_coluna) < 5: 
                 continue
 
-            # Linear é mais rápido para 200x200
             OK = OrdinaryKriging(
                 dados_coluna['longitude'], 
                 dados_coluna['latitude'], 
@@ -114,7 +115,62 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
     return df_final
 
 # ==============================================================================
-# 3. INPUT DE DADOS
+# 3. FUNÇÃO DE GERAÇÃO DE IMAGEM (O SEGREDO DA QUALIDADE)
+# ==============================================================================
+def gerar_imagem_overlay(df_plot, atributo, geojson_data):
+    """
+    Gera uma imagem PNG com curvas de nível suaves (contourf) e 
+    recorte vetorial perfeito usando Matplotlib.
+    """
+    # 1. Pivotar dados de volta para Matriz (Grid)
+    # Como os dados vêm da krigagem regular, podemos pivotar
+    pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
+    Z = pivot.values
+    X = pivot.columns.values # Longitude
+    Y = pivot.index.values   # Latitude
+    
+    # 2. Configurar Cores InCeres (Hard Breaks)
+    colors = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'] # Vermelho -> Verde
+    cmap = mcolors.ListedColormap(colors)
+    # Define 5 classes baseadas nos dados (Quantis ou Intervalos iguais)
+    # Usando intervalos iguais para consistência agronômica
+    bounds = np.linspace(np.nanmin(Z), np.nanmax(Z), 6)
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+    # 3. Criar Figura Matplotlib (Sem bordas, transparente)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_axis_off()
+    
+    # 4. Desenhar Curvas de Nível Preenchidas (Suaviza o serrilhado)
+    # contourf cria vetores suaves entre os pixels
+    cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
+    
+    # 5. MÁGICA DO RECORTE (CLIPPING)
+    # Cria um Path do Matplotlib usando o GeoJSON
+    coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+    poly_path = MplPath(coords)
+    patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='black', linewidth=2)
+    ax.add_patch(patch)
+    
+    # Aplica o recorte às curvas de nível
+    for collection in cf.collections:
+        collection.set_clip_path(patch)
+
+    # 6. Ajustar limites exatos para não sobrar espaço branco
+    ax.set_xlim(X.min(), X.max())
+    ax.set_ylim(Y.min(), Y.max())
+    
+    # 7. Salvar em memória
+    img_data = BytesIO()
+    plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=150)
+    plt.close(fig)
+    img_data.seek(0)
+    
+    # Retorna a imagem, os limites (bounds) e os valores min/max para legenda
+    return img_data, [[Y.min(), X.min()], [Y.max(), X.max()]], bounds
+
+# ==============================================================================
+# 4. INPUT DE DADOS
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
 
@@ -122,7 +178,7 @@ file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
 
 # ==============================================================================
-# 4. LÓGICA DE CARREGAMENTO
+# 5. PROCESSAMENTO E RENDERIZAÇÃO
 # ==============================================================================
 if file_csv and file_geojson:
     df_raw = carregar_dados_blindado(file_csv)
@@ -142,9 +198,9 @@ if file_csv and file_geojson:
             
     st.session_state['geojson_data'] = geojson_data
 
+    # Validação de Coordenadas
     st.info("📍 Validação de Coordenadas:")
     c1, c2 = st.columns(2)
-    
     idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
     idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1 if len(df_raw.columns) > 1 else 0
 
@@ -158,23 +214,18 @@ if file_csv and file_geojson:
     valido, faltantes = validar_colunas(df_raw, ['latitude', 'longitude'])
     
     if valido:
-        st.success(f"✅ Arquivos Prontos: {len(df_raw)} pontos.")
-        
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
-                # 200 de Resolução para suavizar o serrilhado
-                df_krig = processar_matrizes_interpolacao(df_raw, geojson_data, resolucao_grid=200)
+                df_krig = processar_matrizes_interpolacao(df_raw, geojson_data, resolucao_grid=150)
                 st.session_state['dados_processados'] = df_krig
-                st.toast("Mapas de Alta Definição Gerados!", icon="✨")
+                st.toast("Processamento Concluído!", icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro fatal na Krigagem: {e}")
-    else:
-        st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. VISUALIZAÇÃO "MOLDURA PERFEITA" (V53)
+# 6. VISUALIZAÇÃO COM FOLIUM (PADRÃO AGRONÔMICO)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -186,144 +237,99 @@ if st.session_state['dados_processados'] is not None:
     with c_down1:
         st.subheader("🏁 1. Exportação")
         st.info("Baixe o arquivo PONTE para usar no App de Prescrição.")
-    
     with c_down2:
         st.write("") 
         st.write("") 
         csv_ponte = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="💾 BAIXAR ARQUIVO PONTE",
-            data=csv_ponte,
-            file_name="ponte_triade_solo.csv",
-            mime="text/csv",
-            type="primary",
-            use_container_width=True
-        )
+        st.download_button("💾 BAIXAR ARQUIVO PONTE", csv_ponte, "ponte_triade.csv", "text/csv", type="primary", use_container_width=True)
 
     st.divider()
 
     # --- MAPA VISUAL ---
-    st.subheader("📊 2. Validação Visual")
+    st.subheader("📊 2. Validação Visual (Padrão Folium)")
     
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
     
     if cols_ver:
-        atributo = st.selectbox("Selecione o mapa:", cols_ver, key='seletor_atributo_final')
-        
-        # Limpeza
+        atributo = st.selectbox("Selecione o mapa:", cols_ver, key='seletor_folium')
         df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
         df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
         
         if not df_plot.empty:
-            
-            val_min = df_plot[atributo].min()
-            val_max = df_plot[atributo].max()
-            val_med = df_plot[atributo].mean()
-
-            # --- PALETA INCERES ---
-            colorscale_inceres = [
-                [0.0, '#d73027'], [0.2, '#d73027'], # Vermelho
-                [0.2, '#fc8d59'], [0.4, '#fc8d59'], # Laranja
-                [0.4, '#fee08b'], [0.6, '#fee08b'], # Amarelo
-                [0.6, '#91cf60'], [0.8, '#91cf60'], # Verde Claro
-                [0.8, '#1a9850'], [1.0, '#1a9850']  # Verde Escuro
-            ]
-
             try:
+                # 1. Gerar a Imagem (Overlay) com Recorte Perfeito
+                # Usamos Matplotlib para criar o visual liso e recortado
+                img_buffer, bounds, intervals = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
+                
+                # 2. Configurar Mapa Folium
                 centro_lat = df_plot['latitude'].mean()
                 centro_lon = df_plot['longitude'].mean()
-
-                fig = go.Figure()
-
-                # 1. CAMADA DE DADOS (PONTOS)
-                fig.add_trace(go.Scattermapbox(
-                    lat=df_plot['latitude'], 
-                    lon=df_plot['longitude'], 
-                    mode='markers', 
-                    marker=dict(
-                        # TRUQUE 2: Tamanho 11 em Grid 200.
-                        # Isso é "ponto a ponto" (Pixel Perfect). O overlap é mínimo.
-                        size=11,             
-                        color=df_plot[atributo],
-                        colorscale=colorscale_inceres,
-                        cmin=val_min,
-                        cmax=val_max,
-                        opacity=1.0, 
-                        showscale=True,
-                        colorbar=dict(
-                            title=dict(text=atributo, font=dict(size=12)),
-                            tickfont=dict(size=10),
-                            len=0.7,
-                            thickness=20,
-                            x=1.02
-                        )
-                    ),
-                    text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
-                    hoverinfo='text',
-                    name='Dados'
-                ))
-
-                # 2. CAMADA "MOLDURA" (CONTORNO GROSSO)
-                # O segredo: Desenhamos a linha PRETA GROSSA por cima de tudo.
-                # Isso esconde os "vazamentos" dos pontos na borda.
-                if st.session_state['geojson_data']:
-                    coords = st.session_state['geojson_data']['features'][0]['geometry']['coordinates'][0]
-                    # Inverte para lat/lon se necessário (GeoJSON padrão é Lon/Lat)
-                    lons_geo = [p[0] for p in coords]
-                    lats_geo = [p[1] for p in coords]
-
-                    fig.add_trace(go.Scattermapbox(
-                        lat=lats_geo,
-                        lon=lons_geo,
-                        mode='lines',
-                        line=dict(width=5, color='black'), # Moldura Grossa (5px)
-                        hoverinfo='none',
-                        name='Limite'
-                    ))
                 
-                # Layout
-                fig.update_layout(
-                    mapbox=dict(
-                        style="open-street-map", 
-                        center=dict(lat=centro_lat, lon=centro_lon),
-                        zoom=13.5
-                    ),
-                    margin={"r":0,"t":0,"l":0,"b":0},
-                    height=550,
-                    showlegend=False # Esconde legenda de camadas para limpar visual
+                m = folium.Map(
+                    location=[centro_lat, centro_lon],
+                    zoom_start=14,
+                    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', # Google Satellite
+                    attr='Google',
+                    name='Satélite'
                 )
+
+                # 3. Adicionar a Imagem Overlay
+                # Codifica a imagem em base64 para passar pro navegador
+                import base64
+                img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
+                img_url = f"data:image/png;base64,{img_b64}"
                 
-                st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
+                folium.raster_layers.ImageOverlay(
+                    image=img_url,
+                    bounds=bounds,
+                    opacity=0.8, # Leve transparência para ver o relevo por baixo, se quiser
+                    name=f"Mapa de {atributo}"
+                ).add_to(m)
+
+                # 4. Adicionar Contorno Preto (GeoJSON)
+                folium.GeoJson(
+                    st.session_state['geojson_data'],
+                    style_function=lambda x: {'color': 'black', 'weight': 3, 'fillOpacity': 0}
+                ).add_to(m)
+
+                # 5. Adicionar Legenda de Cores (HTML Customizado)
+                # Cria uma legenda flutuante no canto
+                colors_hex = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850']
+                legend_html = f"""
+                <div style="position: fixed; bottom: 50px; right: 50px; z-index:9999; font-size:14px; background-color: white; padding: 10px; border-radius: 5px; border: 2px solid grey;">
+                <b>{atributo}</b><br>
+                <i style="background: {colors_hex[4]}; width: 15px; height: 15px; display: inline-block;"></i> > {intervals[4]:.2f}<br>
+                <i style="background: {colors_hex[3]}; width: 15px; height: 15px; display: inline-block;"></i> {intervals[3]:.2f} - {intervals[4]:.2f}<br>
+                <i style="background: {colors_hex[2]}; width: 15px; height: 15px; display: inline-block;"></i> {intervals[2]:.2f} - {intervals[3]:.2f}<br>
+                <i style="background: {colors_hex[1]}; width: 15px; height: 15px; display: inline-block;"></i> {intervals[1]:.2f} - {intervals[2]:.2f}<br>
+                <i style="background: {colors_hex[0]}; width: 15px; height: 15px; display: inline-block;"></i> < {intervals[1]:.2f}
+                </div>
+                """
+                m.get_root().html.add_child(folium.Element(legend_html))
                 
-                # --- PAINEL ESTATÍSTICO ---
+                folium.LayerControl().add_to(m)
+
+                # 6. Renderizar no Streamlit
+                st_folium(m, width=None, height=550)
+                
+                # Estatísticas
                 st.markdown(
                     f"""
-                    <div style="
-                        background-color: #ffffff; 
-                        padding: 15px; 
-                        border-radius: 8px; 
-                        text-align: center; 
-                        font-size: 16px; 
-                        color: #333;
-                        margin-top: 5px;
-                        border-left: 5px solid #1a9850;
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                        border: 1px solid #e0e0e0;">
-                        <b>📏 Estatísticas do Talhão ({atributo}):</b> <br>
-                        🔴 Min: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
-                        🟡 Méd: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
-                        🟢 Max: <b>{val_max:.2f}</b>
+                    <div style="text-align: center; margin-top: 10px; padding: 10px; background-color: #f0f2f6; border-radius: 5px;">
+                    <b>Estatísticas:</b> 
+                    🔴 Min: {df_plot[atributo].min():.2f} | 
+                    🟡 Méd: {df_plot[atributo].mean():.2f} | 
+                    🟢 Max: {df_plot[atributo].max():.2f}
                     </div>
-                    """, 
-                    unsafe_allow_html=True
+                    """, unsafe_allow_html=True
                 )
-            
+
             except Exception as e:
-                st.error(f"Erro visual: {e}")
+                st.error(f"Erro na renderização Folium: {e}")
+                # Fallback de debug se der erro na imagem
+                st.write(e)
         else:
-            st.warning(f"O atributo '{atributo}' ficou vazio após a limpeza.")
-    else:
-        st.warning("Sem dados numéricos para exibir.")
+            st.warning("Atributo vazio.")
 
 elif file_csv:
     st.info("👆 Clique no botão 'Processar Matrizes' para iniciar.")
