@@ -97,6 +97,7 @@ with st.sidebar:
     with st.expander("🔴 3. Fósforo", expanded=False):
         p_export = st.number_input("Exportação P (kg/sc):", value=0.8)
         p_teor = st.number_input("Teor P2O5 (%):", value=52.0)
+        # Sua fórmula calibrada
         nc_a, nc_b = 8.4, 0.21
         fct_a, fct_b = 56.5, -0.52
         st.caption(f"Eq. NC: {nc_a} + {nc_b} * Prem")
@@ -113,10 +114,176 @@ with st.sidebar:
         
     st.markdown("---")
     st.markdown("### 🎨 Visualização (Leaflet)")
-    # Raio do círculo em METROS. Ajuste para fechar os buracos.
-    raio_ponto = st.slider("Raio do Ponto (Preenchimento)", 5, 50, 20, help="Aumente para fechar os espaços entre os pontos")
+    # Aumentei o padrão para 25 metros para garantir que feche os buracos
+    raio_ponto = st.slider("Raio do Ponto (Preenchimento)", 5, 60, 25, help="Aumente até o mapa ficar sólido")
 
 # ==============================================================================
 # 2. CÁLCULO
 # ==============================================================================
-def calcular(df, prod
+def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max):
+    dfr = df.copy()
+    
+    # CALAGEM
+    if all(c in dfr.columns for c in ['Ca','Mg','CTC']):
+        meta_ca = dfr['CTC'] * (ca_alvo / 100.0)
+        meta_mg = dfr['CTC'] * (mg_alvo / 100.0)
+        def_ca = (meta_ca - dfr['Ca']).clip(lower=0)
+        def_mg = (meta_mg - dfr['Mg']).clip(lower=0)
+        ap_ca = max((cao * 10 / 560.0) * (prnt_val / 100.0), 0.001)
+        ap_mg = max((mgo * 10 / 403.0) * (prnt_val / 100.0), 0.001)
+        dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
+        
+        ca_f = dfr['Ca'] + (dfr['Dose_Calcario'] * ap_ca)
+        mg_f = dfr['Mg'] + (dfr['Dose_Calcario'] * ap_mg)
+        mg_f = mg_f.replace(0, 0.01)
+        ratio = ca_f / mg_f
+        dfr['Status_Calagem'] = 'OK'
+        dfr.loc[ratio < 2, 'Status_Calagem'] = '⚠️ Risco: Excesso Mg'
+        dfr.loc[ratio > 4, 'Status_Calagem'] = '⚠️ Risco: Falta Mg'
+    else:
+        dfr['Dose_Calcario'] = 0.0
+        dfr['Status_Calagem'] = 'S/ Dados'
+
+    # FÓSFORO
+    if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
+        nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
+        fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
+        dfr['NC_Calculado'] = nc.round(2)
+        dfr['FCT_Calculado'] = fct.round(2)
+        
+        dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
+        dose_manu = prod * p_exp
+        total_p = dose_const + dose_manu
+        dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
+        dfr['Dose_P2O5_Kg'] = dfr['Dose_P2O5_Kg'].round(0)
+    else:
+        dfr['Dose_P2O5_Kg'] = 0.0
+        dfr['NC_Calculado'] = 0.0
+        dfr['FCT_Calculado'] = 0.0
+
+    # POTÁSSIO
+    if 'K' in dfr.columns and 'CTC' in dfr.columns:
+        k_meta = dfr['CTC'] * (k_alvo_val/100.0)
+        k_vals = dfr['K'].copy()
+        if k_vals.mean() > 10: k_vals = k_vals / 391.0
+        dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0
+        dose_k_manu = prod * k_exp
+        total_k = dose_k_const + dose_k_manu
+        dfr['Dose_K2O_Kg'] = (total_k / (k_teor_val/100.0)) if k_teor_val > 0 else 0
+    else:
+        dfr['Dose_K2O_Kg'] = 0.0
+
+    # GESSO
+    if 'Argila' in dfr.columns:
+        dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
+    else:
+        dfr['Dose_Gesso_Kg'] = 0.0
+
+    return dfr
+
+# ==============================================================================
+# 3. EXECUÇÃO
+# ==============================================================================
+if st.button("🚀 Processar Recomendação VRT", type="primary"):
+    with st.spinner("Calculando..."):
+        try:
+            res = calcular(df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
+                           p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max)
+            st.session_state['vrt_final'] = res
+            st.success("Calculado!")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Erro no cálculo: {e}")
+
+# ==============================================================================
+# 4. VISUALIZAÇÃO (FOLIUM / LEAFLET - MODO SÓLIDO)
+# ==============================================================================
+if 'vrt_final' in st.session_state:
+    df_show = st.session_state['vrt_final']
+    st.markdown("---")
+    
+    if df_show.empty:
+        st.error("Erro: Tabela vazia.")
+    else:
+        t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
+        
+        def mapa_folium_solido(d, col, tit):
+            # Filtro Seguro
+            d_clean = d[(d['lat'] != 0) & (d['lon'] != 0)].copy()
+            if d_clean.empty: return None
+
+            # Centróide
+            center_lat, center_lon = d_clean['lat'].mean(), d_clean['lon'].mean()
+            
+            # Cria o Mapa Base (Satélite/Híbrido)
+            m = folium.Map(
+                location=[center_lat, center_lon], 
+                zoom_start=14,
+                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                attr='Esri',
+                prefer_canvas=True # Performance vital para muitos pontos
+            )
+            
+            # Escala de Cores (Jet: Azul -> Vermelho)
+            vmin = d_clean[col].min()
+            vmax = d_clean[col].max()
+            if vmin == vmax: vmax += 0.001
+            
+            colormap = cm.LinearColormap(
+                colors=['blue', 'cyan', 'lime', 'yellow', 'red'], 
+                vmin=vmin, vmax=vmax,
+                caption=f"{tit} (Dose)"
+            )
+            m.add_child(colormap)
+
+            # Plota CÍRCULOS para criar o efeito sólido
+            # Aumentamos o limite para 15k para ficar bonito na tela
+            n_show = min(15000, len(d_clean))
+            d_vis = d_clean.sample(n_show, random_state=42)
+
+            for _, row in d_vis.iterrows():
+                folium.Circle(
+                    location=[row['lat'], row['lon']],
+                    radius=raio_ponto, # Controlado pelo Slider
+                    color=colormap(row[col]),
+                    fill=True,
+                    fill_color=colormap(row[col]),
+                    fill_opacity=0.9,
+                    opacity=0, # Sem borda
+                    popup=f"{tit}: {row[col]:.1f}"
+                ).add_to(m)
+            
+            # Ajusta Zoom
+            sw = d_clean[['lat', 'lon']].min().values.tolist()
+            ne = d_clean[['lat', 'lon']].max().values.tolist()
+            m.fit_bounds([sw, ne])
+            
+            return m
+
+        # --- RENDERIZAÇÃO DAS ABAS ---
+        with t1:
+            st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton")
+            mapa = mapa_folium_solido(df_show, 'Dose_Calcario', "Calcário")
+            if mapa: st_folium(mapa, height=500, use_container_width=True)
+
+        with t2:
+            st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg")
+            st.markdown("##### 📋 Conferência (P-rem)")
+            cols_audit = ['P_Rem', 'P', 'NC_Calculado', 'FCT_Calculado', 'Dose_P2O5_Kg']
+            st.dataframe(df_show[[c for c in cols_audit if c in df_show.columns]].head(100), height=200)
+            mapa = mapa_folium_solido(df_show, 'Dose_P2O5_Kg', "Fósforo")
+            if mapa: st_folium(mapa, height=500, use_container_width=True)
+
+        with t3:
+            st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg")
+            mapa = mapa_folium_solido(df_show, 'Dose_K2O_Kg', "Potássio")
+            if mapa: st_folium(mapa, height=500, use_container_width=True)
+
+        with t4:
+            st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
+            mapa = mapa_folium_solido(df_show, 'Dose_Gesso_Kg', "Gesso")
+            if mapa: st_folium(mapa, height=500, use_container_width=True)
+
+        st.markdown("---")
+        csv = df_show.to_csv(index=False).encode('utf-8')
+        st.download_button("💾 Baixar CSV Completo", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
