@@ -31,10 +31,10 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (V51 - LEVE E RÁPIDA)
+# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (CALIBRAÇÃO V52 - 175x)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Processando Geoestatística Otimizada (150x)...")
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
+@st.cache_data(show_spinner="⚙️ Processando Geoestatística de Alta Definição (175x)...")
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=175):
     # --- ETAPA 1: LIMPEZA NUMÉRICA ---
     df = df_input.copy() 
     cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
@@ -56,8 +56,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer calibrado para 150x150
-    buffer = 0.002 
+    # Buffer MÍNIMO (0.0005) para evitar que o grid saia da linha preta
+    buffer = 0.0005 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -88,7 +88,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             if len(dados_coluna) < 5: 
                 continue
 
-            # Variograma Linear (Mais rápido e robusto)
+            # Variograma Linear (Melhor custo-benefício para grids densos)
             OK = OrdinaryKriging(
                 dados_coluna['longitude'], 
                 dados_coluna['latitude'], 
@@ -160,10 +160,10 @@ if file_csv and file_geojson:
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
-                # Processamento Leve (150x)
+                # Processamento com 175 de resolução
                 df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
                 st.session_state['dados_processados'] = df_krig
-                st.toast("Mapas Gerados (Modo Performance)!", icon="✅")
+                st.toast("Mapas de Alta Definição Gerados!", icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro fatal na Krigagem: {e}")
@@ -171,7 +171,7 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. VISUALIZAÇÃO LEVE COM ESTÉTICA INCERES (V51)
+# 5. VISUALIZAÇÃO REFINADA (V52 - 175x / Size 15)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -217,7 +217,7 @@ if st.session_state['dados_processados'] is not None:
             val_max = df_plot[atributo].max()
             val_med = df_plot[atributo].mean()
 
-            # --- PALETA "HARD BREAKS" (InCeres) ---
+            # --- PALETA INCERES (Hard Breaks) ---
             colorscale_inceres = [
                 [0.0, '#d73027'], [0.2, '#d73027'], # Vermelho
                 [0.2, '#fc8d59'], [0.4, '#fc8d59'], # Laranja
@@ -235,14 +235,15 @@ if st.session_state['dados_processados'] is not None:
                     lon=df_plot['longitude'], 
                     mode='markers', 
                     marker=dict(
-                        # --- CALIBRAÇÃO PERFEITA 150x ---
-                        # Size=22 garante cobertura sem travar
-                        size=22,             
+                        # --- CALIBRAÇÃO V52 (PEDIDO DO USUÁRIO) ---
+                        # Size 15: Menor vazamento nas bordas.
+                        # Res 175: Maior densidade, os pontos se tocam.
+                        size=15,             
                         color=df_plot[atributo],
                         colorscale=colorscale_inceres,
                         cmin=val_min,
                         cmax=val_max,
-                        opacity=1.0,        # Sólido
+                        opacity=1.0,        # Cores Brutas
                         showscale=True,
                         colorbar=dict(
                             title=dict(text=atributo, font=dict(size=12)),
@@ -256,7 +257,7 @@ if st.session_state['dados_processados'] is not None:
                     hoverinfo='text' 
                 ))
                 
-                # Layout V51: 'open-street-map' é o mais leve que existe.
+                # Layout V52: Mantém o 'open-street-map' para garantir performance e contraste
                 fig.update_layout(
                     mapbox=dict(
                         style="open-street-map", 
@@ -298,7 +299,6 @@ if st.session_state['dados_processados'] is not None:
             except Exception as e:
                 st.error(f"Erro visual: {e}")
         else:
-            # --- LINHA QUE ESTAVA DANDO ERRO (CORRIGIDA) ---
             st.warning(f"O atributo '{atributo}' ficou vazio após a limpeza.")
     else:
         st.warning("Sem dados numéricos para exibir.")
