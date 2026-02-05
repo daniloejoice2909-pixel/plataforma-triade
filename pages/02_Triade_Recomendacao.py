@@ -7,30 +7,67 @@ st.set_page_config(page_title="Tríade VRT", layout="wide")
 st.title("🚜 Tríade VRT - Motor de Recomendação")
 
 # ==============================================================================
+# FUNÇÃO AUXILIAR: PADRONIZAR NOMES DE COLUNAS (CORREÇÃO DO ERRO)
+# ==============================================================================
+def padronizar_coordenadas(df):
+    """
+    Tenta encontrar colunas de latitude/longitude com nomes variados
+    e renomeia para o padrão 'lat' e 'lon'.
+    """
+    df_novo = df.copy()
+    colunas_originais = [c.lower().strip() for c in df_novo.columns]
+    mapa_renomeacao = {}
+
+    # Procura variações de Latitude
+    for col in df_novo.columns:
+        c_low = col.lower().strip()
+        if c_low in ['latitude', 'lat', 'y', 'lat_wgs84']:
+            mapa_renomeacao[col] = 'lat'
+        elif c_low in ['longitude', 'long', 'lon', 'x', 'lon_wgs84']:
+            mapa_renomeacao[col] = 'lon'
+            
+    # Aplica a renomeação
+    if mapa_renomeacao:
+        df_novo = df_novo.rename(columns=mapa_renomeacao)
+        
+    return df_novo
+
+# ==============================================================================
 # 1. SIDEBAR: UPLOAD E CONFIGURAÇÕES
 # ==============================================================================
 with st.sidebar:
     st.header("📂 Entrada de Dados")
     
-    # --- A. UPLOAD DO ARQUIVO (DIRETO) ---
+    # --- A. UPLOAD DO ARQUIVO ---
     uploaded_file = st.file_uploader("Carregar Malha Interpolada (.csv)", type=["csv"])
     
-    # Se o usuário subir um arquivo, carregamos ele
+    df_input = None
+
+    # Lógica de Carregamento + BLINDAGEM DE ERRO
     if uploaded_file is not None:
         try:
-            df_input = pd.read_csv(uploaded_file)
+            df_raw = pd.read_csv(uploaded_file)
+            df_input = padronizar_coordenadas(df_raw) # <--- AQUI A MÁGICA
             st.success(f"Arquivo carregado! {len(df_input)} pontos.")
         except Exception as e:
             st.error(f"Erro ao ler arquivo: {e}")
             st.stop()
+            
     elif 'df_interpolado' in st.session_state:
-        # Fallback: Se já tiver vindo de outra tela
-        df_input = st.session_state['df_interpolado']
+        # Recupera da memória e também padroniza
+        df_raw = st.session_state['df_interpolado']
+        df_input = padronizar_coordenadas(df_raw)
         st.info("Usando dados da memória (Aba Interpolação).")
     else:
-        # Se não tiver arquivo nenhum
         st.warning("⚠️ Por favor, faça o upload do CSV acima para começar.")
-        st.stop() # Para o código aqui até ter arquivo
+        st.stop()
+
+    # Validação Final: Se depois de tudo não tiver 'lat'/'lon', avisa o usuário
+    if 'lat' not in df_input.columns or 'lon' not in df_input.columns:
+        st.error("❌ Erro Crítico: Não encontrei colunas de coordenadas.")
+        st.write("O sistema procurou por: lat, latitude, y / lon, longitude, x.")
+        st.write("Colunas encontradas no seu arquivo:", list(df_input.columns))
+        st.stop()
 
     st.markdown("---")
     st.header("⚙️ Parâmetros Agronômicos")
@@ -41,7 +78,7 @@ with st.sidebar:
     with st.expander("🌱 1. Cultura & Produtividade", expanded=True):
         produtividade_alvo = st.number_input("Meta de Produtividade (sc/ha):", value=80.0, step=1.0)
 
-    # 2. Calagem (Ca/Mg)
+    # 2. Calagem
     with st.expander("⚪ 2. Calagem (Balanço de Bases)", expanded=False):
         alvo_ca = st.number_input("Alvo Ca (% CTC):", value=60.0, step=1.0)
         alvo_mg = st.number_input("Alvo Mg (% CTC):", value=18.0, step=1.0)
@@ -49,11 +86,11 @@ with st.sidebar:
         teor_mgo = st.number_input("Teor MgO Calcário (%):", value=12.0, step=0.5)
         prnt = st.number_input("PRNT (%):", value=85.0, step=1.0)
 
-    # 3. Fósforo (5ª Aprox)
+    # 3. Fósforo
     with st.expander("🔴 3. Fósforo (5ª Aprox)", expanded=False):
         p_export = st.number_input("Exportação P (kg/sc):", value=0.8, step=0.1)
         p_teor = st.number_input("Teor P2O5 Adubo (%):", value=52.0, step=1.0)
-        # Parâmetros da regressão (Ocultos para limpeza, mas usados no cálculo)
+        # Parâmetros ocultos (regressão)
         nc_a, nc_b = 8.8, 0.76
         fct_a, fct_b = 56.5, -0.52
 
@@ -65,12 +102,12 @@ with st.sidebar:
 
     # 5. Gesso
     with st.expander("⚪ 5. Gesso Agrícola", expanded=False):
-        gesso_fator = st.number_input("Fator x Argila:", value=50.0, step=5.0, help="Dose = Argila(%) * Fator")
-        gesso_min = st.number_input("Dose Mínima Gesso (kg/ha):", value=0.0, step=100.0)
-        gesso_max = st.number_input("Dose Máxima Gesso (kg/ha):", value=2000.0, step=100.0)
+        gesso_fator = st.number_input("Fator x Argila:", value=50.0, step=5.0)
+        gesso_min = st.number_input("Dose Mínima (kg/ha):", value=0.0, step=100.0)
+        gesso_max = st.number_input("Dose Máxima (kg/ha):", value=2000.0, step=100.0)
 
 # ==============================================================================
-# 2. MOTOR DE CÁLCULO (FUNÇÃO)
+# 2. MOTOR DE CÁLCULO
 # ==============================================================================
 def calcular_recomendacao_completa(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, 
                                   p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val,
@@ -85,19 +122,15 @@ def calcular_recomendacao_completa(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_va
         def_ca = (meta_ca - dfr['Ca']).clip(lower=0)
         def_mg = (meta_mg - dfr['Mg']).clip(lower=0)
         
-        ap_ca = (cao * 10 / 560) * (prnt_val / 100)
-        ap_mg = (mgo * 10 / 403) * (prnt_val / 100)
-        
-        # Evitar divisão por zero
-        ap_ca = max(ap_ca, 0.001)
-        ap_mg = max(ap_mg, 0.001)
+        ap_ca = max((cao * 10 / 560) * (prnt_val / 100), 0.001)
+        ap_mg = max((mgo * 10 / 403) * (prnt_val / 100), 0.001)
         
         dose_ca = def_ca / ap_ca
         dose_mg = def_mg / ap_mg
         
         dfr['Dose_Calcario'] = np.maximum(dose_ca, dose_mg).round(2)
         
-        # Alerta de Ratio
+        # Alerta Ratio
         ca_fim = dfr['Ca'] + (dfr['Dose_Calcario'] * ap_ca)
         mg_fim = dfr['Mg'] + (dfr['Dose_Calcario'] * ap_mg)
         ratio = ca_fim / mg_fim.replace(0, 0.01)
@@ -133,9 +166,7 @@ def calcular_recomendacao_completa(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_va
 
     # --- D. GESSO ---
     if 'Argila' in dfr.columns:
-        # Dose = Argila * Fator
-        dfr['Dose_Gesso_Kg'] = dfr['Argila'] * g_fat
-        dfr['Dose_Gesso_Kg'] = dfr['Dose_Gesso_Kg'].clip(lower=g_min, upper=g_max)
+        dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
     else:
         dfr['Dose_Gesso_Kg'] = 0.0
 
@@ -146,9 +177,8 @@ def calcular_recomendacao_completa(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_va
 # ==============================================================================
 
 if st.button("🚀 Processar Recomendação VRT", type="primary"):
-    with st.spinner("O Tríade está calculando as doses..."):
+    with st.spinner("Calculando..."):
         try:
-            # Roda o cálculo
             df_result = calcular_recomendacao_completa(
                 df_input, produtividade_alvo,
                 alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
@@ -156,40 +186,30 @@ if st.button("🚀 Processar Recomendação VRT", type="primary"):
                 k_alvo_ctc, k_export, k_teor,
                 gesso_fator, gesso_min, gesso_max
             )
-            
-            # Salva no cofre (Session State)
             st.session_state['vrt_final'] = df_result
-            st.success("Cálculo concluído com sucesso! Atualizando mapas...")
-            
-            # O SEGREDO DO SUCESSO: Recarregar a página para exibir os mapas
+            st.success("Sucesso! Atualizando mapas...")
             st.rerun()
-            
         except Exception as e:
             st.error(f"Erro no cálculo: {e}")
 
 # ==============================================================================
-# 4. VISUALIZAÇÃO E EXPORTAÇÃO (SÓ APARECE SE TIVER DADOS)
+# 4. VISUALIZAÇÃO
 # ==============================================================================
-
 if 'vrt_final' in st.session_state:
     df_show = st.session_state['vrt_final']
     
     st.markdown("---")
     st.header("🗺️ Mapas Gerados")
     
-    # Validação rápida
     if df_show.empty:
-        st.error("Erro: A tabela gerada está vazia.")
+        st.error("Erro: Tabela vazia.")
     else:
         t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
         
-        # Função Visual Leve (Anti-Travamento)
+        # Função Mapa Leve
         def mapa_leve(dados, col, tit, cor):
-            # Mostra no máximo 500 pontos para não travar o navegador
-            if len(dados) > 500:
-                amostra = dados.sample(n=500, random_state=42)
-            else:
-                amostra = dados
+            # Garante que usamos 'lat' e 'lon' que agora existem certeza
+            amostra = dados.sample(n=min(500, len(dados)), random_state=42)
             
             fig = go.Figure(go.Scattermapbox(
                 lat=amostra['lat'], lon=amostra['lon'],
@@ -202,42 +222,30 @@ if 'vrt_final' in st.session_state:
             ))
             fig.update_layout(
                 mapbox_style="open-street-map", 
-                title=f"{tit} (Visualização Rápida)",
+                title=f"{tit} (Amostra Rápida)",
                 margin={"r":0,"t":30,"l":0,"b":0}, height=450
             )
             return fig
 
-        # Aba Calcário
         with t1:
-            st.metric("Dose Média Calcário", f"{df_show['Dose_Calcario'].mean():.2f} ton/ha")
+            st.metric("Média Calcário", f"{df_show['Dose_Calcario'].mean():.2f} ton/ha")
             if 'Status_Calagem' in df_show.columns:
                 ruins = len(df_show[df_show['Status_Calagem'].astype(str).str.contains("⚠️")])
-                if ruins > 0:
-                    st.warning(f"⚠️ {ruins} pontos apresentam risco de desequilíbrio Ca/Mg.")
+                if ruins > 0: st.warning(f"⚠️ {ruins} pontos com risco de desequilíbrio.")
             st.plotly_chart(mapa_leve(df_show, 'Dose_Calcario', "Calcário", "Reds"), use_container_width=True)
 
-        # Aba Fósforo
         with t2:
-            st.metric("Dose Média Fósforo", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg/ha")
+            st.metric("Média Fósforo", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg/ha")
             st.plotly_chart(mapa_leve(df_show, 'Dose_P2O5_Kg', "Fósforo", "Viridis"), use_container_width=True)
 
-        # Aba Potássio
         with t3:
-            st.metric("Dose Média Potássio", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg/ha")
+            st.metric("Média Potássio", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg/ha")
             st.plotly_chart(mapa_leve(df_show, 'Dose_K2O_Kg', "Potássio", "Plasma"), use_container_width=True)
             
-        # Aba Gesso
         with t4:
-            st.metric("Dose Média Gesso", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg/ha")
+            st.metric("Média Gesso", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg/ha")
             st.plotly_chart(mapa_leve(df_show, 'Dose_Gesso_Kg', "Gesso", "Blues"), use_container_width=True)
 
-        # Botão de Download (Arquivo Completo)
         st.markdown("---")
         csv = df_show.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="💾 Baixar Arquivo CSV Completo (Todos os pontos)",
-            data=csv,
-            file_name='recomendacao_vrt_final.csv',
-            mime='text/csv',
-            type='primary'
-        )
+        st.download_button("💾 Baixar CSV Completo", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
