@@ -63,7 +63,7 @@ with st.sidebar:
         k_export = st.number_input("Exportação K (kg/sc):", value=1.2, step=0.1)
         k_teor = st.number_input("Teor K2O Adubo (%):", value=60.0, step=1.0)
 
-    # 5. Gesso (RECUPERADO)
+    # 5. Gesso
     with st.expander("⚪ 5. Gesso Agrícola", expanded=False):
         gesso_fator = st.number_input("Fator x Argila:", value=50.0, step=5.0, help="Dose = Argila(%) * Fator")
         gesso_min = st.number_input("Dose Mínima Gesso (kg/ha):", value=0.0, step=100.0)
@@ -154,3 +154,4 @@ if st.button("🚀 Processar Recomendação VRT", type="primary"):
                 alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
                 p_export, p_teor,
                 k_alvo_ctc, k_export, k_teor,
+                gesso_f
