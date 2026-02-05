@@ -35,9 +35,9 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. KRIGAGEM COM EXTRAPOLAÇÃO DE BORDA (V56)
+# 2. KRIGAGEM COM EXTRAPOLAÇÃO (PREENCHIMENTO TOTAL)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Geoestatística com Preenchimento Total (V56)...")
+@st.cache_data(show_spinner="⚙️ Geoestatística (V57 - Preenchimento Total)...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     # --- ETAPA 1: LIMPEZA ---
     df = df_input.copy() 
@@ -56,18 +56,15 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         except Exception:
             pass 
 
-    # --- ETAPA 2: GRID EXPANDIDO (O SEGREDO DO PREENCHIMENTO) ---
+    # --- ETAPA 2: GRID EXPANDIDO ---
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # BUFFER AGRESSIVO (0.01): Garante que a "massa" seja bem maior que o "cortador"
-    # Isso elimina os buracos brancos nos cantos
+    # Buffer de 0.01 graus (~1km) garante que o grid seja maior que o talhão
+    # para evitar bordas brancas no recorte
     buffer = 0.01 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
-    
-    # Nesta etapa, NÃO aplicamos máscara. Deixamos calcular TUDO (retângulo cheio).
-    # O recorte será feito visualmente no Matplotlib (passo seguinte).
     
     xx, yy = np.meshgrid(grid_x, grid_y)
     
@@ -76,7 +73,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         'longitude': xx.flatten()
     })
 
-    # --- ETAPA 3: INTERPOLAÇÃO ---
+    # --- ETAPA 3: INTERPOLAÇÃO (SEM MÁSCARA AQUI) ---
     for col in cols_validas:
         try:
             dados_coluna = df[['longitude', 'latitude', col]].dropna()
@@ -93,7 +90,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
                 enable_plotting=False
             )
             
-            # Executa no retângulo inteiro expandido
+            # Executa no retângulo cheio
             z, ss = OK.execute('grid', grid_x, grid_y)
             
             df_result[col] = z.flatten()
@@ -105,7 +102,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_final
 
 # ==============================================================================
-# 3. GERAÇÃO DE IMAGEM COM RECORTE CIRÚRGICO
+# 3. GERAÇÃO DE IMAGEM COM RECORTE VETORIAL (CLIPPING)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     """
@@ -117,29 +114,29 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     X = pivot.columns.values 
     Y = pivot.index.values   
     
-    # 2. Cores InCeres
+    # 2. Cores InCeres (Hard Breaks)
     colors = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'] 
     cmap = mcolors.ListedColormap(colors)
+    # Define os limites de classe
     bounds = np.linspace(np.nanmin(Z), np.nanmax(Z), 6)
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
-    # 3. Figura
+    # 3. Figura Matplotlib
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_axis_off()
     
-    # 4. Desenhar Contornos (Preenche tudo, inclusive fora)
+    # 4. Desenhar Contornos (Preenchimento Total)
     cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
     
-    # 5. APLICAR O CORTE (O "COOKIE CUTTER")
+    # 5. APLICAR O CORTE (MÁSCARA DO TALHÃO)
     coords = geojson_data['features'][0]['geometry']['coordinates'][0]
     poly_path = MplPath(coords)
     
-    # Cria o Patch (Máscara)
+    # Cria o Patch (Máscara Vetorial)
     patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='black', linewidth=2)
     ax.add_patch(patch)
     
-    # Aplica o Patch como Clip para o contourf
-    # (Compatível com Matplotlib novo e antigo)
+    # Aplica o Patch como Clip para o contourf (Compatível com todas as versões)
     if hasattr(cf, 'collections'):
         for collection in cf.collections:
             collection.set_clip_path(patch)
@@ -147,9 +144,9 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
         try:
             cf.set_clip_path(patch)
         except:
-            pass
+            pass # Versões muito novas podem gerenciar o clip diferente, mas o patch acima já ajuda
 
-    # 6. Ajustar limites para focar no grid (que já inclui buffer)
+    # 6. Ajustar limites para focar no grid
     ax.set_xlim(X.min(), X.max())
     ax.set_ylim(Y.min(), Y.max())
     
@@ -159,7 +156,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     plt.close(fig)
     img_data.seek(0)
     
-    # Retorna imagem e limites do grid (necessário para o Folium saber onde colar)
     return img_data, [[Y.min(), X.min()], [Y.max(), X.max()]], bounds
 
 # ==============================================================================
@@ -191,8 +187,10 @@ if file_csv and file_geojson:
     # Validação
     st.info("📍 Validação de Coordenadas:")
     c1, c2 = st.columns(2)
-    idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
-    idx_lon = list(df_raw.columns).index('longitude') if 'longitude' in df_raw.columns else 1 if len(df_raw.columns) > 1 else 0
+    # Proteção contra lista vazia ou colunas não encontradas
+    col_list = list(df_raw.columns)
+    idx_lat = col_list.index('latitude') if 'latitude' in col_list else 0
+    idx_lon = col_list.index('longitude') if 'longitude' in col_list else 1 if len(col_list) > 1 else 0
 
     with c1:
         lat_col = st.selectbox("Coluna LATITUDE (Y):", df_raw.columns, index=idx_lat)
@@ -207,7 +205,7 @@ if file_csv and file_geojson:
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
-                # Usa buffer expandido para garantir preenchimento
+                # Usa buffer expandido para garantir preenchimento total
                 df_krig = processar_matrizes_interpolacao(df_raw, geojson_data, resolucao_grid=150)
                 st.session_state['dados_processados'] = df_krig
                 st.toast("Preenchimento Total Concluído!", icon="✅")
@@ -219,4 +217,10 @@ if file_csv and file_geojson:
 # 5. VISUALIZAÇÃO FOLIUM (FINAL)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
-    df
+    df_final = st.session_state['dados_processados'].copy()
+    
+    st.divider()
+    
+    c_down1, c_down2 = st.columns([2, 1])
+    with c_down1:
+        st.subheader("🏁 1. Exportação")
