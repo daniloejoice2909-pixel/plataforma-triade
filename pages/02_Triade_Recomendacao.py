@@ -111,9 +111,9 @@ with st.sidebar:
         gesso_max = st.number_input("Max (kg/ha):", value=2000.0)
         
     st.markdown("---")
-    st.markdown("### 🎨 Ajuste Visual do Mapa")
-    # SLIDER MÁGICO PARA PREENCHER O MAPA
-    pixel_size = st.slider("Tamanho do Ponto (Preenchimento)", 5, 30, 14, help="Aumente para fechar os buracos no mapa")
+    st.markdown("### 🎨 Visualização (Padrão App 1)")
+    # Slider ajustado para fechar o mapa por padrão
+    pixel_size = st.slider("Ajuste de Preenchimento (Tamanho do Pixel)", 5, 35, 20, help="Aumente até o mapa ficar sólido")
 
 # ==============================================================================
 # 2. CÁLCULO
@@ -189,7 +189,7 @@ if st.button("🚀 Processar Recomendação VRT", type="primary"):
             st.error(f"Erro no cálculo: {e}")
 
 # ==============================================================================
-# 4. VISUALIZAÇÃO SÓLIDA (AQUI ESTÁ A MUDANÇA)
+# 4. VISUALIZAÇÃO SÓLIDA (PADRÃO 'JET')
 # ==============================================================================
 if 'vrt_final' in st.session_state:
     df_show = st.session_state['vrt_final']
@@ -200,52 +200,49 @@ if 'vrt_final' in st.session_state:
     else:
         t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
         
-        # Função para Mapa Sólido
-        def mapa_solido(d, col, tit, cor):
-            # Aumentamos a amostra para garantir preenchimento
-            # Se for muito grande, limitamos a 2500 para não travar
-            n_amostra = min(2500, len(d))
+        def mapa_solido(d, col, tit):
+            # Amostra segura para performance, mas suficiente para cobrir
+            n_amostra = min(3000, len(d))
             amostra = d.sample(n=n_amostra, random_state=42)
             
             fig = go.Figure(go.Scattermapbox(
                 lat=amostra['lat'], lon=amostra['lon'],
-                mode='markers', # Continua markers, mas truque visual:
+                mode='markers',
                 marker=go.scattermapbox.Marker(
-                    size=pixel_size, # <--- CONTROLADO PELO SLIDER
-                    symbol='square', # <--- QUADRADO PREENCHE MELHOR QUE CÍRCULO
+                    size=pixel_size, # Controlado pelo slider
+                    symbol='square', # Garante o "encaixe"
                     color=amostra[col], 
-                    colorscale=cor, 
+                    colorscale='Jet', # <--- PADRÃO AGRONÔMICO (APP 1)
                     showscale=True, 
-                    opacity=1.0      # <--- TOTALMENTE OPACO (SÓLIDO)
+                    opacity=1.0      # <--- COR SÓLIDA
                 ),
                 text=amostra[col].round(1),
                 hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
             ))
             
-            # Layout Limpo
             fig.update_layout(
-                mapbox_style="carto-positron", # Fundo mais limpo para destacar o mapa
-                title=f"{tit} (Mapa de Aplicação)",
+                mapbox_style="open-street-map", 
+                title=f"{tit} - Mapa de Aplicação",
                 margin={"r":0,"t":30,"l":0,"b":0}, height=500
             )
             return fig
 
         with t1:
             st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_Calcario', "Calcário", "Reds"), use_container_width=True)
+            st.plotly_chart(mapa_solido(df_show, 'Dose_Calcario', "Calcário"), use_container_width=True)
 
         with t2:
             st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_P2O5_Kg', "Fósforo", "Viridis"), use_container_width=True)
+            st.plotly_chart(mapa_solido(df_show, 'Dose_P2O5_Kg', "Fósforo"), use_container_width=True)
 
         with t3:
             st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_K2O_Kg', "Potássio", "Plasma"), use_container_width=True)
+            st.plotly_chart(mapa_solido(df_show, 'Dose_K2O_Kg', "Potássio"), use_container_width=True)
 
         with t4:
             st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_Gesso_Kg', "Gesso", "Blues"), use_container_width=True)
+            st.plotly_chart(mapa_solido(df_show, 'Dose_Gesso_Kg', "Gesso"), use_container_width=True)
 
         st.markdown("---")
         csv = df_show.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 Baixar CSV Completo (Monitor)", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
+        st.download_button("💾 Baixar CSV Completo", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
