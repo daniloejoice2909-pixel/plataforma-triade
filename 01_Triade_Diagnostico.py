@@ -56,7 +56,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer aumentado para garantir cobertura total
+    # Buffer aumentado para garantir cobertura total (Azulejo)
     buffer = 0.0025 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
@@ -169,7 +169,7 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. EXPORTAÇÃO E VISUALIZAÇÃO "AGRÔNOMO VISUAL" (V46)
+# 5. VISUALIZAÇÃO ESTILO "INCERES" (V47)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -197,7 +197,7 @@ if st.session_state['dados_processados'] is not None:
 
     st.divider()
 
-    # --- MAPA V46 (VISIBILIDADE TOTAL) ---
+    # --- MAPA VISUAL ---
     st.subheader("📊 2. Validação Visual")
     
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
@@ -213,45 +213,50 @@ if st.session_state['dados_processados'] is not None:
             
             # --- CÁLCULO DE ESTATÍSTICAS ---
             val_min = df_plot[atributo].min()
-            val_med = df_plot[atributo].mean()
             val_max = df_plot[atributo].max()
+            val_med = df_plot[atributo].mean()
 
-            # --- DEFINIÇÃO DE CORES DISCRETAS (5 FAIXAS BRUTAS) ---
-            # Isso força o mapa a ter cores definidas, sem degradê misturado
-            # Escala personalizada: Vermelho -> Laranja -> Amarelo -> Verde Claro -> Verde Escuro
-            escala_discreta = [
-                [0.0, 'rgb(165,0,38)'],   # Vermelho Escuro (Muito Baixo)
-                [0.2, 'rgb(215,48,39)'],  # Vermelho
-                [0.4, 'rgb(253,174,97)'], # Laranja
-                [0.6, 'rgb(255,255,191)'],# Amarelo
-                [0.8, 'rgb(166,217,106)'],# Verde Claro
-                [1.0, 'rgb(26,152,80)']   # Verde Escuro (Alto)
+            # --- PALETA "HARD BREAKS" (Estilo InCeres) ---
+            # Define cortes exatos para criar "blocos" de cor sem misturar
+            colorscale_inceres = [
+                [0.0, '#d73027'],  # Vermelho (0-20%)
+                [0.2, '#d73027'],
+                
+                [0.2, '#fc8d59'],  # Laranja (20-40%)
+                [0.4, '#fc8d59'],
+                
+                [0.4, '#fee08b'],  # Amarelo (40-60%)
+                [0.6, '#fee08b'],
+                
+                [0.6, '#91cf60'],  # Verde Claro (60-80%)
+                [0.8, '#91cf60'],
+                
+                [0.8, '#1a9850'],  # Verde Escuro (80-100%)
+                [1.0, '#1a9850']
             ]
 
             try:
-                # Centro dinâmico (Foco nos dados)
                 centro_lat = df_plot['latitude'].mean()
                 centro_lon = df_plot['longitude'].mean()
 
-                # Trocamos para 'open-street-map' para garantir que o fundo apareça
-                # O size=22 garante o preenchimento total (azulejo)
                 fig = go.Figure(go.Scattermapbox(
                     lat=df_plot['latitude'], 
                     lon=df_plot['longitude'], 
                     mode='markers', 
                     marker=dict(
-                        size=22,            # GIGANTE para fechar todos os buracos
+                        # --- SEGREDO DA COBERTURA TOTAL ---
+                        size=25,            # Gigante para fechar buracos (Efeito Azulejo)
                         color=df_plot[atributo],
-                        colorscale=escala_discreta, # Cores brutas definidas acima
+                        colorscale=colorscale_inceres, # Aplica a escala "fatiada"
                         cmin=val_min,
                         cmax=val_max,
-                        opacity=1.0,        # Totalmente sólido
+                        opacity=1.0,        # Sólido
                         showscale=True,
                         colorbar=dict(
                             title=dict(text=atributo, font=dict(size=12)),
                             tickfont=dict(size=10),
                             len=0.7,
-                            thickness=15,
+                            thickness=20, # Legenda mais grossa para ver as cores
                             x=1.02
                         )
                     ),
@@ -259,39 +264,40 @@ if st.session_state['dados_processados'] is not None:
                     hoverinfo='text' 
                 ))
                 
-                # Layout
+                # Layout (Usando Carto-Positron para garantir contraste máximo e funcionamento)
                 fig.update_layout(
                     mapbox=dict(
-                        style="open-street-map", # FUNDO CLARO GARANTIDO (Sem erro de satélite)
+                        style="carto-positron", # Fundo limpo (Infalível)
                         center=dict(lat=centro_lat, lon=centro_lon),
-                        zoom=13
+                        zoom=13.5
                     ),
                     margin={"r":0,"t":0,"l":0,"b":0},
                     height=550
                 )
                 
-                # Adiciona GeoJSON (Linha Preta Grossa)
+                # Contorno Preto Grosso
                 if st.session_state['geojson_data']:
                     fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
                 
-                # --- FAIXA DE ESTATÍSTICAS ---
+                # --- PAINEL DE ESTATÍSTICAS (RODAPÉ) ---
                 st.markdown(
                     f"""
                     <div style="
-                        background-color: #ffffff; 
+                        background-color: #f8f9fa; 
                         padding: 15px; 
                         border-radius: 8px; 
                         text-align: center; 
                         font-size: 16px; 
-                        color: #000000;
+                        color: #333;
                         margin-top: 5px;
-                        border: 2px solid #e0e0e0;">
-                        <b>📏 Estatísticas do Talhão ({atributo}):</b> <br>
-                        🔴 Min: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
-                        🟡 Méd: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
-                        🟢 Max: <b>{val_max:.2f}</b>
+                        border-left: 5px solid #1a9850;
+                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                        <span style='font-size:18px'>📊</span> <b>Diagnóstico do Talhão ({atributo})</b><br><br>
+                        <span style='color:#d73027'>🔴 Mínimo: <b>{val_min:.2f}</b></span> &nbsp;&nbsp;|&nbsp;&nbsp; 
+                        <span style='color:#f4a582'>🟡 Média: <b>{val_med:.2f}</b></span> &nbsp;&nbsp;|&nbsp;&nbsp; 
+                        <span style='color:#1a9850'>🟢 Máximo: <b>{val_max:.2f}</b></span>
                     </div>
                     """, 
                     unsafe_allow_html=True
@@ -300,7 +306,7 @@ if st.session_state['dados_processados'] is not None:
             except Exception as e:
                 st.error(f"Erro visual: {e}")
         else:
-            st.warning(f"O atributo '{atributo}' ficou vazio após a limpeza.")
+            st.warning(f"O atributo '{atributo}' ficou vazio.")
     else:
         st.warning("Sem dados numéricos para exibir.")
 
