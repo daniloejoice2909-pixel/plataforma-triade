@@ -154,4 +154,90 @@ if st.button("🚀 Processar Recomendação VRT", type="primary"):
                 alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
                 p_export, p_teor,
                 k_alvo_ctc, k_export, k_teor,
-                gesso_f
+                gesso_fator, gesso_min, gesso_max
+            )
+            
+            # Salva no cofre (Session State)
+            st.session_state['vrt_final'] = df_result
+            st.success("Cálculo concluído com sucesso! Atualizando mapas...")
+            
+            # O SEGREDO DO SUCESSO: Recarregar a página para exibir os mapas
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Erro no cálculo: {e}")
+
+# ==============================================================================
+# 4. VISUALIZAÇÃO E EXPORTAÇÃO (SÓ APARECE SE TIVER DADOS)
+# ==============================================================================
+
+if 'vrt_final' in st.session_state:
+    df_show = st.session_state['vrt_final']
+    
+    st.markdown("---")
+    st.header("🗺️ Mapas Gerados")
+    
+    # Validação rápida
+    if df_show.empty:
+        st.error("Erro: A tabela gerada está vazia.")
+    else:
+        t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
+        
+        # Função Visual Leve (Anti-Travamento)
+        def mapa_leve(dados, col, tit, cor):
+            # Mostra no máximo 500 pontos para não travar o navegador
+            if len(dados) > 500:
+                amostra = dados.sample(n=500, random_state=42)
+            else:
+                amostra = dados
+            
+            fig = go.Figure(go.Scattermapbox(
+                lat=amostra['lat'], lon=amostra['lon'],
+                mode='markers',
+                marker=go.scattermapbox.Marker(
+                    size=8, color=amostra[col], colorscale=cor, showscale=True, opacity=0.9
+                ),
+                text=amostra[col].round(1),
+                hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
+            ))
+            fig.update_layout(
+                mapbox_style="open-street-map", 
+                title=f"{tit} (Visualização Rápida)",
+                margin={"r":0,"t":30,"l":0,"b":0}, height=450
+            )
+            return fig
+
+        # Aba Calcário
+        with t1:
+            st.metric("Dose Média Calcário", f"{df_show['Dose_Calcario'].mean():.2f} ton/ha")
+            if 'Status_Calagem' in df_show.columns:
+                ruins = len(df_show[df_show['Status_Calagem'].astype(str).str.contains("⚠️")])
+                if ruins > 0:
+                    st.warning(f"⚠️ {ruins} pontos apresentam risco de desequilíbrio Ca/Mg.")
+            st.plotly_chart(mapa_leve(df_show, 'Dose_Calcario', "Calcário", "Reds"), use_container_width=True)
+
+        # Aba Fósforo
+        with t2:
+            st.metric("Dose Média Fósforo", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg/ha")
+            st.plotly_chart(mapa_leve(df_show, 'Dose_P2O5_Kg', "Fósforo", "Viridis"), use_container_width=True)
+
+        # Aba Potássio
+        with t3:
+            st.metric("Dose Média Potássio", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg/ha")
+            st.plotly_chart(mapa_leve(df_show, 'Dose_K2O_Kg', "Potássio", "Plasma"), use_container_width=True)
+            
+        # Aba Gesso
+        with t4:
+            st.metric("Dose Média Gesso", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg/ha")
+            st.plotly_chart(mapa_leve(df_show, 'Dose_Gesso_Kg', "Gesso", "Blues"), use_container_width=True)
+
+        # Botão de Download (Arquivo Completo)
+        st.markdown("---")
+        csv = df_show.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="💾 Baixar Arquivo CSV Completo (Todos os pontos)",
+            data=csv,
+            file_name='recomendacao_vrt_final.csv',
+            mime='text/csv',
+            type='primary'
+        )
