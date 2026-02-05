@@ -14,16 +14,17 @@ st.title("🚜 Tríade VRT - Motor de Recomendação")
 def limpar_e_padronizar_dados(df):
     df_novo = df.copy()
     
+    # Dicionário de sinônimos para encontrar as colunas
     sinonimos = {
         'lat': ['latitude', 'lat', 'y', 'lat_wgs84'],
         'lon': ['longitude', 'long', 'lon', 'x', 'lon_wgs84'],
-        'Ca': ['ca', 'calcio', 'cálcio', 'ca_cmolc'],
-        'Mg': ['mg', 'magnesio', 'magnésio', 'mg_cmolc'],
-        'K':  ['k', 'potassio', 'potássio', 'k_mg'],
-        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo', 'fósforo', 'p'], 
+        'Ca': ['ca', 'calcio', 'cálcio', 'ca_cmolc', 'ca (cmolc/dm3)'],
+        'Mg': ['mg', 'magnesio', 'magnésio', 'mg_cmolc', 'mg (cmolc/dm3)'],
+        'K':  ['k', 'potassio', 'potássio', 'k_mg', 'k (mg/dm3)'],
+        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo', 'fósforo', 'p', 'p (mg/dm3)'], 
         'P_Rem': ['prem', 'p_rem', 'p-rem', 'fosforo_remanescente', 'prem.'],
-        'Argila': ['argila', 'clay', 'argila_total'],
-        'CTC': ['ctc', 't', 'ctc_ph7']
+        'Argila': ['argila', 'clay', 'argila_total', 'argila %'],
+        'CTC': ['ctc', 't', 'ctc_ph7', 'ctc (cmolc/dm3)']
     }
     
     mapa_final = {}
@@ -42,6 +43,7 @@ def limpar_e_padronizar_dados(df):
     if mapa_final:
         df_novo = df_novo.rename(columns=mapa_final)
 
+    # Correção de vírgulas (12,5 -> 12.5) e conversão para número
     cols_numericas = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC', 'lat', 'lon']
     for col in cols_numericas:
         if col in df_novo.columns:
@@ -109,133 +111,3 @@ with st.sidebar:
         gesso_max = st.number_input("Max (kg/ha):", value=2000.0)
         
     st.markdown("---")
-    st.markdown("### 🎨 Visualização")
-    pixel_size = st.slider("Preenchimento do Mapa", 5, 40, 20)
-
-# ==============================================================================
-# 2. CÁLCULO
-# ==============================================================================
-def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max):
-    dfr = df.copy()
-    
-    # CALAGEM
-    if all(c in dfr.columns for c in ['Ca','Mg','CTC']):
-        meta_ca = dfr['CTC'] * (ca_alvo / 100.0)
-        meta_mg = dfr['CTC'] * (mg_alvo / 100.0)
-        def_ca = (meta_ca - dfr['Ca']).clip(lower=0)
-        def_mg = (meta_mg - dfr['Mg']).clip(lower=0)
-        ap_ca = max((cao * 10 / 560.0) * (prnt_val / 100.0), 0.001)
-        ap_mg = max((mgo * 10 / 403.0) * (prnt_val / 100.0), 0.001)
-        
-        dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
-        
-        ca_f = dfr['Ca'] + (dfr['Dose_Calcario'] * ap_ca)
-        mg_f = dfr['Mg'] + (dfr['Dose_Calcario'] * ap_mg)
-        mg_f = mg_f.replace(0, 0.01)
-        ratio = ca_f / mg_f
-        dfr['Status_Calagem'] = 'OK'
-        dfr.loc[ratio < 2, 'Status_Calagem'] = '⚠️ Risco: Excesso Mg'
-        dfr.loc[ratio > 4, 'Status_Calagem'] = '⚠️ Risco: Falta Mg'
-    else:
-        dfr['Dose_Calcario'] = 0.0
-        dfr['Status_Calagem'] = 'S/ Dados'
-
-    # FÓSFORO
-    if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
-        # Cálculos Intermediários (AUDITORIA)
-        nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
-        fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
-        
-        # Salva na tabela para o usuário conferir
-        dfr['NC_Calculado'] = nc.round(2)
-        dfr['FCT_Calculado'] = fct.round(2)
-        
-        dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
-        dose_manu = prod * p_exp
-        total_p = dose_const + dose_manu
-        dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
-        dfr['Dose_P2O5_Kg'] = dfr['Dose_P2O5_Kg'].round(0)
-    else:
-        dfr['Dose_P2O5_Kg'] = 0.0
-        dfr['NC_Calculado'] = 0.0
-        dfr['FCT_Calculado'] = 0.0
-
-    # POTÁSSIO
-    if 'K' in dfr.columns and 'CTC' in dfr.columns:
-        k_meta = dfr['CTC'] * (k_alvo_val/100.0)
-        k_vals = dfr['K'].copy()
-        if k_vals.mean() > 10: k_vals = k_vals / 391.0
-        dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0
-        dose_k_manu = prod * k_exp
-        total_k = dose_k_const + dose_k_manu
-        dfr['Dose_K2O_Kg'] = (total_k / (k_teor_val/100.0)) if k_teor_val > 0 else 0
-    else:
-        dfr['Dose_K2O_Kg'] = 0.0
-
-    # GESSO
-    if 'Argila' in dfr.columns:
-        dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
-    else:
-        dfr['Dose_Gesso_Kg'] = 0.0
-
-    return dfr
-
-# ==============================================================================
-# 3. EXECUÇÃO
-# ==============================================================================
-if st.button("🚀 Processar Recomendação VRT", type="primary"):
-    with st.spinner("Calculando..."):
-        try:
-            res = calcular(df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
-                           p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max)
-            st.session_state['vrt_final'] = res
-            st.success("Calculado!")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Erro no cálculo: {e}")
-
-# ==============================================================================
-# 4. VISUALIZAÇÃO
-# ==============================================================================
-if 'vrt_final' in st.session_state:
-    df_show = st.session_state['vrt_final']
-    st.markdown("---")
-    
-    if df_show.empty:
-        st.error("Erro: Tabela vazia.")
-    else:
-        t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
-        
-        def mapa_solido(d, col, tit, chave):
-            # Filtro Anti-Zero
-            d_clean = d[(d['lat'] != 0) & (d['lon'] != 0)]
-            if d_clean.empty: return go.Figure()
-
-            center_lat, center_lon = d_clean['lat'].mean(), d_clean['lon'].mean()
-            amostra = d_clean.sample(n=min(4000, len(d_clean)), random_state=42)
-            
-            fig = go.Figure(go.Scattermapbox(
-                lat=amostra['lat'], lon=amostra['lon'],
-                mode='markers',
-                marker=go.scattermapbox.Marker(
-                    size=pixel_size, symbol='square', color=amostra[col], 
-                    colorscale='Jet', showscale=True, opacity=1.0
-                ),
-                text=amostra[col].round(1),
-                hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
-            ))
-            
-            fig.update_layout(
-                mapbox_style="carto-positron", 
-                mapbox_center={"lat": center_lat, "lon": center_lon},
-                mapbox_zoom=13, title=f"{tit} - Mapa de Aplicação",
-                margin={"r":0,"t":30,"l":0,"b":0}, height=500
-            )
-            return fig
-
-        with t1:
-            st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton")
-            st.plotly_chart(mapa_solido(df_show, 'Dose_Calcario', "Calcário", "m1"), use_container_width=True)
-
-        with t2:
-            st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f}
