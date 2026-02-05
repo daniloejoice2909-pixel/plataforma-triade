@@ -88,7 +88,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             if len(dados_coluna) < 5: 
                 continue
 
-            # Variograma Linear (Mais rápido e robusto para evitar travamentos)
+            # Variograma Linear (Mais rápido e robusto)
             OK = OrdinaryKriging(
                 dados_coluna['longitude'], 
                 dados_coluna['latitude'], 
@@ -298,4 +298,10 @@ if st.session_state['dados_processados'] is not None:
             except Exception as e:
                 st.error(f"Erro visual: {e}")
         else:
-            st.warning(f"O atributo '{atributo}' ficou
+            # --- LINHA QUE ESTAVA DANDO ERRO (CORRIGIDA) ---
+            st.warning(f"O atributo '{atributo}' ficou vazio após a limpeza.")
+    else:
+        st.warning("Sem dados numéricos para exibir.")
+
+elif file_csv:
+    st.info("👆 Clique no botão 'Processar Matrizes' para iniciar.")
