@@ -31,11 +31,11 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (V48 - ALTA RESOLUÇÃO)
+# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (CALIBRADA V49)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Processando Geoestatística de Alta Precisão (V48)...")
-# AUMENTAMOS A RESOLUÇÃO PADRÃO PARA 250 PARA SUAVIZAR BORDAS
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=250):
+@st.cache_data(show_spinner="⚙️ Processando Geoestatística Otimizada (V49)...")
+# Resolução de 200 é o equilíbrio perfeito entre definição e visibilidade
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
     # --- ETAPA 1: LIMPEZA NUMÉRICA ---
     df = df_input.copy() 
     cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
@@ -53,12 +53,12 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=250):
         except Exception:
             pass 
 
-    # --- ETAPA 2: GRID E MÁSCARA DE PRECISÃO ---
+    # --- ETAPA 2: GRID E MÁSCARA ---
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer MÍNIMO para evitar vazamento nas bordas
-    buffer = 0.0005 
+    # Buffer de precisão: garante que o ponto encoste na linha preta sem passar
+    buffer = 0.001 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -69,7 +69,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=250):
         xx, yy = np.meshgrid(grid_x, grid_y)
         points_flat = np.vstack((xx.flatten(), yy.flatten())).T
         
-        # A mágica do recorte acontece aqui
         mask = poligono_path.contains_points(points_flat)
         mask_matrix = mask.reshape(xx.shape)
         
@@ -90,7 +89,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=250):
             if len(dados_coluna) < 5: 
                 continue
 
-            # Krigagem Ordinária com Variograma Esférico (Mais suave que o linear)
+            # Variograma Esférico (Spherical) suaviza as transições de zona
             OK = OrdinaryKriging(
                 dados_coluna['longitude'], 
                 dados_coluna['latitude'], 
@@ -102,7 +101,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=250):
             
             z, ss = OK.execute('grid', grid_x, grid_y)
             z_data = z.data 
-            # Aplica o recorte estrito
             z_data[~mask_matrix] = np.nan 
             
             df_result[col] = z_data.flatten()
@@ -163,10 +161,9 @@ if file_csv and file_geojson:
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
-                # O processamento agora vai demorar um pouco mais, mas ficará perfeito
                 df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
                 st.session_state['dados_processados'] = df_krig
-                st.toast("Krigagem de Alta Precisão concluída!", icon="✨")
+                st.toast("Mapas Gerados com Sucesso!", icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro fatal na Krigagem: {e}")
@@ -174,7 +171,7 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. VISUALIZAÇÃO "PADRÃO OURO" (V48)
+# 5. VISUALIZAÇÃO "INCERES" CALIBRADA (V49)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -203,7 +200,7 @@ if st.session_state['dados_processados'] is not None:
     st.divider()
 
     # --- MAPA VISUAL ---
-    st.subheader("📊 2. Validação Visual (Alta Definição)")
+    st.subheader("📊 2. Validação Visual")
     
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
     
@@ -239,9 +236,10 @@ if st.session_state['dados_processados'] is not None:
                     lon=df_plot['longitude'], 
                     mode='markers', 
                     marker=dict(
-                        # --- O SEGREDO DO ACABAMENTO PERFEITO ---
-                        # Tamanho reduzido drasticamente (de 25 para 8) graças à alta resolução
-                        size=8,             
+                        # --- CALIBRAÇÃO DE VISIBILIDADE E BORDAS ---
+                        # Size=10 é o ponto exato para a resolução de 200x200
+                        # Garante que apareça, preencha, mas não vaze muito.
+                        size=10,             
                         color=df_plot[atributo],
                         colorscale=colorscale_inceres,
                         cmin=val_min,
@@ -260,7 +258,7 @@ if st.session_state['dados_processados'] is not None:
                     hoverinfo='text' 
                 ))
                 
-                # Layout (Voltamos para Satélite para melhor integração visual)
+                # Layout (Voltamos para Satélite para o visual rico)
                 fig.update_layout(
                     mapbox=dict(
                         style="satellite", 
@@ -271,7 +269,7 @@ if st.session_state['dados_processados'] is not None:
                     height=550
                 )
                 
-                # Contorno Preto Grosso (Essencial para o acabamento)
+                # Contorno Preto Grosso
                 if st.session_state['geojson_data']:
                     fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
                 
