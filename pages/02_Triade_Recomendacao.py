@@ -2,9 +2,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import folium
-from streamlit_folium import st_folium
-import branca.colormap as cm
+import plotly.graph_objects as go
 
 # Configuração da Página
 st.set_page_config(page_title="Tríade VRT", layout="wide")
@@ -44,6 +42,7 @@ def limpar_e_padronizar_dados(df):
     if mapa_final:
         df_novo = df_novo.rename(columns=mapa_final)
 
+    # Correção de vírgulas e conversão
     cols_numericas = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC', 'lat', 'lon']
     for col in cols_numericas:
         if col in df_novo.columns:
@@ -97,7 +96,6 @@ with st.sidebar:
     with st.expander("🔴 3. Fósforo", expanded=False):
         p_export = st.number_input("Exportação P (kg/sc):", value=0.8)
         p_teor = st.number_input("Teor P2O5 (%):", value=52.0)
-        # Sua fórmula calibrada
         nc_a, nc_b = 8.4, 0.21
         fct_a, fct_b = 56.5, -0.52
         st.caption(f"Eq. NC: {nc_a} + {nc_b} * Prem")
@@ -113,9 +111,9 @@ with st.sidebar:
         gesso_max = st.number_input("Max (kg/ha):", value=2000.0)
         
     st.markdown("---")
-    st.markdown("### 🎨 Visualização (Leaflet)")
-    # Aumentei o padrão para 25 metros para garantir que feche os buracos
-    raio_ponto = st.slider("Raio do Ponto (Preenchimento)", 5, 60, 25, help="Aumente até o mapa ficar sólido")
+    st.markdown("### 🎨 Visualização (Anti-Travamento)")
+    # Slider de Pixel: Maior = Fecha mais buracos. Menor = Mais detalhe.
+    pixel_size = st.slider("Tamanho do Pixel (Preenchimento)", 10, 40, 22, help="Aumente para fechar os buracos do mapa")
 
 # ==============================================================================
 # 2. CÁLCULO
@@ -144,7 +142,7 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
         dfr['Dose_Calcario'] = 0.0
         dfr['Status_Calagem'] = 'S/ Dados'
 
-    # FÓSFORO
+    # FÓSFORO (Com Auditoria)
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
         nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
         fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
@@ -185,18 +183,18 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
 # 3. EXECUÇÃO
 # ==============================================================================
 if st.button("🚀 Processar Recomendação VRT", type="primary"):
-    with st.spinner("Calculando..."):
+    with st.spinner("Calculando doses e gerando mapas..."):
         try:
             res = calcular(df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
                            p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max)
             st.session_state['vrt_final'] = res
-            st.success("Calculado!")
+            st.success("Concluído!")
             st.rerun()
         except Exception as e:
             st.error(f"Erro no cálculo: {e}")
 
 # ==============================================================================
-# 4. VISUALIZAÇÃO (FOLIUM / LEAFLET - MODO SÓLIDO)
+# 4. VISUALIZAÇÃO SÓLIDA (PLOTLY ESTILO LEAFLET)
 # ==============================================================================
 if 'vrt_final' in st.session_state:
     df_show = st.session_state['vrt_final']
@@ -207,83 +205,61 @@ if 'vrt_final' in st.session_state:
     else:
         t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
         
-        def mapa_folium_solido(d, col, tit):
-            # Filtro Seguro
+        def mapa_solido_rapido(d, col, tit):
+            # 1. Filtro Anti-Zero (Evita tela branca)
             d_clean = d[(d['lat'] != 0) & (d['lon'] != 0)].copy()
-            if d_clean.empty: return None
+            if d_clean.empty: return go.Figure()
 
-            # Centróide
+            # 2. Centro do Mapa
             center_lat, center_lon = d_clean['lat'].mean(), d_clean['lon'].mean()
             
-            # Cria o Mapa Base (Satélite/Híbrido)
-            m = folium.Map(
-                location=[center_lat, center_lon], 
-                zoom_start=14,
-                tiles='https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-                attr='Esri',
-                prefer_canvas=True # Performance vital para muitos pontos
+            # 3. Amostragem Inteligente (Sem travar)
+            # WebGL aguenta 50k tranquilo, mas vamos garantir 30k para ser ultra rápido
+            n_max = 30000 
+            if len(d_clean) > n_max:
+                amostra = d_clean.sample(n=n_max, random_state=42)
+            else:
+                amostra = d_clean
+            
+            # 4. Construção do Mapa
+            fig = go.Figure(go.Scattermapbox(
+                lat=amostra['lat'], lon=amostra['lon'],
+                mode='markers',
+                marker=go.scattermapbox.Marker(
+                    size=pixel_size, # Controlado pelo Slider
+                    symbol='square', # Quadrados para fechar buracos
+                    color=amostra[col], 
+                    colorscale='Jet', # Padrão Agronômico
+                    showscale=True, 
+                    opacity=1.0       # Sólido
+                ),
+                text=amostra[col].round(1),
+                hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
+            ))
+            
+            # 5. Configuração Visual IGUAL ao Leaflet
+            fig.update_layout(
+                mapbox_style="open-street-map", # <--- ESTE É O SEGREDO DO APP 1
+                mapbox_center={"lat": center_lat, "lon": center_lon},
+                mapbox_zoom=13, 
+                title=f"{tit} - Recomendação",
+                margin={"r":0,"t":30,"l":0,"b":0}, height=550
             )
-            
-            # Escala de Cores (Jet: Azul -> Vermelho)
-            vmin = d_clean[col].min()
-            vmax = d_clean[col].max()
-            if vmin == vmax: vmax += 0.001
-            
-            colormap = cm.LinearColormap(
-                colors=['blue', 'cyan', 'lime', 'yellow', 'red'], 
-                vmin=vmin, vmax=vmax,
-                caption=f"{tit} (Dose)"
-            )
-            m.add_child(colormap)
+            return fig
 
-            # Plota CÍRCULOS para criar o efeito sólido
-            # Aumentamos o limite para 15k para ficar bonito na tela
-            n_show = min(15000, len(d_clean))
-            d_vis = d_clean.sample(n_show, random_state=42)
-
-            for _, row in d_vis.iterrows():
-                folium.Circle(
-                    location=[row['lat'], row['lon']],
-                    radius=raio_ponto, # Controlado pelo Slider
-                    color=colormap(row[col]),
-                    fill=True,
-                    fill_color=colormap(row[col]),
-                    fill_opacity=0.9,
-                    opacity=0, # Sem borda
-                    popup=f"{tit}: {row[col]:.1f}"
-                ).add_to(m)
-            
-            # Ajusta Zoom
-            sw = d_clean[['lat', 'lon']].min().values.tolist()
-            ne = d_clean[['lat', 'lon']].max().values.tolist()
-            m.fit_bounds([sw, ne])
-            
-            return m
-
-        # --- RENDERIZAÇÃO DAS ABAS ---
         with t1:
             st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton")
-            mapa = mapa_folium_solido(df_show, 'Dose_Calcario', "Calcário")
-            if mapa: st_folium(mapa, height=500, use_container_width=True)
+            st.plotly_chart(mapa_solido_rapido(df_show, 'Dose_Calcario', "Calcário"), use_container_width=True)
 
         with t2:
             st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg")
-            st.markdown("##### 📋 Conferência (P-rem)")
+            
+            st.markdown("##### 📋 Auditoria (P-rem)")
             cols_audit = ['P_Rem', 'P', 'NC_Calculado', 'FCT_Calculado', 'Dose_P2O5_Kg']
-            st.dataframe(df_show[[c for c in cols_audit if c in df_show.columns]].head(100), height=200)
-            mapa = mapa_folium_solido(df_show, 'Dose_P2O5_Kg', "Fósforo")
-            if mapa: st_folium(mapa, height=500, use_container_width=True)
+            cols_existentes = [c for c in cols_audit if c in df_show.columns]
+            st.dataframe(df_show[cols_existentes].head(100), height=250, use_container_width=True)
+            
+            st.plotly_chart(mapa_solido_rapido(df_show, 'Dose_P2O5_Kg', "Fósforo"), use_container_width=True)
 
         with t3:
-            st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg")
-            mapa = mapa_folium_solido(df_show, 'Dose_K2O_Kg', "Potássio")
-            if mapa: st_folium(mapa, height=500, use_container_width=True)
-
-        with t4:
-            st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
-            mapa = mapa_folium_solido(df_show, 'Dose_Gesso_Kg', "Gesso")
-            if mapa: st_folium(mapa, height=500, use_container_width=True)
-
-        st.markdown("---")
-        csv = df_show.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 Baixar CSV Completo", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
+            st.
