@@ -7,52 +7,55 @@ st.set_page_config(page_title="Tríade VRT", layout="wide")
 st.title("🚜 Tríade VRT - Motor de Recomendação")
 
 # ==============================================================================
-# 0. TRADUTOR DE COLUNAS (CALIBRADO PARA SUA IMAGEM)
+# 0. FUNÇÕES DE LIMPEZA (CORRETOR DE VÍRGULAS + TRADUTOR)
 # ==============================================================================
-def padronizar_colunas_universal(df):
+def limpar_e_padronizar_dados(df):
     """
-    Renomeia as colunas do CSV do usuário para os nomes que o Python entende.
-    Baseado na imagem enviada: 'P mehl' -> 'P', 'prem' -> 'P_Rem'
+    1. Traduz nomes das colunas (P mehl -> P).
+    2. Converte '12,5' para 12.5 (Correção Brasil).
+    3. Garante que tudo seja número.
     """
     df_novo = df.copy()
     
-    # Mapa de tradução (Chave = Nome no Código : Valor = Lista de nomes no seu CSV)
+    # --- ETAPA 1: TRADUÇÃO DE COLUNAS ---
     sinonimos = {
         'lat': ['latitude', 'lat', 'y'],
         'lon': ['longitude', 'long', 'lon', 'x'],
-        
-        # Nutrientes (Conforme sua imagem)
-        'Ca': ['ca', 'calcio'],        # Pega a coluna "Ca"
-        'Mg': ['mg', 'magnesio'],      # Pega a coluna "Mg"
-        'K':  ['k', 'potassio'],       # Pega a coluna "K"
-        
-        # Fósforo: O Código precisa do 'P' (Mehlich)
-        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo'], 
-        
-        # P-Rem: O Código precisa do 'P_Rem'
-        'P_Rem': ['prem', 'p_rem', 'p-rem', 'prem.'],
-        
-        # Outros
-        'Argila': ['argila', 'clay'],
-        'CTC': ['ctc', 't']
+        'Ca': ['ca', 'calcio', 'ca_cmolc'],
+        'Mg': ['mg', 'magnesio', 'mg_cmolc'],
+        'K':  ['k', 'potassio', 'k_mg'],
+        'P':  ['p mehl', 'p_mehl', 'pmehlich', 'fosforo', 'p'], 
+        'P_Rem': ['prem', 'p_rem', 'p-rem', 'fosforo_remanescente'],
+        'Argila': ['argila', 'clay', 'argila_total'],
+        'CTC': ['ctc', 't', 'ctc_ph7']
     }
-
-    # Varredura
-    mapa_final = {}
-    colunas_originais = list(df_novo.columns)
     
-    for col_real in colunas_originais:
-        c_clean = col_real.lower().strip() # Transforma "P mehl " em "p mehl"
-        
-        for padrao_codigo, lista_possibilidades in sinonimos.items():
-            if c_clean in lista_possibilidades:
-                mapa_final[col_real] = padrao_codigo
+    mapa_final = {}
+    cols_originais = list(df_novo.columns)
+    
+    for col_real in cols_originais:
+        c_clean = col_real.lower().strip()
+        # Tenta match exato ou "contém"
+        for padrao, lista in sinonimos.items():
+            if c_clean in lista:
+                mapa_final[col_real] = padrao
                 break
     
-    # Aplica a renomeação
     if mapa_final:
         df_novo = df_novo.rename(columns=mapa_final)
+
+    # --- ETAPA 2: CORREÇÃO DE VÍRGULAS E NUMÉRICOS ---
+    cols_numericas = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC', 'lat', 'lon']
     
+    for col in cols_numericas:
+        if col in df_novo.columns:
+            # Se for texto (object), troca vírgula por ponto
+            if df_novo[col].dtype == 'object':
+                df_novo[col] = df_novo[col].astype(str).str.replace(',', '.')
+            
+            # Força conversão para número
+            df_novo[col] = pd.to_numeric(df_novo[col], errors='coerce').fillna(0)
+
     return df_novo
 
 # ==============================================================================
@@ -66,37 +69,39 @@ with st.sidebar:
 
     if uploaded_file is not None:
         try:
-            df_raw = pd.read_csv(uploaded_file)
-            # APLICA A TRADUÇÃO
-            df_input = padronizar_colunas_universal(df_raw)
+            # Lê o CSV. Se for separado por ponto e vírgula, o engine 'python' resolve melhor
+            try:
+                df_raw = pd.read_csv(uploaded_file, sep=None, engine='python')
+            except:
+                df_raw = pd.read_csv(uploaded_file) # Tenta padrão
+                
+            df_input = limpar_e_padronizar_dados(df_raw)
             st.success(f"Arquivo carregado! {len(df_input)} pontos.")
         except Exception as e:
             st.error(f"Erro leitura: {e}")
             st.stop()
     elif 'df_interpolado' in st.session_state:
         df_raw = st.session_state['df_interpolado']
-        df_input = padronizar_colunas_universal(df_raw)
+        df_input = limpar_e_padronizar_dados(df_raw)
         st.info("Usando dados da memória.")
     else:
         st.warning("⚠️ Faça upload do CSV.")
         st.stop()
 
-    # --- DIAGNÓSTICO VISUAL (PARA CONFERÊNCIA) ---
-    with st.expander("🕵️ Conferência de Colunas"):
-        cols_usadas = df_input.columns.tolist()
+    # --- RAIO-X DOS DADOS (PARA VOCÊ VER SE ESTÁ LENDO CERTO) ---
+    with st.expander("🕵️ Raio-X dos Dados (Clique aqui se der Zero)"):
+        st.write("Primeiras 3 linhas processadas:")
+        st.dataframe(df_input.head(3))
         
-        # Verifica se achou os principais
-        check = {
-            'P (Mehlich)': 'P' in cols_usadas,
-            'P-rem': 'P_Rem' in cols_usadas,
-            'Cálcio': 'Ca' in cols_usadas,
-            'Potássio': 'K' in cols_usadas,
-            'Argila': 'Argila' in cols_usadas
-        }
-        
-        for k, v in check.items():
-            if v: st.write(f"✅ {k}: OK")
-            else: st.write(f"❌ {k}: Não achado (Dose será 0)")
+        st.write("Médias detectadas (Se for 0, o dado não entrou):")
+        cols_check = ['Ca', 'Mg', 'K', 'P', 'P_Rem', 'Argila', 'CTC']
+        for c in cols_check:
+            if c in df_input.columns:
+                val = df_input[c].mean()
+                icon = "✅" if val > 0 else "❌"
+                st.write(f"{icon} {c}: {val:.2f}")
+            else:
+                st.write(f"❌ {c}: Coluna NÃO encontrada")
 
     st.markdown("---")
     st.header("⚙️ Parâmetros")
@@ -117,8 +122,11 @@ with st.sidebar:
     with st.expander("🔴 3. Fósforo", expanded=False):
         p_export = st.number_input("Exportação P (kg/sc):", value=0.8)
         p_teor = st.number_input("Teor P2O5 (%):", value=52.0)
-        nc_a, nc_b = 8.8, 0.76
-        fct_a, fct_b = 56.5, -0.52
+        # Parâmetros de calibração 5ª Aprox
+        nc_a = 8.8
+        nc_b = 0.76
+        fct_a = 56.5
+        fct_b = -0.52
 
     # 4. Potássio
     with st.expander("🟣 4. Potássio", expanded=False):
@@ -140,14 +148,25 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
     
     # CALAGEM
     if all(c in dfr.columns for c in ['Ca','Mg','CTC']):
-        meta_ca, meta_mg = dfr['CTC']*(ca_alvo/100), dfr['CTC']*(mg_alvo/100)
-        def_ca, def_mg = (meta_ca - dfr['Ca']).clip(0), (meta_mg - dfr['Mg']).clip(0)
-        ap_ca, ap_mg = max((cao*10/560)*(prnt_val/100), 0.001), max((mgo*10/403)*(prnt_val/100), 0.001)
+        meta_ca = dfr['CTC'] * (ca_alvo / 100.0)
+        meta_mg = dfr['CTC'] * (mg_alvo / 100.0)
+        
+        def_ca = (meta_ca - dfr['Ca']).clip(lower=0)
+        def_mg = (meta_mg - dfr['Mg']).clip(lower=0)
+        
+        ap_ca = max((cao * 10 / 560.0) * (prnt_val / 100.0), 0.001)
+        ap_mg = max((mgo * 10 / 403.0) * (prnt_val / 100.0), 0.001)
+        
+        # Maior dose entre os dois
         dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
         
-        ca_f = dfr['Ca'] + (dfr['Dose_Calcario']*ap_ca)
-        mg_f = dfr['Mg'] + (dfr['Dose_Calcario']*ap_mg)
-        ratio = ca_f / mg_f.replace(0, 0.01)
+        # Check Ratio
+        ca_f = dfr['Ca'] + (dfr['Dose_Calcario'] * ap_ca)
+        mg_f = dfr['Mg'] + (dfr['Dose_Calcario'] * ap_mg)
+        # Evita divisão por zero
+        mg_f = mg_f.replace(0, 0.01)
+        
+        ratio = ca_f / mg_f
         dfr['Status_Calagem'] = 'OK'
         dfr.loc[ratio < 2, 'Status_Calagem'] = '⚠️ Risco: Excesso Mg'
         dfr.loc[ratio > 4, 'Status_Calagem'] = '⚠️ Risco: Falta Mg'
@@ -155,35 +174,43 @@ def calcular(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, 
         dfr['Dose_Calcario'] = 0.0
         dfr['Status_Calagem'] = 'S/ Dados'
 
-    # FOSFORO (5ª Aprox: Usa 'P' (Mehlich) e 'P_Rem' (Prem))
+    # FÓSFORO (5ª APROX)
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
-        # Garante numérico
-        dfr['P'] = pd.to_numeric(dfr['P'], errors='coerce').fillna(0)
-        dfr['P_Rem'] = pd.to_numeric(dfr['P_Rem'], errors='coerce').fillna(10) # Default seguro
+        # Nível Crítico
+        nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
+        # Fator Tampão
+        fct = (fct_a * dfr['P_Rem']**fct_b).clip(4, 40)
         
-        nc = (8.8 + 0.76*dfr['P_Rem']).clip(8,60)
-        fct = (56.5 * dfr['P_Rem']**-0.52).clip(4,40)
-        dose_p = np.where(nc > dfr['P'], (nc-dfr['P'])*fct, 0) + (prod*p_exp)
-        dfr['Dose_P2O5_Kg'] = (dose_p / (p_teor_val/100)) if p_teor_val > 0 else 0
+        # Dose Fosfatagem + Manutenção
+        dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
+        dose_manu = prod * p_exp
+        total_p = dose_const + dose_manu
+        
+        dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
     else:
         dfr['Dose_P2O5_Kg'] = 0.0
 
-    # POTASSIO
+    # POTÁSSIO
     if 'K' in dfr.columns and 'CTC' in dfr.columns:
-        k_meta = dfr['CTC']*(k_alvo_val/100)
-        # Conversão Inteligente: Se K > 10, assume mg/dm3 e converte pra cmol
-        k_vals = pd.to_numeric(dfr['K'], errors='coerce').fillna(0)
+        k_meta = dfr['CTC'] * (k_alvo_val/100.0)
+        
+        # Detecção automática de unidade do K
+        k_vals = dfr['K'].copy()
+        # Se média > 10, assume mg/dm3 e converte para cmol
         if k_vals.mean() > 10:
             k_vals = k_vals / 391.0
             
-        dose_k = (k_meta - k_vals).clip(0)*940 + (prod*k_exp)
-        dfr['Dose_K2O_Kg'] = (dose_k / (k_teor_val/100)) if k_teor_val > 0 else 0
+        dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0 # Fator K cmol->kg K2O
+        dose_k_manu = prod * k_exp
+        total_k = dose_k_const + dose_k_manu
+        
+        dfr['Dose_K2O_Kg'] = (total_k / (k_teor_val/100.0)) if k_teor_val > 0 else 0
     else:
         dfr['Dose_K2O_Kg'] = 0.0
 
     # GESSO
     if 'Argila' in dfr.columns:
-        dfr['Dose_Gesso_Kg'] = (dfr['Argila']*g_fat).clip(g_min, g_max)
+        dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
     else:
         dfr['Dose_Gesso_Kg'] = 0.0
 
@@ -198,13 +225,13 @@ if st.button("🚀 Processar Recomendação VRT", type="primary"):
             res = calcular(df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
                            p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max)
             st.session_state['vrt_final'] = res
-            st.success("Sucesso! O sistema identificou 'P mehl' e 'prem' corretamente.")
+            st.success("Sucesso! Mapas atualizados.")
             st.rerun()
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.error(f"Erro no cálculo: {e}")
 
 # ==============================================================================
-# 4. MAPAS (PONTOS MAIORES)
+# 4. VISUALIZAÇÃO
 # ==============================================================================
 if 'vrt_final' in st.session_state:
     df_show = st.session_state['vrt_final']
@@ -216,19 +243,18 @@ if 'vrt_final' in st.session_state:
         t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
         
         def mapa(d, col, tit, cor):
-            amostra = d.sample(n=min(800, len(d)), random_state=42)
+            amostra = d.sample(n=min(1000, len(d)), random_state=42)
             fig = go.Figure(go.Scattermapbox(
                 lat=amostra['lat'], lon=amostra['lon'],
                 mode='markers',
                 marker=go.scattermapbox.Marker(
-                    size=10, 
-                    color=amostra[col], colorscale=cor, showscale=True, opacity=0.9
+                    size=9, color=amostra[col], colorscale=cor, showscale=True, opacity=0.9
                 ),
                 text=amostra[col].round(1),
                 hovertemplate=f"<b>{tit}: %{{text}}</b><extra></extra>"
             ))
             fig.update_layout(
-                mapbox_style="open-street-map", title=f"{tit} (Amostra Rápida)",
+                mapbox_style="open-street-map", title=f"{tit} (Visualização Rápida)",
                 margin={"r":0,"t":30,"l":0,"b":0}, height=450
             )
             return fig
@@ -251,8 +277,4 @@ if 'vrt_final' in st.session_state:
 
         with t4:
             st.metric("Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg")
-            st.plotly_chart(mapa(df_show, 'Dose_Gesso_Kg', "Gesso", "Blues"), use_container_width=True)
-
-        st.markdown("---")
-        csv = df_show.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 Baixar CSV Completo", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
+            st.plotly_chart(mapa(df_
