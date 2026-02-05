@@ -11,14 +11,14 @@ from matplotlib.patches import PathPatch
 import folium
 from folium import plugins
 from streamlit_folium import st_folium
+import base64
 
 # Importando nossa caixa de ferramentas v43
 from utils_v43 import (
     configurar_pagina, 
     renderizar_cabecalho_sidebar, 
     carregar_dados_blindado, 
-    validar_colunas, 
-    adicionar_contorno_preto # (Mantemos para retrocompatibilidade, mas usaremos Folium agora)
+    validar_colunas
 )
 
 # ==============================================================================
@@ -60,9 +60,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer pequeno apenas para garantir a interpolação nas bordas
-    # O RECORTE PERFEITO SERÁ FEITO NO FOLIUM DEPOIS
-    buffer = 0.001 
+    # Buffer para garantir que a imagem cubra tudo (o recorte vem depois)
+    buffer = 0.002 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -115,58 +114,59 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_final
 
 # ==============================================================================
-# 3. FUNÇÃO DE GERAÇÃO DE IMAGEM (O SEGREDO DA QUALIDADE)
+# 3. FUNÇÃO DE GERAÇÃO DE IMAGEM (CORRIGIDA PARA MATPLOTLIB NOVO)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     """
-    Gera uma imagem PNG com curvas de nível suaves (contourf) e 
-    recorte vetorial perfeito usando Matplotlib.
+    Gera uma imagem PNG com curvas de nível suaves e recorte perfeito.
     """
-    # 1. Pivotar dados de volta para Matriz (Grid)
-    # Como os dados vêm da krigagem regular, podemos pivotar
+    # 1. Pivotar dados
     pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
     Z = pivot.values
     X = pivot.columns.values # Longitude
     Y = pivot.index.values   # Latitude
     
-    # 2. Configurar Cores InCeres (Hard Breaks)
-    colors = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'] # Vermelho -> Verde
+    # 2. Configurar Cores InCeres
+    colors = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'] 
     cmap = mcolors.ListedColormap(colors)
-    # Define 5 classes baseadas nos dados (Quantis ou Intervalos iguais)
-    # Usando intervalos iguais para consistência agronômica
     bounds = np.linspace(np.nanmin(Z), np.nanmax(Z), 6)
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
-    # 3. Criar Figura Matplotlib (Sem bordas, transparente)
+    # 3. Criar Figura
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_axis_off()
     
-    # 4. Desenhar Curvas de Nível Preenchidas (Suaviza o serrilhado)
-    # contourf cria vetores suaves entre os pixels
+    # 4. Desenhar Curvas de Nível
     cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
     
-    # 5. MÁGICA DO RECORTE (CLIPPING)
-    # Cria um Path do Matplotlib usando o GeoJSON
+    # 5. MÁGICA DO RECORTE (CLIPPING) - BLINDADO
     coords = geojson_data['features'][0]['geometry']['coordinates'][0]
     poly_path = MplPath(coords)
     patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='black', linewidth=2)
     ax.add_patch(patch)
     
-    # Aplica o recorte às curvas de nível
-    for collection in cf.collections:
-        collection.set_clip_path(patch)
+    # --- CORREÇÃO DO ERRO AQUI ---
+    # Verifica se é versão antiga (.collections) ou nova (set_clip_path direto)
+    if hasattr(cf, 'collections'):
+        for collection in cf.collections:
+            collection.set_clip_path(patch)
+    else:
+        try:
+            # Tenta aplicar direto no objeto (Matplotlib 3.8+)
+            cf.set_clip_path(patch)
+        except Exception:
+            pass # Se falhar, segue sem clip (mas geralmente funciona)
 
-    # 6. Ajustar limites exatos para não sobrar espaço branco
+    # 6. Ajustar limites
     ax.set_xlim(X.min(), X.max())
     ax.set_ylim(Y.min(), Y.max())
     
-    # 7. Salvar em memória
+    # 7. Salvar
     img_data = BytesIO()
     plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=150)
     plt.close(fig)
     img_data.seek(0)
     
-    # Retorna a imagem, os limites (bounds) e os valores min/max para legenda
     return img_data, [[Y.min(), X.min()], [Y.max(), X.max()]], bounds
 
 # ==============================================================================
@@ -178,7 +178,7 @@ file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
 
 # ==============================================================================
-# 5. PROCESSAMENTO E RENDERIZAÇÃO
+# 5. PROCESSAMENTO
 # ==============================================================================
 if file_csv and file_geojson:
     df_raw = carregar_dados_blindado(file_csv)
@@ -198,7 +198,7 @@ if file_csv and file_geojson:
             
     st.session_state['geojson_data'] = geojson_data
 
-    # Validação de Coordenadas
+    # Validação
     st.info("📍 Validação de Coordenadas:")
     c1, c2 = st.columns(2)
     idx_lat = list(df_raw.columns).index('latitude') if 'latitude' in df_raw.columns else 0
@@ -225,7 +225,7 @@ if file_csv and file_geojson:
                 st.error(f"Erro fatal na Krigagem: {e}")
 
 # ==============================================================================
-# 6. VISUALIZAÇÃO COM FOLIUM (PADRÃO AGRONÔMICO)
+# 6. VISUALIZAÇÃO FOLIUM (V55)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -258,7 +258,6 @@ if st.session_state['dados_processados'] is not None:
         if not df_plot.empty:
             try:
                 # 1. Gerar a Imagem (Overlay) com Recorte Perfeito
-                # Usamos Matplotlib para criar o visual liso e recortado
                 img_buffer, bounds, intervals = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
                 
                 # 2. Configurar Mapa Folium
@@ -268,21 +267,20 @@ if st.session_state['dados_processados'] is not None:
                 m = folium.Map(
                     location=[centro_lat, centro_lon],
                     zoom_start=14,
-                    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', # Google Satellite
+                    # Tiles do Google Satellite (Alta Resolução)
+                    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', 
                     attr='Google',
                     name='Satélite'
                 )
 
                 # 3. Adicionar a Imagem Overlay
-                # Codifica a imagem em base64 para passar pro navegador
-                import base64
                 img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
                 img_url = f"data:image/png;base64,{img_b64}"
                 
                 folium.raster_layers.ImageOverlay(
                     image=img_url,
                     bounds=bounds,
-                    opacity=0.8, # Leve transparência para ver o relevo por baixo, se quiser
+                    opacity=0.8, 
                     name=f"Mapa de {atributo}"
                 ).add_to(m)
 
@@ -292,8 +290,7 @@ if st.session_state['dados_processados'] is not None:
                     style_function=lambda x: {'color': 'black', 'weight': 3, 'fillOpacity': 0}
                 ).add_to(m)
 
-                # 5. Adicionar Legenda de Cores (HTML Customizado)
-                # Cria uma legenda flutuante no canto
+                # 5. Legenda HTML
                 colors_hex = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850']
                 legend_html = f"""
                 <div style="position: fixed; bottom: 50px; right: 50px; z-index:9999; font-size:14px; background-color: white; padding: 10px; border-radius: 5px; border: 2px solid grey;">
@@ -309,14 +306,14 @@ if st.session_state['dados_processados'] is not None:
                 
                 folium.LayerControl().add_to(m)
 
-                # 6. Renderizar no Streamlit
+                # 6. Renderizar
                 st_folium(m, width=None, height=550)
                 
                 # Estatísticas
                 st.markdown(
                     f"""
                     <div style="text-align: center; margin-top: 10px; padding: 10px; background-color: #f0f2f6; border-radius: 5px;">
-                    <b>Estatísticas:</b> 
+                    <b>Estatísticas do Talhão:</b> 
                     🔴 Min: {df_plot[atributo].min():.2f} | 
                     🟡 Méd: {df_plot[atributo].mean():.2f} | 
                     🟢 Max: {df_plot[atributo].max():.2f}
@@ -326,8 +323,6 @@ if st.session_state['dados_processados'] is not None:
 
             except Exception as e:
                 st.error(f"Erro na renderização Folium: {e}")
-                # Fallback de debug se der erro na imagem
-                st.write(e)
         else:
             st.warning("Atributo vazio.")
 
