@@ -35,9 +35,9 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. KRIGAGEM (MATRIZ PURA)
+# 2. KRIGAGEM COM EXTRAPOLAÇÃO DE BORDA (V56)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Processando Geoestatística...")
+@st.cache_data(show_spinner="⚙️ Geoestatística com Preenchimento Total (V56)...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     # --- ETAPA 1: LIMPEZA ---
     df = df_input.copy() 
@@ -56,29 +56,21 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         except Exception:
             pass 
 
-    # --- ETAPA 2: GRID E MÁSCARA ---
+    # --- ETAPA 2: GRID EXPANDIDO (O SEGREDO DO PREENCHIMENTO) ---
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer para garantir que a imagem cubra tudo (o recorte vem depois)
-    buffer = 0.002 
+    # BUFFER AGRESSIVO (0.01): Garante que a "massa" seja bem maior que o "cortador"
+    # Isso elimina os buracos brancos nos cantos
+    buffer = 0.01 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
-    try:
-        coords_poligono = geojson_data['features'][0]['geometry']['coordinates'][0]
-        poligono_path = MplPath(coords_poligono)
-        
-        xx, yy = np.meshgrid(grid_x, grid_y)
-        points_flat = np.vstack((xx.flatten(), yy.flatten())).T
-        
-        mask = poligono_path.contains_points(points_flat)
-        mask_matrix = mask.reshape(xx.shape)
-        
-    except Exception as e:
-        st.error(f"Erro ao processar contorno do GeoJSON: {e}")
-        return None
-
+    # Nesta etapa, NÃO aplicamos máscara. Deixamos calcular TUDO (retângulo cheio).
+    # O recorte será feito visualmente no Matplotlib (passo seguinte).
+    
+    xx, yy = np.meshgrid(grid_x, grid_y)
+    
     df_result = pd.DataFrame({
         'latitude': yy.flatten(),
         'longitude': xx.flatten()
@@ -101,11 +93,10 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
                 enable_plotting=False
             )
             
+            # Executa no retângulo inteiro expandido
             z, ss = OK.execute('grid', grid_x, grid_y)
-            z_data = z.data 
-            z_data[~mask_matrix] = np.nan 
             
-            df_result[col] = z_data.flatten()
+            df_result[col] = z.flatten()
             
         except Exception as e:
             print(f"Aviso: Falha ao interpolar {col}: {e}")
@@ -114,50 +105,51 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_final
 
 # ==============================================================================
-# 3. FUNÇÃO DE GERAÇÃO DE IMAGEM (CORRIGIDA PARA MATPLOTLIB NOVO)
+# 3. GERAÇÃO DE IMAGEM COM RECORTE CIRÚRGICO
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     """
-    Gera uma imagem PNG com curvas de nível suaves e recorte perfeito.
+    Gera imagem expandida e aplica o recorte do GeoJSON.
     """
-    # 1. Pivotar dados
+    # 1. Pivotar (Grid Expandido)
     pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
     Z = pivot.values
-    X = pivot.columns.values # Longitude
-    Y = pivot.index.values   # Latitude
+    X = pivot.columns.values 
+    Y = pivot.index.values   
     
-    # 2. Configurar Cores InCeres
+    # 2. Cores InCeres
     colors = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'] 
     cmap = mcolors.ListedColormap(colors)
     bounds = np.linspace(np.nanmin(Z), np.nanmax(Z), 6)
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
-    # 3. Criar Figura
+    # 3. Figura
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_axis_off()
     
-    # 4. Desenhar Curvas de Nível
+    # 4. Desenhar Contornos (Preenche tudo, inclusive fora)
     cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
     
-    # 5. MÁGICA DO RECORTE (CLIPPING) - BLINDADO
+    # 5. APLICAR O CORTE (O "COOKIE CUTTER")
     coords = geojson_data['features'][0]['geometry']['coordinates'][0]
     poly_path = MplPath(coords)
+    
+    # Cria o Patch (Máscara)
     patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='black', linewidth=2)
     ax.add_patch(patch)
     
-    # --- CORREÇÃO DO ERRO AQUI ---
-    # Verifica se é versão antiga (.collections) ou nova (set_clip_path direto)
+    # Aplica o Patch como Clip para o contourf
+    # (Compatível com Matplotlib novo e antigo)
     if hasattr(cf, 'collections'):
         for collection in cf.collections:
             collection.set_clip_path(patch)
     else:
         try:
-            # Tenta aplicar direto no objeto (Matplotlib 3.8+)
             cf.set_clip_path(patch)
-        except Exception:
-            pass # Se falhar, segue sem clip (mas geralmente funciona)
+        except:
+            pass
 
-    # 6. Ajustar limites
+    # 6. Ajustar limites para focar no grid (que já inclui buffer)
     ax.set_xlim(X.min(), X.max())
     ax.set_ylim(Y.min(), Y.max())
     
@@ -167,19 +159,17 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     plt.close(fig)
     img_data.seek(0)
     
+    # Retorna imagem e limites do grid (necessário para o Folium saber onde colar)
     return img_data, [[Y.min(), X.min()], [Y.max(), X.max()]], bounds
 
 # ==============================================================================
-# 4. INPUT DE DADOS
+# 4. INPUT E PROCESSAMENTO
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
 
 file_csv = st.sidebar.file_uploader("📂 Tabela de Solo (.csv)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
 
-# ==============================================================================
-# 5. PROCESSAMENTO
-# ==============================================================================
 if file_csv and file_geojson:
     df_raw = carregar_dados_blindado(file_csv)
     df_raw.columns = [c.strip().lower() for c in df_raw.columns]
@@ -217,114 +207,16 @@ if file_csv and file_geojson:
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
+                # Usa buffer expandido para garantir preenchimento
                 df_krig = processar_matrizes_interpolacao(df_raw, geojson_data, resolucao_grid=150)
                 st.session_state['dados_processados'] = df_krig
-                st.toast("Processamento Concluído!", icon="✅")
+                st.toast("Preenchimento Total Concluído!", icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro fatal na Krigagem: {e}")
 
 # ==============================================================================
-# 6. VISUALIZAÇÃO FOLIUM (V55)
+# 5. VISUALIZAÇÃO FOLIUM (FINAL)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
-    df_final = st.session_state['dados_processados'].copy()
-    
-    st.divider()
-    
-    # --- DOWNLOAD ---
-    c_down1, c_down2 = st.columns([2, 1])
-    with c_down1:
-        st.subheader("🏁 1. Exportação")
-        st.info("Baixe o arquivo PONTE para usar no App de Prescrição.")
-    with c_down2:
-        st.write("") 
-        st.write("") 
-        csv_ponte = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 BAIXAR ARQUIVO PONTE", csv_ponte, "ponte_triade.csv", "text/csv", type="primary", use_container_width=True)
-
-    st.divider()
-
-    # --- MAPA VISUAL ---
-    st.subheader("📊 2. Validação Visual (Padrão Folium)")
-    
-    cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
-    
-    if cols_ver:
-        atributo = st.selectbox("Selecione o mapa:", cols_ver, key='seletor_folium')
-        df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
-        df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
-        
-        if not df_plot.empty:
-            try:
-                # 1. Gerar a Imagem (Overlay) com Recorte Perfeito
-                img_buffer, bounds, intervals = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
-                
-                # 2. Configurar Mapa Folium
-                centro_lat = df_plot['latitude'].mean()
-                centro_lon = df_plot['longitude'].mean()
-                
-                m = folium.Map(
-                    location=[centro_lat, centro_lon],
-                    zoom_start=14,
-                    # Tiles do Google Satellite (Alta Resolução)
-                    tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', 
-                    attr='Google',
-                    name='Satélite'
-                )
-
-                # 3. Adicionar a Imagem Overlay
-                img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
-                img_url = f"data:image/png;base64,{img_b64}"
-                
-                folium.raster_layers.ImageOverlay(
-                    image=img_url,
-                    bounds=bounds,
-                    opacity=0.8, 
-                    name=f"Mapa de {atributo}"
-                ).add_to(m)
-
-                # 4. Adicionar Contorno Preto (GeoJSON)
-                folium.GeoJson(
-                    st.session_state['geojson_data'],
-                    style_function=lambda x: {'color': 'black', 'weight': 3, 'fillOpacity': 0}
-                ).add_to(m)
-
-                # 5. Legenda HTML
-                colors_hex = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850']
-                legend_html = f"""
-                <div style="position: fixed; bottom: 50px; right: 50px; z-index:9999; font-size:14px; background-color: white; padding: 10px; border-radius: 5px; border: 2px solid grey;">
-                <b>{atributo}</b><br>
-                <i style="background: {colors_hex[4]}; width: 15px; height: 15px; display: inline-block;"></i> > {intervals[4]:.2f}<br>
-                <i style="background: {colors_hex[3]}; width: 15px; height: 15px; display: inline-block;"></i> {intervals[3]:.2f} - {intervals[4]:.2f}<br>
-                <i style="background: {colors_hex[2]}; width: 15px; height: 15px; display: inline-block;"></i> {intervals[2]:.2f} - {intervals[3]:.2f}<br>
-                <i style="background: {colors_hex[1]}; width: 15px; height: 15px; display: inline-block;"></i> {intervals[1]:.2f} - {intervals[2]:.2f}<br>
-                <i style="background: {colors_hex[0]}; width: 15px; height: 15px; display: inline-block;"></i> < {intervals[1]:.2f}
-                </div>
-                """
-                m.get_root().html.add_child(folium.Element(legend_html))
-                
-                folium.LayerControl().add_to(m)
-
-                # 6. Renderizar
-                st_folium(m, width=None, height=550)
-                
-                # Estatísticas
-                st.markdown(
-                    f"""
-                    <div style="text-align: center; margin-top: 10px; padding: 10px; background-color: #f0f2f6; border-radius: 5px;">
-                    <b>Estatísticas do Talhão:</b> 
-                    🔴 Min: {df_plot[atributo].min():.2f} | 
-                    🟡 Méd: {df_plot[atributo].mean():.2f} | 
-                    🟢 Max: {df_plot[atributo].max():.2f}
-                    </div>
-                    """, unsafe_allow_html=True
-                )
-
-            except Exception as e:
-                st.error(f"Erro na renderização Folium: {e}")
-        else:
-            st.warning("Atributo vazio.")
-
-elif file_csv:
-    st.info("👆 Clique no botão 'Processar Matrizes' para iniciar.")
+    df
