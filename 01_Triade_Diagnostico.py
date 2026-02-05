@@ -31,11 +31,11 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (CALIBRADA V49)
+# 2. DEFINIÇÃO DA FUNÇÃO DE KRIGAGEM (V50 - MODO LEVE/SEGURO)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Processando Geoestatística Otimizada (V49)...")
-# Resolução de 200 é o equilíbrio perfeito entre definição e visibilidade
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
+@st.cache_data(show_spinner="⚙️ Processando Geoestatística Otimizada (V50)...")
+# REDUZI PARA 100 PARA GARANTIR QUE O NAVEGADOR CONSIGA DESENHAR
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     # --- ETAPA 1: LIMPEZA NUMÉRICA ---
     df = df_input.copy() 
     cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
@@ -57,8 +57,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer de precisão: garante que o ponto encoste na linha preta sem passar
-    buffer = 0.001 
+    # Buffer ajustado para 100x100
+    buffer = 0.002 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -89,7 +89,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=200):
             if len(dados_coluna) < 5: 
                 continue
 
-            # Variograma Esférico (Spherical) suaviza as transições de zona
             OK = OrdinaryKriging(
                 dados_coluna['longitude'], 
                 dados_coluna['latitude'], 
@@ -161,9 +160,10 @@ if file_csv and file_geojson:
         col_btn, _ = st.columns([1, 2])
         if col_btn.button("🚀 Processar Matrizes de Solo", type="primary"):
             try:
+                # Processamento mais leve
                 df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
                 st.session_state['dados_processados'] = df_krig
-                st.toast("Mapas Gerados com Sucesso!", icon="✅")
+                st.toast("Mapas Gerados (Modo Leve)!", icon="✅")
                 st.rerun()
             except Exception as e:
                 st.error(f"Erro fatal na Krigagem: {e}")
@@ -171,7 +171,7 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. VISUALIZAÇÃO "INCERES" CALIBRADA (V49)
+# 5. VISUALIZAÇÃO INCERES (V50 - MODO VISIBILIDADE GARANTIDA)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -218,7 +218,7 @@ if st.session_state['dados_processados'] is not None:
             val_max = df_plot[atributo].max()
             val_med = df_plot[atributo].mean()
 
-            # --- PALETA "HARD BREAKS" (Estilo InCeres) ---
+            # --- PALETA "HARD BREAKS" (InCeres) ---
             colorscale_inceres = [
                 [0.0, '#d73027'], [0.2, '#d73027'], # Vermelho
                 [0.2, '#fc8d59'], [0.4, '#fc8d59'], # Laranja
@@ -236,10 +236,8 @@ if st.session_state['dados_processados'] is not None:
                     lon=df_plot['longitude'], 
                     mode='markers', 
                     marker=dict(
-                        # --- CALIBRAÇÃO DE VISIBILIDADE E BORDAS ---
-                        # Size=10 é o ponto exato para a resolução de 200x200
-                        # Garante que apareça, preencha, mas não vaze muito.
-                        size=10,             
+                        # --- CONFIGURAÇÃO DE SEGURANÇA V50 ---
+                        size=22,            # Grande para garantir preenchimento com menos pontos
                         color=df_plot[atributo],
                         colorscale=colorscale_inceres,
                         cmin=val_min,
@@ -258,24 +256,24 @@ if st.session_state['dados_processados'] is not None:
                     hoverinfo='text' 
                 ))
                 
-                # Layout (Voltamos para Satélite para o visual rico)
+                # Layout V50: FUNDO 'open-street-map' GARANTE QUE NÃO TRAVA
                 fig.update_layout(
                     mapbox=dict(
-                        style="satellite", 
+                        style="open-street-map", 
                         center=dict(lat=centro_lat, lon=centro_lon),
-                        zoom=13.5
+                        zoom=13
                     ),
                     margin={"r":0,"t":0,"l":0,"b":0},
                     height=550
                 )
                 
-                # Contorno Preto Grosso
+                # Contorno Preto
                 if st.session_state['geojson_data']:
                     fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
                 
-                # --- FAIXA DE ESTATÍSTICAS ---
+                # --- PAINEL DE ESTATÍSTICAS ---
                 st.markdown(
                     f"""
                     <div style="
