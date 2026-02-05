@@ -56,8 +56,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # Buffer levemente aumentado para cobrir bordas
-    buffer = 0.002 
+    # Buffer aumentado para garantir cobertura total
+    buffer = 0.0025 
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -169,14 +169,14 @@ if file_csv and file_geojson:
         st.error(f"Faltam colunas: {faltantes}")
 
 # ==============================================================================
-# 5. EXPORTAÇÃO E VISUALIZAÇÃO REFINADA (V45 FINAL)
+# 5. EXPORTAÇÃO E VISUALIZAÇÃO "AGRÔNOMO VISUAL" (V46)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
     
     st.divider()
     
-    # --- DOWNLOAD (PRIORIDADE) ---
+    # --- DOWNLOAD ---
     c_down1, c_down2 = st.columns([2, 1])
     with c_down1:
         st.subheader("🏁 1. Exportação")
@@ -197,7 +197,7 @@ if st.session_state['dados_processados'] is not None:
 
     st.divider()
 
-    # --- MAPA REFINADO ---
+    # --- MAPA V46 (VISIBILIDADE TOTAL) ---
     st.subheader("📊 2. Validação Visual")
     
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
@@ -205,41 +205,54 @@ if st.session_state['dados_processados'] is not None:
     if cols_ver:
         atributo = st.selectbox("Selecione o mapa:", cols_ver, key='seletor_atributo_final')
         
-        # Limpeza Forçada
+        # Limpeza
         df_final[atributo] = pd.to_numeric(df_final[atributo], errors='coerce')
         df_plot = df_final.dropna(subset=[atributo, 'latitude', 'longitude'])
         
         if not df_plot.empty:
             
-            # Estatísticas para a barra inferior
+            # --- CÁLCULO DE ESTATÍSTICAS ---
             val_min = df_plot[atributo].min()
             val_med = df_plot[atributo].mean()
             val_max = df_plot[atributo].max()
 
+            # --- DEFINIÇÃO DE CORES DISCRETAS (5 FAIXAS BRUTAS) ---
+            # Isso força o mapa a ter cores definidas, sem degradê misturado
+            # Escala personalizada: Vermelho -> Laranja -> Amarelo -> Verde Claro -> Verde Escuro
+            escala_discreta = [
+                [0.0, 'rgb(165,0,38)'],   # Vermelho Escuro (Muito Baixo)
+                [0.2, 'rgb(215,48,39)'],  # Vermelho
+                [0.4, 'rgb(253,174,97)'], # Laranja
+                [0.6, 'rgb(255,255,191)'],# Amarelo
+                [0.8, 'rgb(166,217,106)'],# Verde Claro
+                [1.0, 'rgb(26,152,80)']   # Verde Escuro (Alto)
+            ]
+
             try:
+                # Centro dinâmico (Foco nos dados)
                 centro_lat = df_plot['latitude'].mean()
                 centro_lon = df_plot['longitude'].mean()
 
+                # Trocamos para 'open-street-map' para garantir que o fundo apareça
+                # O size=22 garante o preenchimento total (azulejo)
                 fig = go.Figure(go.Scattermapbox(
                     lat=df_plot['latitude'], 
                     lon=df_plot['longitude'], 
                     mode='markers', 
                     marker=dict(
-                        # --- SEGREDO DO PREENCHIMENTO ---
-                        size=14,            # Grande para sobreposição total (cria massa sólida)
-                        symbol='circle',    # O único que funciona nativamente
+                        size=22,            # GIGANTE para fechar todos os buracos
                         color=df_plot[atributo],
-                        colorscale='Jet',   # Padrão agronômico
-                        cmin=val_min,       # Força o extremo azul
-                        cmax=val_max,       # Força o extremo vermelho
-                        opacity=1.0,        # Sem transparência (Cor Bruta)
+                        colorscale=escala_discreta, # Cores brutas definidas acima
+                        cmin=val_min,
+                        cmax=val_max,
+                        opacity=1.0,        # Totalmente sólido
                         showscale=True,
                         colorbar=dict(
                             title=dict(text=atributo, font=dict(size=12)),
                             tickfont=dict(size=10),
                             len=0.7,
                             thickness=15,
-                            x=1.02 # Posiciona bem na direita
+                            x=1.02
                         )
                     ),
                     text=df_plot[atributo].apply(lambda x: f"{x:.2f}"),
@@ -249,36 +262,36 @@ if st.session_state['dados_processados'] is not None:
                 # Layout
                 fig.update_layout(
                     mapbox=dict(
-                        style="satellite", 
+                        style="open-street-map", # FUNDO CLARO GARANTIDO (Sem erro de satélite)
                         center=dict(lat=centro_lat, lon=centro_lon),
-                        zoom=13.5
+                        zoom=13
                     ),
                     margin={"r":0,"t":0,"l":0,"b":0},
-                    height=500
+                    height=550
                 )
                 
+                # Adiciona GeoJSON (Linha Preta Grossa)
                 if st.session_state['geojson_data']:
                     fig = adicionar_contorno_preto(fig, st.session_state['geojson_data'])
                 
                 st.plotly_chart(fig, use_container_width=True, key=f"mapa_render_{atributo}")
                 
-                # --- FAIXA DE ESTATÍSTICAS (NOVO PEDIDO) ---
+                # --- FAIXA DE ESTATÍSTICAS ---
                 st.markdown(
                     f"""
                     <div style="
                         background-color: #ffffff; 
-                        padding: 12px; 
+                        padding: 15px; 
                         border-radius: 8px; 
                         text-align: center; 
-                        font-size: 15px; 
+                        font-size: 16px; 
                         color: #000000;
-                        margin-top: -10px;
-                        box-shadow: 0px 2px 5px rgba(0,0,0,0.1);
-                        border: 1px solid #e0e0e0;">
-                        <b>📏 Estatísticas do Talhão:</b> &nbsp;&nbsp;&nbsp; 
-                        🔹 Mínimo: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
-                        🔸 Média: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
-                        🔺 Máximo: <b>{val_max:.2f}</b>
+                        margin-top: 5px;
+                        border: 2px solid #e0e0e0;">
+                        <b>📏 Estatísticas do Talhão ({atributo}):</b> <br>
+                        🔴 Min: <b>{val_min:.2f}</b> &nbsp;|&nbsp; 
+                        🟡 Méd: <b>{val_med:.2f}</b> &nbsp;|&nbsp; 
+                        🟢 Max: <b>{val_max:.2f}</b>
                     </div>
                     """, 
                     unsafe_allow_html=True
