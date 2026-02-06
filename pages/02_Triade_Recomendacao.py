@@ -5,25 +5,17 @@ import json
 from io import BytesIO
 import base64
 
-# --- 1. CONFIGURAÇÃO DE BACKEND (A VACINA ANTI-TRAVAMENTO) ---
+# --- 1. CONFIGURAÇÃO DE BACKEND (VACINA ANTI-TRAVAMENTO) ---
 import matplotlib
-matplotlib.use('Agg') # Força modo não-interativo (Essencial para Web)
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
 
-from pykrige.ok import OrdinaryKriging
 import folium
 from streamlit_folium import st_folium
 
-# Importando utils
-from utils_v43 import (
-    configurar_pagina, 
-    renderizar_cabecalho_sidebar, 
-    carregar_dados_blindado, 
-    validar_colunas
-)
 # ==============================================================================
 # 2. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
@@ -85,32 +77,17 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
 
     # --- FÓSFORO (TABELA FIXA) ---
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
-        
-        # Definição das condições (Faixas de P-rem)
         condicoes = [
-            (dfr['P_Rem'] <= 4.0),                          # Faixa 1
-            (dfr['P_Rem'] > 4.0) & (dfr['P_Rem'] <= 10.0),  # Faixa 2
-            (dfr['P_Rem'] > 10.0) & (dfr['P_Rem'] <= 19.0), # Faixa 3
-            (dfr['P_Rem'] > 19.0) & (dfr['P_Rem'] <= 30.0), # Faixa 4
-            (dfr['P_Rem'] > 30.0)                           # Faixa 5
+            (dfr['P_Rem'] <= 4.0),
+            (dfr['P_Rem'] > 4.0) & (dfr['P_Rem'] <= 10.0),
+            (dfr['P_Rem'] > 10.0) & (dfr['P_Rem'] <= 19.0),
+            (dfr['P_Rem'] > 19.0) & (dfr['P_Rem'] <= 30.0),
+            (dfr['P_Rem'] > 30.0)
         ]
-        
-        # Valores correspondentes a cada faixa (vindos da Sidebar)
-        valores_nc = [
-            nc_vals['nc_1'], 
-            nc_vals['nc_2'], 
-            nc_vals['nc_3'], 
-            nc_vals['nc_4'], 
-            nc_vals['nc_5']
-        ]
-        
-        # Aplica a lógica
+        valores_nc = [nc_vals['nc_1'], nc_vals['nc_2'], nc_vals['nc_3'], nc_vals['nc_4'], nc_vals['nc_5']]
         nc = np.select(condicoes, valores_nc, default=nc_vals['nc_5'])
-        
-        # Fator Tampão
         fct = (56.5 * dfr['P_Rem']**-0.52).clip(4, 40)
         
-        # Auditoria e Cálculo
         dfr['NC_Tabular'] = nc
         dfr['FCT_Calculado'] = fct.round(2)
         
@@ -143,7 +120,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     return dfr
 
 # ==============================================================================
-# 4. MOTOR VISUAL DO APP 1
+# 4. MOTOR VISUAL DO APP 1 (CORRIGIDO: RECORTE EXATO + 6 CORES)
 # ==============================================================================
 def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     try:
@@ -153,56 +130,96 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
 
     Z = pivot.values
     X = pivot.columns.values 
-    Y = pivot.index.values   
-    cmap = plt.get_cmap('jet') 
+    Y = pivot.index.values
+    
+    # --- DEFINIÇÃO DA PALETA DE 6 CORES (VERMELHO -> AZUL) ---
+    # Cores Hexadecimais para:
+    # 1. Muito Baixo (Vermelho)
+    # 2. Baixo (Laranja)
+    # 3. Médio (Amarelo)
+    # 4. Bom (Verde Claro)
+    # 5. Muito Bom (Verde Escuro)
+    # 6. Alto (Azul)
+    cores_personalizadas = ['#D7191C', '#FDAE61', '#FFFFBF', '#A6D96A', '#1A9641', '#2C7BB6']
+    cmap = mcolors.ListedColormap(cores_personalizadas)
+    
+    # Define os intervalos baseados nos dados (6 faixas)
     z_min, z_max = np.nanmin(Z), np.nanmax(Z)
     if z_min == z_max: z_max += 0.001
-    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
+    
+    # BoundaryNorm força as cores a serem discretas (faixas) e não gradiente
+    bounds = np.linspace(z_min, z_max, 7) # 7 limites para criar 6 faixas
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
+    # Criação da Figura
     plt.close('all') 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_axis_off()
     
-    cf = ax.contourf(X, Y, Z, levels=100, cmap=cmap, norm=norm, extend='both', alpha=1.0)
+    # Desenho do Contourf (Preenchimento)
+    cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=1.0)
     
+    # --- RECORTE EXATO PELO GEOJSON ---
     if geojson_data:
         try:
+            # Extrai as coordenadas do polígono externo
+            # O geojson geralmente é FeatureCollection -> Feature -> Geometry -> Coordinates
+            # Coordinates[0] é o anel externo
             coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+            
+            # Cria o "Caminho de Recorte" (Cookie Cutter)
             poly_path = MplPath(coords)
+            
+            # Cria o Patch invisível que servirá de molde
             patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', linewidth=0)
             ax.add_patch(patch)
-            for col in cf.collections: col.set_clip_path(patch)
-        except: pass
+            
+            # Aplica o recorte a todas as camadas do mapa
+            for col in cf.collections: 
+                col.set_clip_path(patch)
+        except Exception as e:
+            print(f"Erro no recorte: {e}")
 
+    # Ajuste dos limites para não sobrar espaço branco
     ax.set_xlim(X.min(), X.max())
     ax.set_ylim(Y.min(), Y.max())
     
+    # Salva a imagem transparente em memória
     img_data = BytesIO()
     plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=150)
     plt.close(fig)
     img_data.seek(0)
     
+    # Montagem no Folium
     centro = [Y.mean(), X.mean()]
     m = folium.Map(location=centro, zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google')
     
     img_b64 = base64.b64encode(img_data.getvalue()).decode()
-    bounds = [[Y.min(), X.min()], [Y.max(), X.max()]]
     
+    # Sobrepõe a imagem gerada
     folium.raster_layers.ImageOverlay(
         image=f"data:image/png;base64,{img_b64}",
-        bounds=bounds, opacity=0.8
+        bounds=[[Y.min(), X.min()], [Y.max(), X.max()]], 
+        opacity=0.85
     ).add_to(m)
     
+    # Desenha o Contorno Preto (Para garantir que a borda fique perfeita)
     if geojson_data:
         folium.GeoJson(
-            geojson_data, style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}
+            geojson_data, 
+            style_function=lambda x: {'color': 'black', 'weight': 3, 'fillOpacity': 0}
         ).add_to(m)
     
+    # Legenda HTML Personalizada (Com as 6 cores)
     legend_html = f"""
-    <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px;">
+    <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px; font-family: sans-serif;">
     <b>{titulo}</b><br>
-    Média: {np.nanmean(Z):.1f}<br>
-    Min: {z_min:.1f} | Máx: {z_max:.1f}
+    <span style='color:{cores_personalizadas[5]}'>■</span> Muito Alto ({bounds[5]:.1f} - {bounds[6]:.1f})<br>
+    <span style='color:{cores_personalizadas[4]}'>■</span> Alto ({bounds[4]:.1f} - {bounds[5]:.1f})<br>
+    <span style='color:{cores_personalizadas[3]}'>■</span> Bom ({bounds[3]:.1f} - {bounds[4]:.1f})<br>
+    <span style='color:{cores_personalizadas[2]}'>■</span> Médio ({bounds[2]:.1f} - {bounds[3]:.1f})<br>
+    <span style='color:{cores_personalizadas[1]}'>■</span> Baixo ({bounds[1]:.1f} - {bounds[2]:.1f})<br>
+    <span style='color:{cores_personalizadas[0]}'>■</span> M. Baixo ({bounds[0]:.1f} - {bounds[1]:.1f})
     </div>
     """
     m.get_root().html.add_child(folium.Element(legend_html))
@@ -254,68 +271,4 @@ with st.sidebar:
         st.markdown("##### 🎯 Níveis Críticos (mg/dm³) por Classe")
         c1, c2 = st.columns(2)
         with c1:
-            nc_1 = st.number_input("0 a 4 (Muito Arg.)", value=5.5)
-            nc_2 = st.number_input("4,1 a 10 (Argiloso)", value=8.0)
-            nc_3 = st.number_input("10,1 a 19 (Médio)", value=12.0)
-        with c2:
-            nc_4 = st.number_input("19,1 a 30 (Arenoso)", value=15.0)
-            nc_5 = st.number_input("> 30 (Areia Total)", value=20.0)
-            
-        nc_vals = {'nc_1': nc_1, 'nc_2': nc_2, 'nc_3': nc_3, 'nc_4': nc_4, 'nc_5': nc_5}
-
-    with st.expander("🟣 4. Potássio", expanded=False):
-        k_alvo_ctc = st.number_input("K Alvo CTC (%):", value=3.0)
-        k_export = st.number_input("Exportação K (kg/sc):", value=1.2)
-        k_teor = st.number_input("Teor K2O (%):", value=60.0)
-
-    with st.expander("⚪ 5. Gesso", expanded=False):
-        gesso_fator = st.number_input("Fator x Argila:", value=50.0)
-        gesso_min = st.number_input("Min (kg/ha):", value=0.0)
-        gesso_max = st.number_input("Max (kg/ha):", value=2000.0)
-
-# ==============================================================================
-# 6. EXECUÇÃO
-# ==============================================================================
-if st.button("🚀 Calcular e Gerar Mapas", type="primary"):
-    with st.spinner("Aplicando Tabela Fixa de Fósforo..."):
-        res = calcular_recomendacao(
-            df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
-            p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max, nc_vals
-        )
-        st.session_state['vrt_final'] = res
-        st.rerun()
-
-if 'vrt_final' in st.session_state:
-    df_show = st.session_state['vrt_final']
-    st.markdown("---")
-    
-    t1, t2, t3, t4 = st.tabs(["⚪ Calcário", "🔴 Fósforo", "🟣 Potássio", "🔵 Gesso"])
-    
-    with t1:
-        st.metric("Dose Média", f"{df_show['Dose_Calcario'].mean():.2f} ton/ha")
-        mapa = gerar_mapa_app1(df_show, 'Dose_Calcario', "Calcário (ton/ha)", geojson_data)
-        if mapa: st_folium(mapa, height=500, use_container_width=True)
-
-    with t2:
-        st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg/ha")
-        
-        st.info("Validação: Confira se o NC_Tabular bate com os valores que você definiu.")
-        cols_final = [c for c in ['P_Rem', 'P', 'NC_Tabular', 'FCT_Calculado', 'Dose_P2O5_Kg'] if c in df_show.columns]
-        st.dataframe(df_show[cols_final].head(50), height=200)
-
-        mapa = gerar_mapa_app1(df_show, 'Dose_P2O5_Kg', "Fósforo (kg/ha)", geojson_data)
-        if mapa: st_folium(mapa, height=500, use_container_width=True)
-
-    with t3:
-        st.metric("Dose Média", f"{df_show['Dose_K2O_Kg'].mean():.0f} kg/ha")
-        mapa = gerar_mapa_app1(df_show, 'Dose_K2O_Kg', "Potássio (kg/ha)", geojson_data)
-        if mapa: st_folium(mapa, height=500, use_container_width=True)
-
-    with t4:
-        st.metric("Dose Média", f"{df_show['Dose_Gesso_Kg'].mean():.0f} kg/ha")
-        mapa = gerar_mapa_app1(df_show, 'Dose_Gesso_Kg', "Gesso (kg/ha)", geojson_data)
-        if mapa: st_folium(mapa, height=500, use_container_width=True)
-
-    st.markdown("---")
-    csv = df_show.to_csv(index=False).encode('utf-8')
-    st.download_button("💾 Baixar CSV Final (Monitor)", csv, "recomendacao_vrt.csv", "text/csv", type='primary')
+            nc_1 = st.number_input("0 a 4 (Muito Arg.)", value=5.5
