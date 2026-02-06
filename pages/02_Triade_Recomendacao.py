@@ -40,6 +40,7 @@ def clean_data(df):
     renomear = {}
     for col in df.columns:
         for k, v in mapa.items():
+            # Verifica se o nome da coluna é igual ou contem o sinonimo
             if any(x == col or x in col.split('_') for x in v): 
                 renomear[col] = k
                 break
@@ -227,7 +228,7 @@ if 'res' in st.session_state:
         if m: st_folium(m, height=500, use_container_width=True)
     with t2:
         st.metric("Media", f"{df['Dose_P2O5_Kg'].mean():.0f} kg")
-        # --- TABELA DE AUDITORIA REMOVIDA AQUI ---
+        # TABELA REMOVIDA PARA EVITAR CRASH
         b64, bnds, lims = gerar_imagem_base64(df, 'Dose_P2O5_Kg', geo_str)
         m = renderizar_mapa(b64, bnds, lims, 'Fosforo (kg)', geo_data)
         if m: st_folium(m, height=500, use_container_width=True)
