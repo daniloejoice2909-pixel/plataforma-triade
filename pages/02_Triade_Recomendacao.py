@@ -137,69 +137,52 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
 # ==============================================================================
 # 4. MOTOR VISUAL DO APP 1
 # ==============================================================================
-def gerar_mapa_app1(df, atributo, titulo, geojson_data):
-    try:
-        pivot = df.pivot_table(index='latitude', columns='longitude', values=atributo)
-    except:
-        return None
-
-    Z = pivot.values
-    X = pivot.columns.values 
-    Y = pivot.index.values   
-    cmap = plt.get_cmap('jet') 
-    z_min, z_max = np.nanmin(Z), np.nanmax(Z)
-    if z_min == z_max: z_max += 0.001
-    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
-
-    plt.close('all') 
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.set_axis_off()
+st.divider()
     
-    cf = ax.contourf(X, Y, Z, levels=100, cmap=cmap, norm=norm, extend='both', alpha=1.0)
+    # Seletor de Mapa
+    cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
     
-    if geojson_data:
-        try:
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
-            poly_path = MplPath(coords)
-            patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', linewidth=0)
-            ax.add_patch(patch)
-            for col in cf.collections: col.set_clip_path(patch)
-        except: pass
-
-    ax.set_xlim(X.min(), X.max())
-    ax.set_ylim(Y.min(), Y.max())
-    
-    img_data = BytesIO()
-    plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=150)
-    plt.close(fig)
-    img_data.seek(0)
-    
-    centro = [Y.mean(), X.mean()]
-    m = folium.Map(location=centro, zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google')
-    
-    img_b64 = base64.b64encode(img_data.getvalue()).decode()
-    bounds = [[Y.min(), X.min()], [Y.max(), X.max()]]
-    
-    folium.raster_layers.ImageOverlay(
-        image=f"data:image/png;base64,{img_b64}",
-        bounds=bounds, opacity=0.8
-    ).add_to(m)
-    
-    if geojson_data:
-        folium.GeoJson(
-            geojson_data, style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}
-        ).add_to(m)
-    
-    legend_html = f"""
-    <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px;">
-    <b>{titulo}</b><br>
-    Média: {np.nanmean(Z):.1f}<br>
-    Min: {z_min:.1f} | Máx: {z_max:.1f}
-    </div>
-    """
-    m.get_root().html.add_child(folium.Element(legend_html))
-    
-    return m
+    if cols_ver:
+        atributo = st.selectbox("Selecione o mapa:", cols_ver)
+        df_plot = df_final.dropna(subset=[atributo])
+        
+        if not df_plot.empty:
+            try:
+                # Gera Imagem
+                img_buffer, bounds, intervals = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
+                
+                # Mapa Folium
+                centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
+                m = folium.Map(location=centro, zoom_start=14, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
+                
+                # Overlay da Imagem
+                img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
+                folium.raster_layers.ImageOverlay(
+                    image=f"data:image/png;base64,{img_b64}",
+                    bounds=bounds, opacity=0.85
+                ).add_to(m)
+                
+                # Contorno Preto
+                folium.GeoJson(
+                    st.session_state['geojson_data'],
+                    style_function=lambda x: {'color': 'black', 'weight': 3, 'fillOpacity': 0}
+                ).add_to(m)
+                
+                # Legenda Simples
+                legend_html = f"""
+                <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px;">
+                <b>{atributo}</b><br>
+                <span style="color:#d73027">■</span> Baixo ({intervals[0]:.1f} - {intervals[1]:.1f})<br>
+                <span style="color:#fee08b">■</span> Médio ({intervals[2]:.1f})<br>
+                <span style="color:#1a9850">■</span> Alto ({intervals[4]:.1f} - {intervals[5]:.1f})
+                </div>
+                """
+                m.get_root().html.add_child(folium.Element(legend_html))
+                
+                st_folium(m, height=500, use_container_width=True)
+                
+            except Exception as e:
+                st.error(f"Erro visual: {e}")
 
 # ==============================================================================
 # 5. SIDEBAR
