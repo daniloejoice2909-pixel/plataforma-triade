@@ -243,5 +243,57 @@ if 'res' in st.session_state:
         m = renderizar_mapa(b64, bnds, lims, 'Gesso (kg)', geo_data)
         if m: st_folium(m, height=500, use_container_width=True)
     
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button("💾 Baixar CSV", csv, "vrt_final.csv", "text/csv")
+    def gerar_pacote_shapes(df):
+    # 1. Prepara o GeoDataFrame
+    # Cria a geometria baseada na lat/lon
+    geometry = [Point(xy) for xy in zip(df.lon, df.lat)]
+    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
+    
+    # 2. Renomeia colunas (Shapefile limita nomes a 10 caracteres)
+    # Padrão universal para monitores: RATE (Taxa) ou DOSE
+    rename_map = {
+        'Dose_Calcario': 'RATE_CALC', # Taxa Calcário
+        'Dose_P2O5_Kg':  'RATE_P2O5', # Taxa Fósforo
+        'Dose_K2O_Kg':   'RATE_K2O',  # Taxa Potássio
+        'Dose_Gesso_Kg': 'RATE_GESSO' # Taxa Gesso
+    }
+    
+    # Filtra apenas as colunas de interesse para o arquivo ficar leve
+    cols_export = list(rename_map.keys()) + ['geometry']
+    gdf_export = gdf[cols_export].rename(columns=rename_map)
+    
+    # 3. Cria o ZIP em memória
+    mem_zip = BytesIO()
+    
+    with zipfile.ZipFile(mem_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            
+            # --- GERAÇÃO DOS ARQUIVOS ---
+            # Vamos gerar um Shapefile único contendo todas as taxas
+            # Monitores modernos leem o shape e você seleciona a coluna (Product)
+            
+            filename = "RECOMENDACAO_VRT"
+            filepath = os.path.join(tmpdir, filename)
+            
+            # Salva o Shapefile no disco temporário
+            gdf_export.to_file(f"{filepath}.shp", driver='ESRI Shapefile')
+            
+            # Extensões obrigatórias do Shapefile
+            extensoes = ['.shp', '.shx', '.dbf', '.prj']
+            
+            # --- ORGANIZAÇÃO NAS PASTAS (DENTRO DO ZIP) ---
+            for ext in extensoes:
+                arquivo_origem = f"{filepath}{ext}"
+                nome_arquivo = f"{filename}{ext}"
+                
+                # Pasta John Deere (Geralmente raiz ou pasta 'SHAPEFILES')
+                zf.write(arquivo_origem, arcname=f"JOHN_DEERE/{nome_arquivo}")
+                
+                # Pasta Trimble (Geralmente pasta 'AgGPS')
+                zf.write(arquivo_origem, arcname=f"TRIMBLE/{nome_arquivo}")
+                
+                # Pasta Genérica (Case, New Holland, etc)
+                zf.write(arquivo_origem, arcname=f"GERAL/{nome_arquivo}")
+                
+    mem_zip.seek(0)
+    return mem_zip
