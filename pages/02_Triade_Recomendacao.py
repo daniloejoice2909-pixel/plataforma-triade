@@ -34,10 +34,10 @@ st.title("🚜 Triade VRT - Motor de Recomendacao")
 # ==============================================================================
 def clean_data(df):
     df = df.copy()
-    # Remove caracteres estranhos e joga para minusculo
+    # Força conversão para string antes de limpar para evitar erro em dados mistos
     df.columns = [str(c).lower().strip() for c in df.columns]
     
-    # Mapa de Sinonimos
+    # Dicionário de padronização (Chave = Nome Final no Código)
     mapa = {
         'lat': ['latitude','lat','y','lat_wgs84'], 
         'lon': ['longitude','long','lon','x','lon_wgs84'],
@@ -59,7 +59,6 @@ def clean_data(df):
     
     if renomear: df = df.rename(columns=renomear)
     
-    # Converte tudo para numerico
     cols = ['Ca','Mg','K','P','Prem','Argila','CTC','lat','lon']
     for c in cols:
         if c in df.columns:
@@ -70,6 +69,7 @@ def clean_data(df):
 
 @st.cache_data(show_spinner=False)
 def calc_vrt(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt, p_exp, p_teor, k_alvo, k_exp, k_teor, g_fat, g_min, g_max, nc_vals):
+    # AQUI ESTAVA O ERRO: A variável oficial é 'd'
     d = df.copy()
     
     # --- CALAGEM ---
@@ -81,20 +81,28 @@ def calc_vrt(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt, p_exp, p_teor, k_alvo, 
     else: 
         d['Dose_Calcario'] = 0.0
     
-     # FÓSFORO
-    if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
-        nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
-        fct = (56.5 * dfr['P_Rem']**-0.52).clip(4, 40)
-        # Auditoria
-        dfr['NC_Calculado'] = nc.round(2)
-        dfr['FCT_Calculado'] = fct.round(2)
+    # --- FOSFORO (Corrigido para usar 'd' e 'Prem') ---
+    if 'Prem' in d.columns and 'P' in d.columns:
+        c = [
+            (d['Prem'] <= 4.0),
+            (d['Prem'] > 4.0) & (d['Prem'] <= 10.0),
+            (d['Prem'] > 10.0) & (d['Prem'] <= 19.0),
+            (d['Prem'] > 19.0) & (d['Prem'] <= 30.0),
+            (d['Prem'] > 30.0)
+        ]
+        v = [nc_vals['n1'], nc_vals['n2'], nc_vals['n3'], nc_vals['n4'], nc_vals['n5']]
         
-        dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
-        dose_manu = prod * p_exp
-        total_p = dose_const + dose_manu
-        dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
-        dfr['Dose_P2O5_Kg'] = dfr['Dose_P2O5_Kg'].round(0)
-    else: dfr['Dose_P2O5_Kg'] = 0.0
+        nc = np.select(c, v, default=nc_vals['n5'])
+        fct = (56.5 * d['Prem']**-0.52).clip(4,40)
+        
+        d['NC_Tabular'] = nc
+        
+        # Dose = (NC - P_Atual) * Fator + Manutenção
+        dose_correcao = np.where(nc > d['P'], (nc - d['P']) * fct, 0)
+        d['Dose_P2O5_Kg'] = ((dose_correcao + (prod*p_exp)) / (p_teor/100)).round(0)
+    else: 
+        d['Dose_P2O5_Kg'] = 0.0
+        d['NC_Tabular'] = 0.0
 
     # --- POTASSIO ---
     if 'K' in d.columns and 'CTC' in d.columns:
@@ -166,18 +174,15 @@ def gerar_imagem_base64(df, col, geojson_str):
     # --- RECORTE EXATO (CLIPPING) ---
     if geojson_data:
         try:
-            # Extrai a geometria com segurança (suporta Polygon e MultiPolygon)
-            geom_type = geojson_data['features'][0]['geometry']['type']
-            raw_coords = geojson_data['features'][0]['geometry']['coordinates']
-            
+            geom = geojson_data['features'][0]['geometry']
             coords = []
-            if geom_type == 'Polygon':
-                # Polygon: Coordinates = [[x,y], [x,y]...]
-                coords = raw_coords[0]
-            elif geom_type == 'MultiPolygon':
-                # MultiPolygon: Coordinates = [ [[x,y]...], [[x,y]...] ]
-                # Pegamos o maior anel externo
-                coords = max(raw_coords, key=lambda x: len(x[0]))[0]
+            
+            # Lógica Robusta para Polygon vs MultiPolygon
+            if geom['type'] == 'Polygon':
+                coords = geom['coordinates'][0]
+            elif geom['type'] == 'MultiPolygon':
+                # Pega o maior anel
+                coords = max(geom['coordinates'], key=lambda x: len(x[0]))[0]
             
             if len(coords) > 0:
                 poly_path = MplPath(coords)
@@ -185,8 +190,7 @@ def gerar_imagem_base64(df, col, geojson_str):
                 ax.add_patch(patch)
                 for c in cf.collections: c.set_clip_path(patch)
         except Exception as e:
-            # Não exibe erro para não poluir, apenas gera sem recorte
-            pass
+            pass # Falha silenciosa no recorte, desenha quadrado
     
     ax.set_xlim(X.min(), X.max()); ax.set_ylim(Y.min(), Y.max())
     buf = BytesIO()
@@ -247,7 +251,6 @@ with st.sidebar:
         mgo = st.number_input("MgO%", value=9.0)
         prnt = st.number_input("PRNT%", value=80.0)
     
-    # --- FÓSFORO (Valores Corrigidos) ---
     with st.expander("🔴 3. Fósforo (Tabela Fixa)", True):
         p_exp = st.number_input("Exp P (kg/sc)", value=0.8)
         p_teor = st.number_input("Teor P2O5%", value=21.0)
@@ -289,13 +292,11 @@ if 'res' in st.session_state:
     with t2:
         st.metric("Media", f"{df['Dose_P2O5_Kg'].mean():.0f} kg")
         
-        # --- TABELA DE AUDITORIA RESTAURADA ---
+        # Auditoria de Fosforo
         cols_audit = ['Prem','P','NC_Tabular','Dose_P2O5_Kg']
-        cols_exist = [c for c in cols_audit if c in df.columns]
-        if cols_exist:
-            st.dataframe(df[cols_exist].head(50), height=150)
-        else:
-            st.warning("Colunas de auditoria não encontradas (P ou Prem ausentes)")
+        cols_ok = [c for c in cols_audit if c in df.columns]
+        if cols_ok: st.dataframe(df[cols_ok].head(50), height=150)
+        else: st.warning("Dados de Fosforo não calculados")
             
         b64, bnds, lims = gerar_imagem_base64(df, 'Dose_P2O5_Kg', geo_str)
         m = renderizar_mapa(b64, bnds, lims, 'Fosforo (kg)', geo_data)
