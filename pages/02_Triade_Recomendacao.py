@@ -5,25 +5,110 @@ import json
 from io import BytesIO
 import base64
 
-# --- 1. CONFIGURAÇÃO DE BACKEND ---
-import matplotlib
-matplotlib.use('Agg') 
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from matplotlib.patches import PathPatch
-from matplotlib.path import Path as MplPath
+ ==============================================================================
+# 1. KRIGAGEM OTIMIZADA (V58 - LEVE)
+# ==============================================================================
+@st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
+    df = df_input.copy() 
+    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
+    cols_validas = []
+    
+    # Limpeza Rápida
+    for col in df.columns:
+        if col.lower() in cols_proibidas: continue
+        try:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            if df[col].notna().sum() > 5: cols_validas.append(col)
+        except: pass 
 
-import folium
-from streamlit_folium import st_folium
+    # Grid Inteligente (Buffer reduzido para 0.003 para não pesar)
+    x_min, x_max = df['longitude'].min(), df['longitude'].max()
+    y_min, y_max = df['latitude'].min(), df['latitude'].max()
+    buffer = 0.003 
+    
+    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
+    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
+    
+    # Prepara DataFrame de Resultado
+    xx, yy = np.meshgrid(grid_x, grid_y)
+    df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
+
+    # Interpolação
+    for col in cols_validas:
+        try:
+            dados = df[['longitude', 'latitude', col]].dropna()
+            if len(dados) < 5: continue
+
+            # Variograma Linear é mais rápido e estável
+            OK = OrdinaryKriging(
+                dados['longitude'], dados['latitude'], dados[col], 
+                variogram_model='linear', verbose=False, enable_plotting=False
+            )
+            z, _ = OK.execute('grid', grid_x, grid_y)
+            df_result[col] = z.flatten()
+        except: pass
+
+    return df_result.dropna(subset=cols_validas, how='all')
 
 # ==============================================================================
-# 2. CONFIGURAÇÃO DA PÁGINA
+# 2. GERAÇÃO DE IMAGEM (MATPLOTLIB SEGURO)
+# ==============================================================================
+def gerar_imagem_overlay(df_plot, atributo, geojson_data):
+    # 1. Prepara Dados
+    pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
+    Z = pivot.values
+    X = pivot.columns.values 
+    Y = pivot.index.values   
+    
+    # 2. Configura Cores (InCeres Style)
+    colors = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'] 
+    cmap = mcolors.ListedColormap(colors)
+    bounds = np.linspace(np.nanmin(Z), np.nanmax(Z), 6)
+    norm = mcolors.BoundaryNorm(bounds, cmap.N)
+
+    # 3. Gera Figura (MODO AGG - SEM GUI)
+    plt.close('all') # Limpa memória anterior
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.set_axis_off()
+    
+    # 4. Desenha (Contourf Suave)
+    cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
+    
+    # 5. Aplica Recorte (Clipping)
+    try:
+        coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+        poly_path = MplPath(coords)
+        patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='black', linewidth=2)
+        ax.add_patch(patch)
+        
+        # Compatibilidade de Versão Matplotlib
+        if hasattr(cf, 'collections'):
+            for col in cf.collections: col.set_clip_path(patch)
+        else:
+            cf.set_clip_path(patch)
+    except Exception as e:
+        print(f"Aviso de Clipping: {e}")
+
+    # 6. Finaliza
+    ax.set_xlim(X.min(), X.max())
+    ax.set_ylim(Y.min(), Y.max())
+    
+    img_data = BytesIO()
+    plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=100) # DPI 100 é mais leve
+    plt.close(fig) # Fecha figura para liberar RAM
+    img_data.seek(0)
+    
+    return img_data, [[Y.min(), X.min()], [Y.max(), X.max()]], bounds
+
+# ==============================================================================
+# 3. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
 st.set_page_config(page_title="Tríade VRT", layout="wide")
 st.title("🚜 Tríade VRT - Motor de Recomendação")
 
 # ==============================================================================
-# 3. FUNÇÕES UTILITÁRIAS
+# 4. FUNÇÕES UTILITÁRIAS
 # ==============================================================================
 def limpar_e_padronizar_dados(df):
     df_novo = df.copy()
@@ -128,7 +213,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     return dfr
 
 # ==============================================================================
-# 4. MOTOR VISUAL DO APP 1
+# 5. MOTOR VISUAL DO APP 1
 # ==============================================================================
 def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     try: pivot = df.pivot_table(index='latitude', columns='longitude', values=atributo)
@@ -193,7 +278,7 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     return m
 
 # ==============================================================================
-# 5. SIDEBAR
+# 6. SIDEBAR
 # ==============================================================================
 with st.sidebar:
     st.header("📂 Arquivos de Entrada")
@@ -257,7 +342,7 @@ with st.sidebar:
         gesso_max = st.number_input("Max (kg/ha):", value=2000.0)
 
 # ==============================================================================
-# 6. EXECUÇÃO
+# 7. EXECUÇÃO
 # ==============================================================================
 if st.button("🚀 Calcular e Gerar Mapas", type="primary"):
     with st.spinner("Aplicando Tabela Fixa de Fósforo..."):
