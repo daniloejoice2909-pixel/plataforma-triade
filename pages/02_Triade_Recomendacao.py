@@ -81,25 +81,20 @@ def calc_vrt(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt, p_exp, p_teor, k_alvo, 
     else: 
         d['Dose_Calcario'] = 0.0
     
-    # --- FOSFORO (Atualizado com NC e Formula 1999) ---
-    if 'Prem' in d.columns and 'P' in d.columns:
-        c = [(d['Prem']<=4), (d['Prem']<=10), (d['Prem']<=19), (d['Prem']<=30), (d['Prem']>30)]
-        v = [nc_vals['n1'], nc_vals['n2'], nc_vals['n3'], nc_vals['n4'], nc_vals['n5']]
+     # FÓSFORO
+    if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
+        nc = (nc_a + nc_b * dfr['P_Rem']).clip(8, 60)
+        fct = (56.5 * dfr['P_Rem']**-0.52).clip(4, 40)
+        # Auditoria
+        dfr['NC_Calculado'] = nc.round(2)
+        dfr['FCT_Calculado'] = fct.round(2)
         
-        # Nível Crítico Tabular
-        nc = np.select(c, v, default=nc_vals['n5'])
-        
-        # Fator Tampão (Alvarez V. et al., 1999)
-        fct = (56.5 * d['Prem']**-0.52).clip(4,40)
-        
-        d['NC_Tabular'] = nc
-        
-        # Cálculo da Dose: (NC - P_Atual) * Fator + Manutenção
-        dose_correcao = np.where(nc > d['P'], (nc - d['P']) * fct, 0)
-        d['Dose_P2O5_Kg'] = ((dose_correcao + (prod*p_exp)) / (p_teor/100)).round(0)
-    else: 
-        d['Dose_P2O5_Kg'] = 0.0
-        d['NC_Tabular'] = 0.0
+        dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
+        dose_manu = prod * p_exp
+        total_p = dose_const + dose_manu
+        dfr['Dose_P2O5_Kg'] = (total_p / (p_teor_val/100.0)) if p_teor_val > 0 else 0
+        dfr['Dose_P2O5_Kg'] = dfr['Dose_P2O5_Kg'].round(0)
+    else: dfr['Dose_P2O5_Kg'] = 0.0
 
     # --- POTASSIO ---
     if 'K' in d.columns and 'CTC' in d.columns:
