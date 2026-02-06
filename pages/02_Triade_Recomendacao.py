@@ -5,17 +5,25 @@ import json
 from io import BytesIO
 import base64
 
-# --- 1. CONFIGURAÇÃO DE BACKEND (VACINA ANTI-TRAVAMENTO) ---
+# --- 1. CONFIGURAÇÃO DE BACKEND (A VACINA ANTI-TRAVAMENTO) ---
 import matplotlib
-matplotlib.use('Agg') 
+matplotlib.use('Agg') # Força modo não-interativo (Essencial para Web)
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
 
+from pykrige.ok import OrdinaryKriging
 import folium
 from streamlit_folium import st_folium
 
+# Importando utils
+from utils_v43 import (
+    configurar_pagina, 
+    renderizar_cabecalho_sidebar, 
+    carregar_dados_blindado, 
+    validar_colunas
+)
 # ==============================================================================
 # 2. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
