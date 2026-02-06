@@ -14,7 +14,7 @@ import folium
 from streamlit_folium import st_folium
 
 # ==============================================================================
-# CONFIGURAÇÃO INICIAL
+# CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
 st.set_page_config(page_title="Tríade VRT", layout="wide")
 st.title("🚜 Tríade VRT - Motor de Recomendação")
@@ -58,12 +58,12 @@ def limpar_e_padronizar_dados(df):
     return df_novo
 
 # ==============================================================================
-# 2. MOTOR DE CÁLCULO
+# 2. MOTOR DE CÁLCULO (COM TABELA FIXA)
 # ==============================================================================
 def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max, nc_vals):
     dfr = df.copy()
     
-    # --- CALAGEM ---
+    # CALAGEM
     if all(c in dfr.columns for c in ['Ca','Mg','CTC']):
         meta_ca = dfr['CTC'] * (ca_alvo / 100.0)
         meta_mg = dfr['CTC'] * (mg_alvo / 100.0)
@@ -75,7 +75,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     else:
         dfr['Dose_Calcario'] = 0.0
 
-    # --- FÓSFORO (TABELA FIXA) ---
+    # FÓSFORO (LÓGICA DE TABELA FIXA)
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
         condicoes = [
             (dfr['P_Rem'] <= 4.0),
@@ -84,14 +84,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
             (dfr['P_Rem'] > 19.0) & (dfr['P_Rem'] <= 30.0),
             (dfr['P_Rem'] > 30.0)
         ]
-        
-        valores_nc = [
-            nc_vals['nc_1'], 
-            nc_vals['nc_2'], 
-            nc_vals['nc_3'], 
-            nc_vals['nc_4'], 
-            nc_vals['nc_5']
-        ]
+        valores_nc = [nc_vals['nc_1'], nc_vals['nc_2'], nc_vals['nc_3'], nc_vals['nc_4'], nc_vals['nc_5']]
         
         nc = np.select(condicoes, valores_nc, default=nc_vals['nc_5'])
         fct = (56.5 * dfr['P_Rem']**-0.52).clip(4, 40)
@@ -107,7 +100,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     else:
         dfr['Dose_P2O5_Kg'] = 0.0
 
-    # --- POTÁSSIO ---
+    # POTÁSSIO
     if 'K' in dfr.columns and 'CTC' in dfr.columns:
         k_meta = dfr['CTC'] * (k_alvo_val/100.0)
         k_vals = dfr['K'].copy()
@@ -119,7 +112,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     else:
         dfr['Dose_K2O_Kg'] = 0.0
 
-    # --- GESSO ---
+    # GESSO
     if 'Argila' in dfr.columns:
         dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
     else:
@@ -140,7 +133,7 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     X = pivot.columns.values 
     Y = pivot.index.values   
     
-    # 6 Cores: Vermelho -> Laranja -> Amarelo -> Verde Claro -> Verde Escuro -> Azul
+    # PALETA 6 CORES: Vermelho -> Laranja -> Amarelo -> Verde Claro -> Verde Escuro -> Azul
     cores_personalizadas = ['#D7191C', '#FDAE61', '#FFFFBF', '#A6D96A', '#1A9641', '#2C7BB6']
     cmap = mcolors.ListedColormap(cores_personalizadas)
     
@@ -153,4 +146,26 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_axis_off()
     
-    cf = ax.contourf(X, Y, Z, levels=
+    # Desenho Sólido
+    cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=1.0)
+    
+    # Recorte Exato
+    if geojson_data:
+        try:
+            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+            poly_path = MplPath(coords)
+            patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', linewidth=0)
+            ax.add_patch(patch)
+            for col in cf.collections: col.set_clip_path(patch)
+        except: pass
+
+    ax.set_xlim(X.min(), X.max())
+    ax.set_ylim(Y.min(), Y.max())
+    
+    img_data = BytesIO()
+    plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=150)
+    plt.close(fig)
+    img_data.seek(0)
+    
+    centro = [Y.mean(), X.mean()]
+    m = folium.Map(location=
