@@ -59,7 +59,7 @@ def limpar_e_padronizar_dados(df):
 
     return df_novo
 
-def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max, nc_a, nc_b):
+def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max, nc_vals):
     dfr = df.copy()
     
     # CALAGEM
@@ -73,12 +73,33 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
         dfr['Dose_Calcario'] = np.maximum(def_ca/ap_ca, def_mg/ap_mg).round(2)
     else: dfr['Dose_Calcario'] = 0.0
 
-    # FÓSFORO (Fórmula Ajustada MT Econômico)
+    # --- FÓSFORO (LÓGICA DE TABELA FIXA) ---
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
-        nc = (nc_a + nc_b * dfr['P_Rem']).clip(5, 60) # Clip minimo ajustado para 5
+        
+        # Aqui substituimos a equação pela sua TABELA FIXA
+        condicoes = [
+            (dfr['P_Rem'] <= 4.0),                      # Faixa 1: 0 - 4
+            (dfr['P_Rem'] > 4.0) & (dfr['P_Rem'] <= 10.0),  # Faixa 2: 4.1 - 10
+            (dfr['P_Rem'] > 10.0) & (dfr['P_Rem'] <= 19.0), # Faixa 3: 10.1 - 19
+            (dfr['P_Rem'] > 19.0) & (dfr['P_Rem'] <= 30.0), # Faixa 4: 19.1 - 30
+            (dfr['P_Rem'] > 30.0)                       # Faixa 5: > 30
+        ]
+        
+        valores_nc = [
+            nc_vals['nc_1'], # 5.5
+            nc_vals['nc_2'], # 8.0
+            nc_vals['nc_3'], # 12.0
+            nc_vals['nc_4'], # 15.0
+            nc_vals['nc_5']  # 20.0
+        ]
+        
+        # Aplica a lógica "Se Faixa X, então Valor Y"
+        nc = np.select(condicoes, valores_nc, default=nc_vals['nc_5'])
+        
+        # Fator Tampão continua sendo calculado (física do solo)
         fct = (56.5 * dfr['P_Rem']**-0.52).clip(4, 40)
         
-        dfr['NC_Calculado'] = nc.round(2)
+        dfr['NC_Tabular'] = nc # Coluna para Auditoria
         dfr['FCT_Calculado'] = fct.round(2)
         
         dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
@@ -208,15 +229,22 @@ with st.sidebar:
         teor_mgo = st.number_input("MgO Calcário (%):", value=12.0)
         prnt = st.number_input("PRNT (%):", value=85.0)
 
-    with st.expander("🔴 3. Fósforo (MT Econômico)", expanded=True):
+    # --- NOVA SESSÃO: TABELA FIXA DE FÓSFORO ---
+    with st.expander("🔴 3. Fósforo (Tabela Fixa)", expanded=True):
         p_export = st.number_input("Exportação P (kg/sc):", value=0.8)
         p_teor = st.number_input("Teor P2O5 (%):", value=52.0)
-        # --- CALIBRAÇÃO FUNDAÇÃO MT (ECONÔMICA) ---
-        nc_a = 4.5  # Intercepto baixo (chão de 4.5 ppm para argilosos)
-        nc_b = 0.45 # Inclinação moderada
-        fct_a, fct_b = 56.5, -0.52
-        st.caption(f"Fórmula MT Econômica: {nc_a} + {nc_b} * P-rem")
-        # ------------------------------------------
+        
+        st.markdown("##### 🎯 Níveis Críticos (mg/dm³) por Classe")
+        c1, c2 = st.columns(2)
+        with c1:
+            nc_1 = st.number_input("0 a 4 (Muito Arg.)", value=5.5)
+            nc_2 = st.number_input("4,1 a 10 (Argiloso)", value=8.0)
+            nc_3 = st.number_input("10,1 a 19 (Médio)", value=12.0)
+        with c2:
+            nc_4 = st.number_input("19,1 a 30 (Arenoso)", value=15.0)
+            nc_5 = st.number_input("> 30 (Areia Total)", value=20.0)
+            
+        nc_vals = {'nc_1': nc_1, 'nc_2': nc_2, 'nc_3': nc_3, 'nc_4': nc_4, 'nc_5': nc_5}
 
     with st.expander("🟣 4. Potássio", expanded=False):
         k_alvo_ctc = st.number_input("K Alvo CTC (%):", value=3.0)
@@ -232,10 +260,10 @@ with st.sidebar:
 # 6. EXECUÇÃO
 # ==============================================================================
 if st.button("🚀 Calcular e Gerar Mapas", type="primary"):
-    with st.spinner("Processando recomendação..."):
+    with st.spinner("Aplicando Tabela Fixa de Fósforo..."):
         res = calcular_recomendacao(
             df_input, produtividade_alvo, alvo_ca, alvo_mg, teor_cao, teor_mgo, prnt,
-            p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max, nc_a, nc_b
+            p_export, p_teor, k_alvo_ctc, k_export, k_teor, gesso_fator, gesso_min, gesso_max, nc_vals
         )
         st.session_state['vrt_final'] = res
         st.rerun()
@@ -253,11 +281,11 @@ if 'vrt_final' in st.session_state:
 
     with t2:
         st.metric("Dose Média", f"{df_show['Dose_P2O5_Kg'].mean():.0f} kg/ha")
-        st.info("Visualização de Nível Crítico (NC) e Doses:")
         
-        # Auditoria Rápida
-        cols_final = [c for c in ['P_Rem', 'P', 'NC_Calculado', 'FCT_Calculado', 'Dose_P2O5_Kg'] if c in df_show.columns]
-        st.dataframe(df_show[cols_final].head(50), height=150)
+        st.info("Validação: Confira se o NC_Tabular bate com os valores que você definiu.")
+        # Auditoria para conferir a tabela fixa
+        cols_final = [c for c in ['P_Rem', 'P', 'NC_Tabular', 'FCT_Calculado', 'Dose_P2O5_Kg'] if c in df_show.columns]
+        st.dataframe(df_show[cols_final].head(50), height=200)
 
         mapa = gerar_mapa_app1(df_show, 'Dose_P2O5_Kg', "Fósforo (kg/ha)", geojson_data)
         if mapa: st_folium(mapa, height=500, use_container_width=True)
