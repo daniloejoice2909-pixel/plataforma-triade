@@ -5,7 +5,7 @@ import json
 from io import BytesIO
 import base64
 
-# --- 1. CONFIGURAÇÃO DE BACKEND (VACINA ANTI-TRAVAMENTO) ---
+# --- 1. CONFIGURAÇÃO DE BACKEND (PREVINE TRAVAMENTOS) ---
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
@@ -23,10 +23,11 @@ st.set_page_config(page_title="Tríade VRT", layout="wide")
 st.title("🚜 Tríade VRT - Motor de Recomendação")
 
 # ==============================================================================
-# 3. FUNÇÕES UTILITÁRIAS
+# 3. FUNÇÕES DE LIMPEZA E PADRONIZAÇÃO
 # ==============================================================================
 def limpar_e_padronizar_dados(df):
     df_novo = df.copy()
+    # Padroniza colunas para minúsculo e sem espaços
     df_novo.columns = [c.lower().strip() for c in df_novo.columns]
     
     sinonimos = {
@@ -60,10 +61,13 @@ def limpar_e_padronizar_dados(df):
 
     return df_novo
 
+# ==============================================================================
+# 4. MOTOR DE CÁLCULO (COM TABELA FIXA DE FÓSFORO)
+# ==============================================================================
 def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp, p_teor_val, k_alvo_val, k_exp, k_teor_val, g_fat, g_min, g_max, nc_vals):
     dfr = df.copy()
     
-    # --- CALAGEM ---
+    # --- A. CALAGEM ---
     if all(c in dfr.columns for c in ['Ca','Mg','CTC']):
         meta_ca = dfr['CTC'] * (ca_alvo / 100.0)
         meta_mg = dfr['CTC'] * (mg_alvo / 100.0)
@@ -75,22 +79,37 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     else:
         dfr['Dose_Calcario'] = 0.0
 
-    # --- FÓSFORO (TABELA FIXA) ---
+    # --- B. FÓSFORO (LÓGICA DE TABELA FIXA) ---
     if 'P_Rem' in dfr.columns and 'P' in dfr.columns:
+        # Condições baseadas nas faixas de P-rem
         condicoes = [
-            (dfr['P_Rem'] <= 4.0),
-            (dfr['P_Rem'] > 4.0) & (dfr['P_Rem'] <= 10.0),
-            (dfr['P_Rem'] > 10.0) & (dfr['P_Rem'] <= 19.0),
-            (dfr['P_Rem'] > 19.0) & (dfr['P_Rem'] <= 30.0),
-            (dfr['P_Rem'] > 30.0)
+            (dfr['P_Rem'] <= 4.0),                          # 0 a 4
+            (dfr['P_Rem'] > 4.0) & (dfr['P_Rem'] <= 10.0),  # 4,1 a 10
+            (dfr['P_Rem'] > 10.0) & (dfr['P_Rem'] <= 19.0), # 10,1 a 19
+            (dfr['P_Rem'] > 19.0) & (dfr['P_Rem'] <= 30.0), # 19,1 a 30
+            (dfr['P_Rem'] > 30.0)                           # > 30
         ]
-        valores_nc = [nc_vals['nc_1'], nc_vals['nc_2'], nc_vals['nc_3'], nc_vals['nc_4'], nc_vals['nc_5']]
+        
+        # Valores vindos da Sidebar
+        valores_nc = [
+            nc_vals['nc_1'], 
+            nc_vals['nc_2'], 
+            nc_vals['nc_3'], 
+            nc_vals['nc_4'], 
+            nc_vals['nc_5']
+        ]
+        
+        # Seleciona o Nível Crítico (NC) com base na faixa
         nc = np.select(condicoes, valores_nc, default=nc_vals['nc_5'])
+        
+        # Calcula Fator Tampão (Resistência do solo)
         fct = (56.5 * dfr['P_Rem']**-0.52).clip(4, 40)
         
+        # Colunas de Auditoria
         dfr['NC_Tabular'] = nc
         dfr['FCT_Calculado'] = fct.round(2)
         
+        # Cálculo da Dose Final
         dose_const = np.where(nc > dfr['P'], (nc - dfr['P']) * fct, 0)
         dose_manu = prod * p_exp
         total_p = dose_const + dose_manu
@@ -99,11 +118,14 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     else:
         dfr['Dose_P2O5_Kg'] = 0.0
 
-    # --- POTÁSSIO ---
+    # --- C. POTÁSSIO ---
     if 'K' in dfr.columns and 'CTC' in dfr.columns:
         k_meta = dfr['CTC'] * (k_alvo_val/100.0)
         k_vals = dfr['K'].copy()
-        if k_vals.mean() > 10: k_vals = k_vals / 391.0 
+        # Se média > 10, assume mg/dm3 e converte para cmol
+        if k_vals.mean() > 10: 
+            k_vals = k_vals / 391.0 
+        
         dose_k_const = (k_meta - k_vals).clip(lower=0) * 940.0
         dose_k_manu = prod * k_exp
         total_k = dose_k_const + dose_k_manu
@@ -111,7 +133,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     else:
         dfr['Dose_K2O_Kg'] = 0.0
 
-    # --- GESSO ---
+    # --- D. GESSO ---
     if 'Argila' in dfr.columns:
         dfr['Dose_Gesso_Kg'] = (dfr['Argila'] * g_fat).clip(lower=g_min, upper=g_max)
     else:
@@ -120,7 +142,7 @@ def calcular_recomendacao(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt_val, p_exp,
     return dfr
 
 # ==============================================================================
-# 4. MOTOR VISUAL DO APP 1 (CORRIGIDO: RECORTE EXATO + 6 CORES)
+# 5. MOTOR VISUAL DO APP 1 (IMAGEM SÓLIDA + RECORTE + 6 CORES)
 # ==============================================================================
 def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     try:
@@ -130,7 +152,7 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
 
     Z = pivot.values
     X = pivot.columns.values 
-    Y = pivot.index.values
+    Y = pivot.index.values   
     
     # --- DEFINIÇÃO DA PALETA DE 6 CORES (VERMELHO -> AZUL) ---
     # Cores Hexadecimais para:
@@ -156,18 +178,16 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.set_axis_off()
     
-    # Desenho do Contourf (Preenchimento)
+    # Desenho do Contourf (Preenchimento Sólido)
     cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=1.0)
     
     # --- RECORTE EXATO PELO GEOJSON ---
     if geojson_data:
         try:
             # Extrai as coordenadas do polígono externo
-            # O geojson geralmente é FeatureCollection -> Feature -> Geometry -> Coordinates
-            # Coordinates[0] é o anel externo
             coords = geojson_data['features'][0]['geometry']['coordinates'][0]
             
-            # Cria o "Caminho de Recorte" (Cookie Cutter)
+            # Cria o "Caminho de Recorte"
             poly_path = MplPath(coords)
             
             # Cria o Patch invisível que servirá de molde
@@ -203,7 +223,7 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
         opacity=0.85
     ).add_to(m)
     
-    # Desenha o Contorno Preto (Para garantir que a borda fique perfeita)
+    # Desenha o Contorno Preto (Para acabamento perfeito)
     if geojson_data:
         folium.GeoJson(
             geojson_data, 
@@ -227,7 +247,7 @@ def gerar_mapa_app1(df, atributo, titulo, geojson_data):
     return m
 
 # ==============================================================================
-# 5. SIDEBAR
+# 6. SIDEBAR - ENTRADA DE DADOS E PARÂMETROS
 # ==============================================================================
 with st.sidebar:
     st.header("📂 Arquivos de Entrada")
@@ -241,34 +261,3 @@ with st.sidebar:
         try:
             try: df_raw = pd.read_csv(uploaded_csv, sep=None, engine='python')
             except: df_raw = pd.read_csv(uploaded_csv)
-            df_input = limpar_e_padronizar_dados(df_raw)
-            geojson_data = json.load(uploaded_geojson)
-            st.success(f"Dados prontos! {len(df_input)} pontos.")
-        except Exception as e:
-            st.error(f"Erro: {e}")
-            st.stop()
-    else:
-        st.warning("Faça upload do CSV e do GeoJSON.")
-        st.stop()
-
-    st.markdown("---")
-    st.header("⚙️ Parâmetros")
-    
-    with st.expander("🌱 1. Cultura & Produtividade", expanded=True):
-        produtividade_alvo = st.number_input("Meta (sc/ha):", value=75.0)
-
-    with st.expander("⚪ 2. Calagem", expanded=False):
-        alvo_ca = st.number_input("Alvo Ca (% CTC):", value=55.0)
-        alvo_mg = st.number_input("Alvo Mg (% CTC):", value=15.0)
-        teor_cao = st.number_input("CaO Calcário (%):", value=38.0)
-        teor_mgo = st.number_input("MgO Calcário (%):", value=12.0)
-        prnt = st.number_input("PRNT (%):", value=85.0)
-
-    with st.expander("🔴 3. Fósforo (Tabela Fixa)", expanded=True):
-        p_export = st.number_input("Exportação P (kg/sc):", value=0.8)
-        p_teor = st.number_input("Teor P2O5 (%):", value=52.0)
-        
-        st.markdown("##### 🎯 Níveis Críticos (mg/dm³) por Classe")
-        c1, c2 = st.columns(2)
-        with c1:
-            nc_1 = st.number_input("0 a 4 (Muito Arg.)", value=5.5
