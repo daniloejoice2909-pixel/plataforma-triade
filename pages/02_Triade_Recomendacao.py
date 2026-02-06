@@ -34,8 +34,10 @@ st.title("🚜 Triade VRT - Motor de Recomendacao")
 # ==============================================================================
 def clean_data(df):
     df = df.copy()
+    # Remove caracteres estranhos e joga para minusculo
     df.columns = [str(c).lower().strip() for c in df.columns]
     
+    # Mapa de Sinonimos
     mapa = {
         'lat': ['latitude','lat','y','lat_wgs84'], 
         'lon': ['longitude','long','lon','x','lon_wgs84'],
@@ -57,6 +59,7 @@ def clean_data(df):
     
     if renomear: df = df.rename(columns=renomear)
     
+    # Converte tudo para numerico
     cols = ['Ca','Mg','K','P','Prem','Argila','CTC','lat','lon']
     for c in cols:
         if c in df.columns:
@@ -69,95 +72,88 @@ def clean_data(df):
 def calc_vrt(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt, p_exp, p_teor, k_alvo, k_exp, k_teor, g_fat, g_min, g_max, nc_vals):
     d = df.copy()
     
-    # Calagem
+    # --- CALAGEM ---
     if all(x in d.columns for x in ['Ca','Mg','CTC']):
         nc_ca, nc_mg = d['CTC']*(ca_alvo/100), d['CTC']*(mg_alvo/100)
         fat_ca = max((cao*10/560)*(prnt/100),0.001)
         fat_mg = max((mgo*10/403)*(prnt/100),0.001)
         d['Dose_Calcario'] = np.maximum((nc_ca - d['Ca'])/fat_ca, (nc_mg - d['Mg'])/fat_mg).clip(0).round(2)
-    else: d['Dose_Calcario'] = 0.0
+    else: 
+        d['Dose_Calcario'] = 0.0
     
-    # Fosforo
+    # --- FOSFORO (Atualizado com NC e Formula 1999) ---
     if 'Prem' in d.columns and 'P' in d.columns:
         c = [(d['Prem']<=4), (d['Prem']<=10), (d['Prem']<=19), (d['Prem']<=30), (d['Prem']>30)]
         v = [nc_vals['n1'], nc_vals['n2'], nc_vals['n3'], nc_vals['n4'], nc_vals['n5']]
+        
+        # Nível Crítico Tabular
         nc = np.select(c, v, default=nc_vals['n5'])
+        
+        # Fator Tampão (Alvarez V. et al., 1999)
         fct = (56.5 * d['Prem']**-0.52).clip(4,40)
+        
         d['NC_Tabular'] = nc
-        dose = np.where(nc>d['P'],(nc-d['P'])*fct,0)
-        d['Dose_P2O5_Kg'] = ((dose + (prod*p_exp)) / (p_teor/100)).round(0)
-    else: d['Dose_P2O5_Kg'] = 0.0
+        
+        # Cálculo da Dose: (NC - P_Atual) * Fator + Manutenção
+        dose_correcao = np.where(nc > d['P'], (nc - d['P']) * fct, 0)
+        d['Dose_P2O5_Kg'] = ((dose_correcao + (prod*p_exp)) / (p_teor/100)).round(0)
+    else: 
+        d['Dose_P2O5_Kg'] = 0.0
+        d['NC_Tabular'] = 0.0
 
-    # Potassio
+    # --- POTASSIO ---
     if 'K' in d.columns and 'CTC' in d.columns:
         kval = d['K']/391 if d['K'].mean() > 10 else d['K']
         dk = ((d['CTC']*(k_alvo/100) - kval).clip(0)*940) + (prod*k_exp)
         d['Dose_K2O_Kg'] = (dk / (k_teor/100)).round(0)
-    else: d['Dose_K2O_Kg'] = 0.0
+    else: 
+        d['Dose_K2O_Kg'] = 0.0
 
-    # Gesso
+    # --- GESSO ---
     if 'Argila' in d.columns:
         d['Dose_Gesso_Kg'] = (d['Argila']*g_fat).clip(g_min, g_max)
-    else: d['Dose_Gesso_Kg'] = 0.0
+    else: 
+        d['Dose_Gesso_Kg'] = 0.0
+        
     return d
 
 # ==============================================================================
 # 2. FUNÇÃO DE EXPORTAÇÃO (SHAPEFILE)
 # ==============================================================================
 def gerar_pacote_shapes(df):
-    if not HAS_GEOPANDAS:
-        return None
-
-    # Cria geometria
+    if not HAS_GEOPANDAS: return None
     geometry = [Point(xy) for xy in zip(df.lon, df.lat)]
     gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
-    
-    # Renomeia para padrão curto (max 10 chars)
-    rename_map = {
-        'Dose_Calcario': 'RATE_CALC',
-        'Dose_P2O5_Kg':  'RATE_P2O5',
-        'Dose_K2O_Kg':   'RATE_K2O',
-        'Dose_Gesso_Kg': 'RATE_GESSO'
-    }
-    
-    # Filtra colunas
+    rename_map = {'Dose_Calcario': 'RATE_CALC', 'Dose_P2O5_Kg': 'RATE_P2O5', 
+                  'Dose_K2O_Kg': 'RATE_K2O', 'Dose_Gesso_Kg': 'RATE_GESSO'}
     cols_exist = [c for c in rename_map.keys() if c in df.columns]
-    cols_export = cols_exist + ['geometry']
-    gdf_export = gdf[cols_export].rename(columns=rename_map)
+    gdf_export = gdf[cols_exist + ['geometry']].rename(columns=rename_map)
     
     mem_zip = BytesIO()
-    
     with zipfile.ZipFile(mem_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
         with tempfile.TemporaryDirectory() as tmpdir:
             filename = "RECOMENDACAO_VRT"
             filepath = os.path.join(tmpdir, filename)
-            
-            # Gera arquivos
             gdf_export.to_file(f"{filepath}.shp", driver='ESRI Shapefile')
-            
-            # Organiza pastas
-            extensoes = ['.shp', '.shx', '.dbf', '.prj']
-            for ext in extensoes:
-                origem = f"{filepath}{ext}"
-                nome = f"{filename}{ext}"
-                if os.path.exists(origem):
-                    zf.write(origem, arcname=f"JOHN_DEERE/{nome}")
-                    zf.write(origem, arcname=f"TRIMBLE/{nome}")
-                    zf.write(origem, arcname=f"GERAL/{nome}")
-                
+            for ext in ['.shp', '.shx', '.dbf', '.prj']:
+                if os.path.exists(f"{filepath}{ext}"):
+                    zf.write(f"{filepath}{ext}", arcname=f"{filename}{ext}")
     mem_zip.seek(0)
     return mem_zip
 
 # ==============================================================================
-# 3. MOTOR GRÁFICO (CACHEADO)
+# 3. MOTOR GRÁFICO (RECORTE CORRIGIDO)
 # ==============================================================================
 @st.cache_data(show_spinner=False)
 def gerar_imagem_base64(df, col, geojson_str):
     geojson_data = json.loads(geojson_str) if geojson_str else None
+    
     try: pivot = df.pivot_table(index='lat', columns='lon', values=col)
     except: return None, None, None
+    
     Z, X, Y = pivot.values, pivot.columns.values, pivot.index.values
     
+    # Paleta Vermelho -> Azul
     colors = ['#D7191C', '#FDAE61', '#FFFFBF', '#A6D96A', '#1A9641', '#2C7BB6']
     cmap = mcolors.ListedColormap(colors)
     zmin, zmax = np.nanmin(Z), np.nanmax(Z)
@@ -168,16 +164,34 @@ def gerar_imagem_base64(df, col, geojson_str):
     plt.close('all')
     fig, ax = plt.subplots(figsize=(5, 5))
     ax.set_axis_off()
+    
+    # Desenha o mapa
     cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
     
+    # --- RECORTE EXATO (CLIPPING) ---
     if geojson_data:
         try:
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
-            if isinstance(coords[0][0], float) == False: coords = coords[0] 
-            patch = PathPatch(MplPath(coords), transform=ax.transData, facecolor='none', linewidth=0)
-            ax.add_patch(patch)
-            for c in cf.collections: c.set_clip_path(patch)
-        except: pass
+            # Extrai a geometria com segurança (suporta Polygon e MultiPolygon)
+            geom_type = geojson_data['features'][0]['geometry']['type']
+            raw_coords = geojson_data['features'][0]['geometry']['coordinates']
+            
+            coords = []
+            if geom_type == 'Polygon':
+                # Polygon: Coordinates = [[x,y], [x,y]...]
+                coords = raw_coords[0]
+            elif geom_type == 'MultiPolygon':
+                # MultiPolygon: Coordinates = [ [[x,y]...], [[x,y]...] ]
+                # Pegamos o maior anel externo
+                coords = max(raw_coords, key=lambda x: len(x[0]))[0]
+            
+            if len(coords) > 0:
+                poly_path = MplPath(coords)
+                patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', linewidth=0)
+                ax.add_patch(patch)
+                for c in cf.collections: c.set_clip_path(patch)
+        except Exception as e:
+            # Não exibe erro para não poluir, apenas gera sem recorte
+            pass
     
     ax.set_xlim(X.min(), X.max()); ax.set_ylim(Y.min(), Y.max())
     buf = BytesIO()
@@ -230,23 +244,27 @@ with st.sidebar:
         st.success(f"CSV OK: {len(df_in)} linhas")
 
     st.markdown("---")
-    with st.expander("🌱 1. Produtividade (Soja)", True): prod = st.number_input("Meta (sc/ha)", value=80.0)
+    with st.expander("🌱 1. Cultura", True): prod = st.number_input("Meta (sc/ha)", value=80.0)
     with st.expander("⚪ 2. Calagem"):
         ca_alvo = st.number_input("Alvo Ca%", value=60.0)
         mg_alvo = st.number_input("Alvo Mg%", value=18.0)
         cao = st.number_input("CaO%", value=36.0)
         mgo = st.number_input("MgO%", value=9.0)
         prnt = st.number_input("PRNT%", value=80.0)
+    
+    # --- FÓSFORO (Valores Corrigidos) ---
     with st.expander("🔴 3. Fósforo (Tabela Fixa)", True):
         p_exp = st.number_input("Exp P (kg/sc)", value=0.8)
         p_teor = st.number_input("Teor P2O5%", value=21.0)
+        st.write("Níveis Críticos (mg/dm³)")
         c1, c2 = st.columns(2)
-        n1 = c1.number_input("0-4", value=5.5)
-        n2 = c1.number_input("4-10", value=7.5)
-        n3 = c1.number_input("10-19", value=11.5)
-        n4 = c2.number_input("19-30", value=15.0)
-        n5 = c2.number_input(">30", value=20.0)
+        n1 = c1.number_input("0-4 (M. Arg)", value=5.5)
+        n2 = c1.number_input("4-10 (Arg)", value=8.0)
+        n3 = c1.number_input("10-19 (Med)", value=12.0)
+        n4 = c2.number_input("19-30 (Are)", value=15.0)
+        n5 = c2.number_input(">30 (Total)", value=20.0)
         nc_vals = {'n1':n1, 'n2':n2, 'n3':n3, 'n4':n4, 'n5':n5}
+    
     with st.expander("🟣 4. Potassio"):
         k_alvo = st.number_input("K Alvo CTC%", value=3.5)
         k_exp = st.number_input("Exp K (kg/sc)", value=1.2)
@@ -275,6 +293,15 @@ if 'res' in st.session_state:
         if m: st_folium(m, height=500, use_container_width=True)
     with t2:
         st.metric("Media", f"{df['Dose_P2O5_Kg'].mean():.0f} kg")
+        
+        # --- TABELA DE AUDITORIA RESTAURADA ---
+        cols_audit = ['Prem','P','NC_Tabular','Dose_P2O5_Kg']
+        cols_exist = [c for c in cols_audit if c in df.columns]
+        if cols_exist:
+            st.dataframe(df[cols_exist].head(50), height=150)
+        else:
+            st.warning("Colunas de auditoria não encontradas (P ou Prem ausentes)")
+            
         b64, bnds, lims = gerar_imagem_base64(df, 'Dose_P2O5_Kg', geo_str)
         m = renderizar_mapa(b64, bnds, lims, 'Fosforo (kg)', geo_data)
         if m: st_folium(m, height=500, use_container_width=True)
@@ -292,16 +319,14 @@ if 'res' in st.session_state:
     st.markdown("---")
     st.subheader("📦 Exportação")
     
-    c_csv, c_shp = st.columns(2)
-    
-    with c_csv:
+    c1, c2 = st.columns(2)
+    with c1:
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button("💾 Baixar Excel/CSV", csv, "vrt_final.csv", "text/csv")
-        
-    with c_shp:
+    with c2:
         if HAS_GEOPANDAS:
             zip_data = gerar_pacote_shapes(df)
             if zip_data:
                 st.download_button("🚜 Baixar Shapes (JD/Trimble)", zip_data, "SHAPES_VRT.zip", "application/zip", type='primary')
         else:
-            st.error("Biblioteca GeoPandas não instalada. Não é possível gerar Shapefiles.")
+            st.warning("Biblioteca GeoPandas não detectada.")
