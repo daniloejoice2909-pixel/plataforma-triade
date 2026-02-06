@@ -4,6 +4,11 @@ import numpy as np
 import json
 from io import BytesIO
 import base64
+import zipfile
+import tempfile
+import os
+
+# --- IMPORTS GRÁFICOS E GEO ---
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -13,6 +18,14 @@ from matplotlib.path import Path as MplPath
 import folium
 from streamlit_folium import st_folium
 
+# Tenta importar geopandas (Para Shapefile)
+try:
+    import geopandas as gpd
+    from shapely.geometry import Point
+    HAS_GEOPANDAS = True
+except ImportError:
+    HAS_GEOPANDAS = False
+
 st.set_page_config(page_title="Triade VRT", layout="wide")
 st.title("🚜 Triade VRT - Motor de Recomendacao")
 
@@ -21,10 +34,8 @@ st.title("🚜 Triade VRT - Motor de Recomendacao")
 # ==============================================================================
 def clean_data(df):
     df = df.copy()
-    # Remove caracteres estranhos e joga para minusculo
     df.columns = [str(c).lower().strip() for c in df.columns]
     
-    # Mapa de Sinonimos
     mapa = {
         'lat': ['latitude','lat','y','lat_wgs84'], 
         'lon': ['longitude','long','lon','x','lon_wgs84'],
@@ -40,14 +51,12 @@ def clean_data(df):
     renomear = {}
     for col in df.columns:
         for k, v in mapa.items():
-            # Verifica se o nome da coluna é igual ou contem o sinonimo
             if any(x == col or x in col.split('_') for x in v): 
                 renomear[col] = k
                 break
     
     if renomear: df = df.rename(columns=renomear)
     
-    # Converte tudo para numerico
     cols = ['Ca','Mg','K','P','Prem','Argila','CTC','lat','lon']
     for c in cols:
         if c in df.columns:
@@ -60,46 +69,87 @@ def clean_data(df):
 def calc_vrt(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt, p_exp, p_teor, k_alvo, k_exp, k_teor, g_fat, g_min, g_max, nc_vals):
     d = df.copy()
     
-    # --- CALAGEM ---
+    # Calagem
     if all(x in d.columns for x in ['Ca','Mg','CTC']):
         nc_ca, nc_mg = d['CTC']*(ca_alvo/100), d['CTC']*(mg_alvo/100)
         fat_ca = max((cao*10/560)*(prnt/100),0.001)
         fat_mg = max((mgo*10/403)*(prnt/100),0.001)
         d['Dose_Calcario'] = np.maximum((nc_ca - d['Ca'])/fat_ca, (nc_mg - d['Mg'])/fat_mg).clip(0).round(2)
-    else: 
-        d['Dose_Calcario'] = 0.0
+    else: d['Dose_Calcario'] = 0.0
     
-    # --- FOSFORO ---
+    # Fosforo
     if 'Prem' in d.columns and 'P' in d.columns:
         c = [(d['Prem']<=4), (d['Prem']<=10), (d['Prem']<=19), (d['Prem']<=30), (d['Prem']>30)]
         v = [nc_vals['n1'], nc_vals['n2'], nc_vals['n3'], nc_vals['n4'], nc_vals['n5']]
         nc = np.select(c, v, default=nc_vals['n5'])
         fct = (56.5 * d['Prem']**-0.52).clip(4,40)
-        
         d['NC_Tabular'] = nc
         dose = np.where(nc>d['P'],(nc-d['P'])*fct,0)
         d['Dose_P2O5_Kg'] = ((dose + (prod*p_exp)) / (p_teor/100)).round(0)
-    else: 
-        d['Dose_P2O5_Kg'] = 0.0
+    else: d['Dose_P2O5_Kg'] = 0.0
 
-    # --- POTASSIO ---
+    # Potassio
     if 'K' in d.columns and 'CTC' in d.columns:
         kval = d['K']/391 if d['K'].mean() > 10 else d['K']
         dk = ((d['CTC']*(k_alvo/100) - kval).clip(0)*940) + (prod*k_exp)
         d['Dose_K2O_Kg'] = (dk / (k_teor/100)).round(0)
-    else: 
-        d['Dose_K2O_Kg'] = 0.0
+    else: d['Dose_K2O_Kg'] = 0.0
 
-    # --- GESSO ---
+    # Gesso
     if 'Argila' in d.columns:
         d['Dose_Gesso_Kg'] = (d['Argila']*g_fat).clip(g_min, g_max)
-    else: 
-        d['Dose_Gesso_Kg'] = 0.0
-        
+    else: d['Dose_Gesso_Kg'] = 0.0
     return d
 
 # ==============================================================================
-# 2. MOTOR GRÁFICO (CACHEADO)
+# 2. FUNÇÃO DE EXPORTAÇÃO (SHAPEFILE)
+# ==============================================================================
+def gerar_pacote_shapes(df):
+    if not HAS_GEOPANDAS:
+        return None
+
+    # Cria geometria
+    geometry = [Point(xy) for xy in zip(df.lon, df.lat)]
+    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
+    
+    # Renomeia para padrão curto (max 10 chars)
+    rename_map = {
+        'Dose_Calcario': 'RATE_CALC',
+        'Dose_P2O5_Kg':  'RATE_P2O5',
+        'Dose_K2O_Kg':   'RATE_K2O',
+        'Dose_Gesso_Kg': 'RATE_GESSO'
+    }
+    
+    # Filtra colunas
+    cols_exist = [c for c in rename_map.keys() if c in df.columns]
+    cols_export = cols_exist + ['geometry']
+    gdf_export = gdf[cols_export].rename(columns=rename_map)
+    
+    mem_zip = BytesIO()
+    
+    with zipfile.ZipFile(mem_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filename = "RECOMENDACAO_VRT"
+            filepath = os.path.join(tmpdir, filename)
+            
+            # Gera arquivos
+            gdf_export.to_file(f"{filepath}.shp", driver='ESRI Shapefile')
+            
+            # Organiza pastas
+            extensoes = ['.shp', '.shx', '.dbf', '.prj']
+            for ext in extensoes:
+                origem = f"{filepath}{ext}"
+                nome = f"{filename}{ext}"
+                if os.path.exists(origem):
+                    zf.write(origem, arcname=f"JOHN_DEERE/{nome}")
+                    zf.write(origem, arcname=f"TRIMBLE/{nome}")
+                    zf.write(origem, arcname=f"GERAL/{nome}")
+                
+    mem_zip.seek(0)
+    return mem_zip
+
+# ==============================================================================
+# 3. MOTOR GRÁFICO (CACHEADO)
 # ==============================================================================
 @st.cache_data(show_spinner=False)
 def gerar_imagem_base64(df, col, geojson_str):
@@ -108,10 +158,8 @@ def gerar_imagem_base64(df, col, geojson_str):
     except: return None, None, None
     Z, X, Y = pivot.values, pivot.columns.values, pivot.index.values
     
-    # Paleta Fixa 6 Cores
     colors = ['#D7191C', '#FDAE61', '#FFFFBF', '#A6D96A', '#1A9641', '#2C7BB6']
     cmap = mcolors.ListedColormap(colors)
-    
     zmin, zmax = np.nanmin(Z), np.nanmax(Z)
     if zmin == zmax: zmax += 0.01
     bounds = np.linspace(zmin, zmax, 7)
@@ -122,7 +170,6 @@ def gerar_imagem_base64(df, col, geojson_str):
     ax.set_axis_off()
     cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
     
-    # Recorte Seguro
     if geojson_data:
         try:
             coords = geojson_data['features'][0]['geometry']['coordinates'][0]
@@ -161,7 +208,7 @@ def renderizar_mapa(b64, bounds_vals, limits, titulo, geojson_data):
     return m
 
 # ==============================================================================
-# 3. INTERFACE
+# 4. INTERFACE
 # ==============================================================================
 with st.sidebar:
     st.header("📂 Arquivos")
@@ -183,7 +230,7 @@ with st.sidebar:
         st.success(f"CSV OK: {len(df_in)} linhas")
 
     st.markdown("---")
-    with st.expander("🌱 1. Cultura", True): prod = st.number_input("Meta (sc/ha)", value=75.0)
+    with st.expander("🌱 1. Produtividade (Soja)", True): prod = st.number_input("Meta (sc/ha)", value=80.0)
     with st.expander("⚪ 2. Calagem"):
         ca_alvo = st.number_input("Alvo Ca%", value=60.0)
         mg_alvo = st.number_input("Alvo Mg%", value=18.0)
@@ -206,7 +253,7 @@ with st.sidebar:
         k_teor = st.number_input("Teor K2O%", value=60.0)
     with st.expander("⚪ 5. Gesso"):
         g_fat = st.number_input("Fator x Arg", value=15.0)
-        g_min = st.number_input("Min kg/ha", value=500.0)
+        g_min = st.number_input("Min kg/ha", value=400.0)
         g_max = st.number_input("Max kg/ha", value=1000.0)
 
 if st.button("🚀 Gerar Mapas", type="primary"):
@@ -228,7 +275,6 @@ if 'res' in st.session_state:
         if m: st_folium(m, height=500, use_container_width=True)
     with t2:
         st.metric("Media", f"{df['Dose_P2O5_Kg'].mean():.0f} kg")
-        # TABELA REMOVIDA PARA EVITAR CRASH
         b64, bnds, lims = gerar_imagem_base64(df, 'Dose_P2O5_Kg', geo_str)
         m = renderizar_mapa(b64, bnds, lims, 'Fosforo (kg)', geo_data)
         if m: st_folium(m, height=500, use_container_width=True)
@@ -243,57 +289,19 @@ if 'res' in st.session_state:
         m = renderizar_mapa(b64, bnds, lims, 'Gesso (kg)', geo_data)
         if m: st_folium(m, height=500, use_container_width=True)
     
-    def gerar_pacote_shapes(df):
-    # 1. Prepara o GeoDataFrame
-    # Cria a geometria baseada na lat/lon
-    geometry = [Point(xy) for xy in zip(df.lon, df.lat)]
-    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
+    st.markdown("---")
+    st.subheader("📦 Exportação")
     
-    # 2. Renomeia colunas (Shapefile limita nomes a 10 caracteres)
-    # Padrão universal para monitores: RATE (Taxa) ou DOSE
-    rename_map = {
-        'Dose_Calcario': 'RATE_CALC', # Taxa Calcário
-        'Dose_P2O5_Kg':  'RATE_P2O5', # Taxa Fósforo
-        'Dose_K2O_Kg':   'RATE_K2O',  # Taxa Potássio
-        'Dose_Gesso_Kg': 'RATE_GESSO' # Taxa Gesso
-    }
+    c_csv, c_shp = st.columns(2)
     
-    # Filtra apenas as colunas de interesse para o arquivo ficar leve
-    cols_export = list(rename_map.keys()) + ['geometry']
-    gdf_export = gdf[cols_export].rename(columns=rename_map)
-    
-    # 3. Cria o ZIP em memória
-    mem_zip = BytesIO()
-    
-    with zipfile.ZipFile(mem_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            
-            # --- GERAÇÃO DOS ARQUIVOS ---
-            # Vamos gerar um Shapefile único contendo todas as taxas
-            # Monitores modernos leem o shape e você seleciona a coluna (Product)
-            
-            filename = "RECOMENDACAO_VRT"
-            filepath = os.path.join(tmpdir, filename)
-            
-            # Salva o Shapefile no disco temporário
-            gdf_export.to_file(f"{filepath}.shp", driver='ESRI Shapefile')
-            
-            # Extensões obrigatórias do Shapefile
-            extensoes = ['.shp', '.shx', '.dbf', '.prj']
-            
-            # --- ORGANIZAÇÃO NAS PASTAS (DENTRO DO ZIP) ---
-            for ext in extensoes:
-                arquivo_origem = f"{filepath}{ext}"
-                nome_arquivo = f"{filename}{ext}"
-                
-                # Pasta John Deere (Geralmente raiz ou pasta 'SHAPEFILES')
-                zf.write(arquivo_origem, arcname=f"JOHN_DEERE/{nome_arquivo}")
-                
-                # Pasta Trimble (Geralmente pasta 'AgGPS')
-                zf.write(arquivo_origem, arcname=f"TRIMBLE/{nome_arquivo}")
-                
-                # Pasta Genérica (Case, New Holland, etc)
-                zf.write(arquivo_origem, arcname=f"GERAL/{nome_arquivo}")
-                
-    mem_zip.seek(0)
-    return mem_zip
+    with c_csv:
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("💾 Baixar Excel/CSV", csv, "vrt_final.csv", "text/csv")
+        
+    with c_shp:
+        if HAS_GEOPANDAS:
+            zip_data = gerar_pacote_shapes(df)
+            if zip_data:
+                st.download_button("🚜 Baixar Shapes (JD/Trimble)", zip_data, "SHAPES_VRT.zip", "application/zip", type='primary')
+        else:
+            st.error("Biblioteca GeoPandas não instalada. Não é possível gerar Shapefiles.")
