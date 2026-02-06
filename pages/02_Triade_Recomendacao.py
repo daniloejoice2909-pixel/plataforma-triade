@@ -243,7 +243,7 @@ with st.sidebar:
         st.success(f"CSV OK: {len(df_in)} linhas")
 
     st.markdown("---")
-    with st.expander("🌱 1. Cultura", True): prod = st.number_input("Meta (sc/ha)", value=80.0)
+    with st.expander("🌱 1. Produtividade Soja", True): prod = st.number_input("Meta (sc/ha)", value=80.0)
     with st.expander("⚪ 2. Calagem"):
         ca_alvo = st.number_input("Alvo Ca%", value=60.0)
         mg_alvo = st.number_input("Alvo Mg%", value=18.0)
@@ -251,19 +251,19 @@ with st.sidebar:
         mgo = st.number_input("MgO%", value=9.0)
         prnt = st.number_input("PRNT%", value=80.0)
     
-    with st.expander("🔴 3. Fósforo (Tabela Fixa)", True):
+    with st.expander("🔴 3. Fósforo", True):
         p_exp = st.number_input("Exp P (kg/sc)", value=0.8)
         p_teor = st.number_input("Teor P2O5%", value=21.0)
         st.write("Níveis Críticos (mg/dm³)")
         c1, c2 = st.columns(2)
         n1 = c1.number_input("0-4 (M. Arg)", value=5.5)
-        n2 = c1.number_input("4-10 (Arg)", value=8.0)
-        n3 = c1.number_input("10-19 (Med)", value=12.0)
+        n2 = c1.number_input("4-10 (Arg)", value=7.5)
+        n3 = c1.number_input("10-19 (Med)", value=11.5)
         n4 = c2.number_input("19-30 (Are)", value=15.0)
         n5 = c2.number_input(">30 (Total)", value=20.0)
         nc_vals = {'n1':n1, 'n2':n2, 'n3':n3, 'n4':n4, 'n5':n5}
     
-    with st.expander("🟣 4. Potassio"):
+    with st.expander("🟣 4. Potássio"):
         k_alvo = st.number_input("K Alvo CTC%", value=3.5)
         k_exp = st.number_input("Exp K (kg/sc)", value=1.2)
         k_teor = st.number_input("Teor K2O%", value=60.0)
