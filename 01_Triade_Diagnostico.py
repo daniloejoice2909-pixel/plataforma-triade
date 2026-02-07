@@ -96,50 +96,8 @@ with st.sidebar.expander("6. Micronutrientes", expanded=False):
     dose_cu = st.number_input("Cobre (Dose):", value=2.0, step=0.5)
 
 # ==============================================================================
-# 4. FUNÇÕES DE SUPORTE (LEITOR COM REBOBINAMENTO)
+# 4. FUNÇÕES DE SUPORTE
 # ==============================================================================
-def ler_arquivo_robusto(uploaded_file):
-    """
-    Tenta ler de todas as formas possíveis, rebobinando o arquivo a cada tentativa.
-    """
-    file_name = uploaded_file.name.lower()
-    
-    # 1. Tentar como Excel Universal (Pandas decide)
-    try:
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file)
-    except:
-        pass
-
-    # 2. Tentar forçando engine 'openpyxl' (XLSX novo)
-    try:
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, engine='openpyxl')
-    except:
-        pass
-
-    # 3. Tentar forçando engine 'xlrd' (XLS antigo)
-    try:
-        uploaded_file.seek(0)
-        return pd.read_excel(uploaded_file, engine='xlrd')
-    except:
-        pass
-
-    # 4. Tentar como CSV (Separador ,)
-    try:
-        uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, sep=',')
-    except:
-        pass
-
-    # 5. Tentar como CSV (Separador ;)
-    try:
-        uploaded_file.seek(0)
-        return pd.read_csv(uploaded_file, sep=';')
-    except Exception as e:
-        st.error(f"Não foi possível ler o arquivo. Erro final: {e}")
-        return pd.DataFrame()
-
 def processar_arquivo_geografico(uploaded_file):
     points = []
     try:
@@ -177,13 +135,16 @@ def limpar_coluna_inteligente(serie):
     def clean_val(val):
         if pd.isna(val): return np.nan
         s = str(val).strip().replace(' ', '')
-        # Remove símbolos matemáticos
+        # Remove símbolos matemáticos e textos de erro
         for char in ['<', '>', 'ns', 'nan', 'null', 'nd', 'ND']:
             s = s.replace(char, '')
         
         if s == '' or s == '-': return np.nan
         
+        # Lógica BR: 
+        # Se tem vírgula e ponto, assume ponto como milhar -> remove ponto
         if ',' in s and '.' in s: s = s.replace('.', '') 
+        # Troca vírgula por ponto
         s = s.replace(',', '.')
         
         try: return float(s)
@@ -207,7 +168,7 @@ def extrair_coordenadas_limpas(geojson_data):
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
     
-    # Normalização de Coordenadas
+    # 1. Normalização de Coordenadas
     if 'latitude_y' in df.columns: df.rename(columns={'latitude_y': 'latitude', 'longitude_y': 'longitude'}, inplace=True)
     elif 'latitude_x' in df.columns and 'latitude' not in df.columns: df.rename(columns={'latitude_x': 'latitude', 'longitude_x': 'longitude'}, inplace=True)
     
@@ -215,18 +176,23 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
     df = df.dropna(subset=['latitude', 'longitude'])
 
-    cols_ignorar = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'geometry', 'id_clean']
+    # 2. Limpeza de Dados (Aceitando colunas com nomes variados)
+    cols_ignorar = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'geometry', 'id_clean', 'data', 'hora']
     cols_validas = []
     
-    # Pré-validação
     for col in df.columns:
-        if any(x in str(col).lower() for x in cols_ignorar): continue
+        if any(x == str(col).lower() for x in cols_ignorar): continue # Ignora exatos
+        
+        # Tenta limpar
         df[col] = limpar_coluna_inteligente(df[col])
+        
+        # Se tiver pelo menos 3 números válidos, aceita
         if df[col].notna().sum() >= 3:
             cols_validas.append(col)
 
     if not cols_validas: return pd.DataFrame(), None
 
+    # 3. Grid e Interpolação
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     margin_x = (x_max - x_min) * 0.1
@@ -250,12 +216,15 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             Y_m = dados['latitude'] * scale_y
             
             try:
+                # Tenta RBF
                 interp = Rbf(X_m, Y_m, dados[col], function='linear', smooth=0)
                 z = interp(xx * scale_x, yy * scale_y)
             except:
+                # Fallback Nearest
                 interp = NearestNDInterpolator(list(zip(X_m, Y_m)), dados[col])
                 z = interp(xx * scale_x, yy * scale_y)
 
+            # Clip Seguro
             z = np.clip(z, dados[col].min(), dados[col].max())
             df_result[col] = z.flatten()
         except: continue
@@ -274,6 +243,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
         Y_unique = np.sort(df_plot['latitude'].unique())
     except: return None, None, [0,1]
 
+    # Máscara
     try:
         coords = extrair_coordenadas_limpas(geojson_data)
         if coords:
@@ -368,21 +338,42 @@ aba1, aba2 = st.tabs(["🗺️ Diagnóstico", "🚜 Recomendação VRT"])
 
 # --- ABA 1: DIAGNÓSTICO ---
 with aba1:
-    with st.sidebar.expander("🔍 Ver Dados Brutos"):
-        if st.session_state['dados_processados'] is not None:
-            st.dataframe(st.session_state['dados_processados'].head())
-
     st.header("Importação")
     c1, c2, c3 = st.columns(3)
-    f_lab = c1.file_uploader("Lab (CSV/XLSX)", type=["csv", "xlsx"])
+    f_lab = c1.file_uploader("Lab (CSV/XLSX)", type=["csv", "xlsx", "xls"]) # Aceita XLS
     f_geo = c2.file_uploader("Pontos (KML/KMZ)", type=["kmz", "kml"])
     f_json = c3.file_uploader("Contorno (GeoJSON)", type=["geojson", "json"])
 
     if f_lab and f_geo and f_json:
+        # SELETOR DE ABA (NOVO!)
+        if f_lab.name.endswith(('.xlsx', '.xls')):
+            try:
+                # Tenta ler só as abas primeiro
+                xl = pd.ExcelFile(f_lab)
+                sheet_names = xl.sheet_names
+                selected_sheet = st.selectbox("Selecione a Aba com os Dados:", sheet_names)
+            except:
+                selected_sheet = 0 # Default
+        else:
+            selected_sheet = 0
+
+        # SELETOR DE CABEÇALHO (NOVO!)
+        header_row = st.number_input("Linha do Cabeçalho (0 é a primeira):", value=0, min_value=0, max_value=10)
+
         if st.button("🚀 Processar", type="primary"):
             try:
-                df_lab = ler_arquivo_robusto(f_lab)
+                # Leitura Manual Controlada
+                f_lab.seek(0)
+                if f_lab.name.endswith('.csv'):
+                    try: df_lab = pd.read_csv(f_lab, header=header_row)
+                    except: f_lab.seek(0); df_lab = pd.read_csv(f_lab, sep=';', header=header_row)
+                else:
+                    df_lab = pd.read_excel(f_lab, sheet_name=selected_sheet, header=header_row)
                 
+                # Exibe o que leu para conferência
+                with st.expander("🔍 Conferir Leitura da Planilha"):
+                    st.dataframe(df_lab.head())
+
                 df_pts = processar_arquivo_geografico(f_geo)
                 f_json.seek(0); geo_data = json.load(f_json)
                 
@@ -400,8 +391,8 @@ with aba1:
                         st.session_state['dados_processados'] = df_krig
                         st.session_state['grid_shape'] = shape
                         st.success(f"Sucesso! {len(df_m)} pontos usados.")
-                    else: st.warning("Falha na interpolação.")
-                else: st.error("Erro IDs.")
+                    else: st.warning("Falha na interpolação. Verifique os dados numéricos.")
+                else: st.error("Erro IDs: Não houve correspondência entre a planilha e o mapa.")
             except Exception as e: st.error(f"Erro: {e}")
 
     if st.session_state['dados_processados'] is not None:
