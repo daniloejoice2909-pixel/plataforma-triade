@@ -18,7 +18,7 @@ from scipy.interpolate import Rbf
 import folium
 from streamlit_folium import st_folium
 
-# Tenta importar funções utilitárias
+# Tenta importar funções utilitárias se existirem, senão define mocks
 try:
     from utils_v43 import (
         configurar_pagina, renderizar_cabecalho_sidebar, 
@@ -150,25 +150,30 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 5. MOTOR DE CÁLCULO (RBF LINEAR)
+# 5. MOTOR DE CÁLCULO (RBF LINEAR - CORRIGIDO PARA EXIBIR MAPAS)
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
     
-    # --- CORREÇÃO DE COLUNAS DE COORDENADAS ---
-    # Se houver latitude_y (do KML), usamos ela e descartamos a do CSV
+    # --- CORREÇÃO DE COLUNAS DE COORDENADAS (CRUCIAL) ---
+    # Prioriza as coordenadas do KML (geralmente sufixo _y no merge)
     if 'latitude_y' in df.columns:
         df.rename(columns={'latitude_y': 'latitude', 'longitude_y': 'longitude'}, inplace=True)
-    if 'latitude_x' in df.columns:
-        df.drop(columns=['latitude_x', 'longitude_x'], inplace=True, errors='ignore')
+    elif 'latitude_x' in df.columns and 'latitude' not in df.columns:
+        df.rename(columns={'latitude_x': 'latitude', 'longitude_x': 'longitude'}, inplace=True)
         
+    # Garante que latitude e longitude existem
+    if 'latitude' not in df.columns or 'longitude' not in df.columns:
+        st.error("Erro crítico: Coordenadas não encontradas após a fusão.")
+        return pd.DataFrame(), None
+
     cols_proibidas = ['id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean', 'unnamed', 'obs']
     
     cols_validas = []
     for col in df.columns:
         if any(p in str(col).lower() for p in cols_proibidas): continue
         df[col] = limpar_coluna_inteligente(df[col])
-        if df[col].notna().sum() >= 5 and df[col].nunique() > 1: 
+        if df[col].notna().sum() >= 5: # Relaxei a regra de variância para garantir que plote
             cols_validas.append(col)
 
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
@@ -208,6 +213,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             
             interpolator = Rbf(dados_col['X_m'], dados_col['Y_m'], dados_col[col], function='linear')
             z = interpolator(grid_x_m, grid_y_m)
+            # Clip robusto para evitar cores malucas
             z = np.clip(z, dados_col[col].min(), dados_col[col].max())
             
             df_result[col] = z.flatten()
@@ -268,16 +274,16 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
-# 7. LÓGICA DE RECOMENDAÇÃO (FÓRMULAS CORRIGIDAS)
+# 7. LÓGICA DE RECOMENDAÇÃO (FÓRMULAS VRT PRO)
 # ==============================================================================
 def calcular_recomendacoes(df):
     df_rec = df.copy()
     
-    # Mapeamento de colunas
+    # Mapeamento
     cols = {k: next((c for c in df_rec.columns if k in c.lower()), None) 
             for k in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem']}
     
-    # --- A. CALAGEM (ELEVAÇÃO Ca e Mg) ---
+    # --- A. CALAGEM (ELEVAÇÃO Ca e Mg - MAIOR DOSE) ---
     if cols['ca'] and cols['mg'] and cols['ctc']:
         # Deficit Ca (cmolc/dm3)
         ca_atual = df_rec[cols['ca']]
@@ -289,11 +295,11 @@ def calcular_recomendacoes(df):
         mg_alvo_val = (alvo_mg / 100) * df_rec[cols['ctc']]
         def_mg = mg_alvo_val - mg_atual
         
-        # Conversão para kg de Óxidos (Estequiometria)
+        # Estequiometria: 1 cmolc Ca = 560 kg CaO | 1 cmolc Mg = 403 kg MgO
         need_cao_kg = def_ca * 560
         need_mgo_kg = def_mg * 403
         
-        # Conversão para Ton de Produto (Considerando Teor)
+        # Conversão para Toneladas de Produto Comercial
         t_cao = teor_cao if teor_cao > 0 else 1
         t_mgo = teor_mgo if teor_mgo > 0 else 1
         
@@ -310,11 +316,11 @@ def calcular_recomendacoes(df):
     if cols['k'] and cols['ctc']:
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
         
-        # Correção para 3.5% (ou valor da sidebar)
+        # Deficit para atingir meta (ex: 3.5%)
         def_k_cmolc = ((alvo_k_ctc - k_pct) / 100) * df_rec[cols['ctc']]
         def_k_cmolc = def_k_cmolc.apply(lambda x: x if x > 0 else 0)
         
-        # 1 cmolc K ~ 942 kg K2O
+        # Correção
         k2o_corr = def_k_cmolc * 942 
         k2o_export = meta_prod * export_k_factor
         
@@ -323,7 +329,7 @@ def calcular_recomendacoes(df):
         
         df_rec['Adubo_K_Kg_ha'] = (total_k2o * (100 / t_k2o)).apply(lambda x: x if x > 0 else 0)
 
-    # --- C. FÓSFORO (Com Reserva e Tabela P-rem) ---
+    # --- C. FÓSFORO (P-rem + Reserva descontada) ---
     col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
     
     if col_p and cols['prem']:
@@ -375,6 +381,7 @@ with aba1:
     if file_lab and file_geo and file_geojson:
         if st.button("🚀 Processar Ponte de Dados", type="primary"):
             try:
+                # 1. Load Data
                 if file_lab.name.lower().endswith('.csv'):
                     try: df_lab = pd.read_csv(file_lab)
                     except: file_lab.seek(0); df_lab = pd.read_csv(file_lab, sep=';')
@@ -401,13 +408,16 @@ with aba1:
     if st.session_state['dados_processados'] is not None:
         st.divider()
         cols = [c for c in st.session_state['dados_processados'].columns if c not in ['latitude', 'longitude']]
-        attr = st.selectbox("Nutriente:", cols)
-        img, bounds, mm = gerar_imagem_overlay(st.session_state['dados_processados'], attr, st.session_state['geojson_data'], st.session_state['grid_shape'])
-        if img:
-            m = folium.Map(location=[bounds[0][0], bounds[0][1]], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
-            folium.raster_layers.ImageOverlay(image=f"data:image/png;base64,{base64.b64encode(img.getvalue()).decode()}", bounds=bounds, opacity=0.8).add_to(m)
-            folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m)
-            st_folium(m, height=500, use_container_width=True, key=f"mapa_{attr}")
+        if cols:
+            attr = st.selectbox("Nutriente:", cols)
+            img, bounds, mm = gerar_imagem_overlay(st.session_state['dados_processados'], attr, st.session_state['geojson_data'], st.session_state['grid_shape'])
+            if img:
+                m = folium.Map(location=[bounds[0][0], bounds[0][1]], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
+                folium.raster_layers.ImageOverlay(image=f"data:image/png;base64,{base64.b64encode(img.getvalue()).decode()}", bounds=bounds, opacity=0.8).add_to(m)
+                folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m)
+                st_folium(m, height=500, use_container_width=True, key=f"mapa_{attr}")
+        else:
+            st.warning("Nenhum mapa gerado. Verifique se a planilha contém dados numéricos válidos.")
 
 with aba2:
     st.header("Mapas de Recomendação VRT")
@@ -428,7 +438,7 @@ with aba2:
                 
                 c1, c2 = st.columns(2)
                 c1.metric("Dose Média", f"{media_dose:.1f}")
-                c2.info(f"Parâmetros: Meta {meta_prod} sc/ha | PRNT {prnt_calc}%")
+                c2.info(f"Produtividade Alvo: {meta_prod} sc/ha")
 
                 img_rec, bounds_rec, mm_rec = gerar_imagem_overlay(
                     st.session_state['dados_rec'], escolha, 
