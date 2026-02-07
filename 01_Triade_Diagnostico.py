@@ -7,17 +7,16 @@ import base64
 
 # --- 1. CONFIGURAÇÃO DE BACKEND (A VACINA ANTI-TRAVAMENTO) ---
 import matplotlib
-matplotlib.use('Agg') # Força modo não-interativo (Essencial para Web)
+matplotlib.use('Agg') # Força modo não-interativo
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
 
 from pykrige.ok import OrdinaryKriging
 import folium
 from streamlit_folium import st_folium
 
-# Importando utils (Seu arquivo original)
+# Importando utils
 from utils_v43 import (
     configurar_pagina, 
     renderizar_cabecalho_sidebar, 
@@ -107,86 +106,96 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_result.dropna(subset=cols_finais, how='all')
 
 # ==============================================================================
-# 4. GERAÇÃO DE IMAGEM (V64 - GEOMETRIA PERFEITA E CORES VIVAS)
+# 4. GERAÇÃO DE IMAGEM (V65 - MÁSCARA DE DADOS "COOKIE CUTTER")
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
-    # 1. Extração dos Limites Exatos
+    # 1. Prepara a Matriz de Dados
     pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
     Z = pivot.values
-    X = pivot.columns.values 
-    Y = pivot.index.values    
     
-    x_min, x_max = X.min(), X.max()
-    y_min, y_max = Y.min(), Y.max()
+    # Coordenadas dos eixos
+    X_unique = pivot.columns.values 
+    Y_unique = pivot.index.values    
+    
+    # Cria o Meshgrid 2D completo para verificar os pontos
+    XX, YY = np.meshgrid(X_unique, Y_unique)
+    
+    # Limites físicos
+    x_min, x_max = X_unique.min(), X_unique.max()
+    y_min, y_max = Y_unique.min(), Y_unique.max()
 
-    # 2. Configuração de Cores (JET)
-    cmap = plt.get_cmap('jet', 256) # 256 níveis para gradiente suave ou use 8 para faixas
-    
-    # Tratamento para mapas planos (sem variação de cor)
-    z_min, z_max = np.nanmin(Z), np.nanmax(Z)
-    if z_min == z_max:
-        z_min -= 0.1
-        z_max += 0.1
-        
-    levels = np.linspace(z_min, z_max, 50) # Aumentei níveis para cor não sumir
-    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
-
-    # 3. CRIAÇÃO DA FIGURA COM PROPORÇÃO MATEMÁTICA (Segredo do Encaixe)
-    plt.close('all') 
-    
-    # Razão de aspecto: (Largura / Altura)
-    aspect_ratio = (x_max - x_min) / (y_max - y_min)
-    
-    # Definimos uma altura fixa alta (ex: 10 polegadas) e calculamos a largura
-    h_fig = 10
-    w_fig = h_fig * aspect_ratio
-    
-    fig = plt.figure(figsize=(w_fig, h_fig))
-    
-    # [IMPORTANTE] Eixo ocupando 100% da figura (0,0,1,1) -> Remove bordas brancas
-    ax = plt.axes([0, 0, 1, 1])
-    ax.set_axis_off()
-    
-    # 4. Desenha o Mapa (Contourf)
-    # alpha=1.0 Garante cor sólida
-    cf = ax.contourf(X, Y, Z, levels=levels, cmap=cmap, norm=norm, extend='both', alpha=1.0)
-    
-    # 5. Aplica Recorte (Clipping) - O "Cookie Cutter"
+    # --- 2. APLICAÇÃO DA MÁSCARA (A SOLUÇÃO DO QUADRADO) ---
+    # Em vez de cortar a imagem depois, vamos apagar os dados fora do polígono agora.
     try:
-        # Lógica para pegar coordenadas do Polígono
         coords = []
         geom_type = geojson_data['features'][0]['geometry']['type']
         
         if geom_type == 'Polygon':
             coords = geojson_data['features'][0]['geometry']['coordinates'][0]
         elif geom_type == 'MultiPolygon':
-            # Pega o maior polígono (geralmente o contorno externo)
             coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
             
         if len(coords) > 0:
+            # Cria um caminho vetorial com o contorno
             poly_path = MplPath(coords)
-            patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='none') # Edgecolor none para não duplicar linha
-            ax.add_patch(patch)
             
-            # Aplica o recorte na imagem gerada
-            for collection in cf.collections:
-                collection.set_clip_path(patch)
-                
+            # Transforma os grids em uma lista de pontos (x, y)
+            points = np.column_stack((XX.flatten(), YY.flatten()))
+            
+            # Verifica quais pontos estão DENTRO do polígono
+            mask = poly_path.contains_points(points)
+            
+            # Remonta a máscara para o formato da matriz Z (linhas, colunas)
+            mask = mask.reshape(Z.shape)
+            
+            # Aplica a máscara: Onde for Falso (fora), vira NaN (Transparente)
+            Z[~mask] = np.nan
+            
     except Exception as e:
-        print(f"Erro Clipping: {e}")
+        print(f"Erro ao aplicar máscara de recorte: {e}")
 
-    # 6. Trava os limites do eixo nos limites exatos dos dados
+    # --- 3. CONFIGURAÇÃO VISUAL ---
+    # Configura Cores (JET)
+    cmap = plt.get_cmap('jet', 256)
+    cmap.set_bad(alpha=0) # Garante que NaNs sejam 100% transparentes
+    
+    # Tratamento para mapas planos
+    z_min, z_max = np.nanmin(Z), np.nanmax(Z)
+    if z_min == z_max:
+        z_min -= 0.1
+        z_max += 0.1
+        
+    levels = np.linspace(z_min, z_max, 50)
+    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
+
+    # --- 4. CRIAÇÃO DA FIGURA ---
+    plt.close('all') 
+    
+    # Aspect Ratio Matemático
+    aspect_ratio = (x_max - x_min) / (y_max - y_min)
+    h_fig = 10
+    w_fig = h_fig * aspect_ratio
+    
+    fig = plt.figure(figsize=(w_fig, h_fig))
+    
+    # Eixo ocupando 100% da figura (Zero Margem)
+    ax = plt.axes([0, 0, 1, 1])
+    ax.set_axis_off()
+    
+    # Desenha o Mapa (Já mascarado)
+    # Como Z tem NaNs fora do polígono, o contourf já desenha recortado!
+    ax.contourf(X_unique, Y_unique, Z, levels=levels, cmap=cmap, norm=norm, extend='both', alpha=1.0)
+    
+    # Trava limites
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     
-    # 7. Salva a imagem
+    # Salva
     img_data = BytesIO()
-    # NÃO usar bbox_inches='tight' aqui, pois já configuramos o eixo exato
     plt.savefig(img_data, format='png', transparent=True, dpi=150)
     plt.close(fig)
     img_data.seek(0)
     
-    # Retorna imagem e os limites exatos para o Folium
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
@@ -251,31 +260,31 @@ if st.session_state['dados_processados'] is not None:
         
         if not df_plot.empty:
             try:
-                # Gera Imagem Perfeita
+                # Gera Imagem Perfeita (Com Máscara de Dados)
                 img_buffer, bounds, min_max = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
                 
                 # Mapa Folium
                 centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
                 m = folium.Map(location=centro, zoom_start=14, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satellite')
                 
-                # Overlay da Imagem (Agora com encaixe exato)
+                # Overlay da Imagem (Encaixe Exato)
                 img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
                 folium.raster_layers.ImageOverlay(
                     image=f"data:image/png;base64,{img_b64}",
                     bounds=bounds, 
-                    opacity=0.8, # Leve transparência para ver o terreno fundo
+                    opacity=0.8, 
                     interactive=True,
                     cross_origin=False,
                     zindex=1
                 ).add_to(m)
                 
-                # Contorno Preto por Cima (LineString para não preencher)
+                # Contorno Preto por Cima (Apenas Linha)
                 folium.GeoJson(
                     st.session_state['geojson_data'],
                     style_function=lambda x: {'color': 'black', 'weight': 3, 'fillOpacity': 0}
                 ).add_to(m)
                 
-                # Legenda Simples e Dinâmica
+                # Legenda
                 z_min, z_max = min_max
                 legend_html = f"""
                 <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; 
