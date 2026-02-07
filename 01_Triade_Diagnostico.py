@@ -40,78 +40,65 @@ if 'grid_shape' not in st.session_state:
     st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. LIMPEZA E DIAGNÓSTICO
+# 3. FUNÇÕES AUXILIARES
 # ==============================================================================
 def limpar_coluna_inteligente(serie):
-    """Detecta se é 0.22 (US) ou 0,22 (BR) e converte corretamente"""
     s_str = serie.astype(str).str.strip()
     tem_virgula = s_str.str.contains(',', regex=False).any()
-    
     if tem_virgula:
         s_str = s_str.str.replace('.', '', regex=False)
         s_str = s_str.str.replace(',', '.', regex=False)
-        
     return pd.to_numeric(s_str, errors='coerce')
 
 def extrair_coordenadas_limpas(geojson_data):
     try:
-        if 'features' in geojson_data:
-            geom = geojson_data['features'][0]['geometry']
-        elif 'geometry' in geojson_data:
-            geom = geojson_data['geometry']
-        else:
-            geom = geojson_data
+        if 'features' in geojson_data: geom = geojson_data['features'][0]['geometry']
+        elif 'geometry' in geojson_data: geom = geojson_data['geometry']
+        else: geom = geojson_data
             
-        coords_raw = []
         tipo = geom['type']
-        
-        if tipo == 'Polygon':
-            coords_raw = geom['coordinates'][0]
-        elif tipo == 'MultiPolygon':
-            coords_raw = geom['coordinates'][0][0]
-            
+        if tipo == 'Polygon': coords_raw = geom['coordinates'][0]
+        elif tipo == 'MultiPolygon': coords_raw = geom['coordinates'][0][0]
         return [ponto[:2] for ponto in coords_raw]
-    except:
-        return []
+    except: return []
 
 def plotar_conferencia_geometria(df, coords_geojson):
     fig, ax = plt.subplots(figsize=(6, 6))
-    # Pontos menores para ver melhor a precisão
-    ax.scatter(df['longitude'], df['latitude'], c='red', s=5, label='Pontos CSV', alpha=0.8, zorder=5)
+    # Pontos CSV
+    ax.scatter(df['longitude'], df['latitude'], c='red', s=10, label='Pontos', alpha=0.8, zorder=5)
     
+    # Contorno GeoJSON
     if coords_geojson:
-        poly = MplPolygon(coords_geojson, closed=True, edgecolor='blue', facecolor='none', linewidth=1.5, label='GeoJSON', zorder=10)
+        poly = MplPolygon(coords_geojson, closed=True, edgecolor='blue', facecolor='none', linewidth=1.5, label='Contorno', zorder=10)
         ax.add_patch(poly)
         
-        # Ajusta o zoom para focar na união dos dois
-        lons_geo = [p[0] for p in coords_geojson]
-        lats_geo = [p[1] for p in coords_geojson]
+        # Auto-Zoom Focado
+        lons_g = [p[0] for p in coords_geojson]
+        lats_g = [p[1] for p in coords_geojson]
+        min_x = min(df['longitude'].min(), min(lons_g))
+        max_x = max(df['longitude'].max(), max(lons_g))
+        min_y = min(df['latitude'].min(), min(lats_g))
+        max_y = max(df['latitude'].max(), max(lats_g))
         
-        min_x = min(df['longitude'].min(), min(lons_geo))
-        max_x = max(df['longitude'].max(), max(lons_geo))
-        min_y = min(df['latitude'].min(), min(lats_geo))
-        max_y = max(df['latitude'].max(), max(lats_geo))
-        
-        ax.set_xlim(min_x - 0.002, max_x + 0.002)
-        ax.set_ylim(min_y - 0.002, max_y + 0.002)
+        # Margem de 10%
+        margem_x = (max_x - min_x) * 0.1
+        margem_y = (max_y - min_y) * 0.1
+        ax.set_xlim(min_x - margem_x, max_x + margem_x)
+        ax.set_ylim(min_y - margem_y, max_y + margem_y)
 
-    ax.set_title("Conferência de Limites (Zoom Automático)")
-    ax.legend()
+    ax.set_title("Ajuste de Pontos (Vermelho) no Contorno (Azul)")
+    ax.legend(loc='upper right')
     ax.grid(True, linestyle='--', alpha=0.5)
     return fig
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO (V79 - PRECISÃO MÁXIMA)
+# 4. MOTOR DE CÁLCULO
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df = df_input.copy()
     
-    cols_proibidas = [
-        'id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 
-        'x', 'y', 'data', 'hora', 'campo', 'fazenda', 
-        'profundidade', 'zona', 'talhao', 'geometry'
-    ]
+    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry']
     
     cols_validas = []
     for col in df.columns:
@@ -119,14 +106,12 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         df[col] = limpar_coluna_inteligente(df[col])
         if df[col].notna().sum() >= 3: cols_validas.append(col)
 
-    # V79: Aumentei precisão para 7 casas (aprox 1cm) para não deslocar pontos
+    # Coordenadas já vêm ajustadas do passo anterior
     df['longitude'] = df['longitude'].round(7)
     df['latitude'] = df['latitude'].round(7)
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # Define a área de interpolação
-    # IMPORTANTE: Pegamos a área que cobre TANTO os pontos QUANTO o GeoJSON
-    # Isso garante que se um ponto estiver fora, ele ainda entra no cálculo
+    # Grid que cobre AMBOS (Pontos e Polígono) para garantir que nada fique de fora
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
     y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
     
@@ -141,9 +126,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             y_max = max(y_max, max(lats_g))
     except: pass
 
-    # Buffer de segurança (Margem de erro)
-    buffer = 0.002 # ~200 metros
-    
+    buffer = 0.002
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
@@ -153,7 +136,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     for col in cols_validas:
         try:
             dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
-            
             if len(dados_col) < 5 or dados_col[col].nunique() <= 1:
                 df_result[col] = dados_col[col].mean() if len(dados_col) > 0 else 0
                 continue
@@ -229,7 +211,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     
     cmap = plt.get_cmap('jet', 256)
     cmap.set_bad(alpha=0) 
-    
     levels = np.linspace(z_min, z_max, 50)
     norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
     
@@ -245,11 +226,19 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max], mask_sucesso
 
 # ==============================================================================
-# 6. INTERFACE
+# 6. INTERFACE COM AJUSTE DE COORDENADAS
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
 file_csv = st.sidebar.file_uploader("📂 Tabela (.csv)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("🌍 Contorno (.geojson)", type=["geojson", "json"])
+
+# --- NOVO: BARRA DE AJUSTE FINO (GPS SHIFT) ---
+st.sidebar.markdown("---")
+with st.sidebar.expander("🛠️ Ajuste Fino de Coordenadas (GPS)", expanded=True):
+    st.info("Use se os pontos estiverem deslocados.")
+    # Sliders com precisão de 0.00001 (aprox 1 metro)
+    shift_lat = st.number_input("Deslocar Latitude (N/S)", value=0.00000, step=0.00010, format="%.5f")
+    shift_lon = st.number_input("Deslocar Longitude (L/O)", value=0.00000, step=0.00010, format="%.5f")
 
 if not file_csv or not file_geojson:
     if st.session_state.get('dados_processados') is not None:
@@ -286,18 +275,17 @@ if file_csv and file_geojson:
     
     df_raw = df_raw.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
 
+    # --- DIAGNÓSTICO COM APLICAÇÃO DO SHIFT ---
     st.divider()
-    st.subheader("🕵️ Auditor de Dados & Geometria")
+    st.subheader("🕵️ Diagnóstico e Correção")
     
     try:
+        # 1. Limpeza
         df_raw['latitude'] = limpar_coluna_inteligente(df_raw['latitude'])
         df_raw['longitude'] = limpar_coluna_inteligente(df_raw['longitude'])
-        df_debug = df_raw.dropna(subset=['latitude', 'longitude'])
+        df_debug = df_raw.dropna(subset=['latitude', 'longitude']).copy()
 
-        col_audit = st.selectbox("Auditar coluna de dados:", [c for c in df_debug.columns if c not in ['latitude', 'longitude']])
-        vals_limpos = limpar_coluna_inteligente(df_raw[col_audit]).head(3).tolist()
-        st.write(f"**Valores Lidos (Amostra):** {vals_limpos}")
-
+        # 2. Correção Automática de Sinal (Brasil)
         if coords_limpas:
             lat_geo = coords_limpas[0][1]
             lon_geo = coords_limpas[0][0]
@@ -308,19 +296,26 @@ if file_csv and file_geojson:
             fator_lon = -1 if (lon_geo < 0 and lon_csv > 0) else 1
             
             if fator_lat == -1 or fator_lon == -1:
-                st.warning("⚠️ Sinal positivo corrigido para negativo.")
+                st.warning("⚠️ Sinal corrigido automaticamente (Brasil).")
                 df_debug['latitude'] *= fator_lat
                 df_debug['longitude'] *= fator_lon
 
+        # 3. APLICAÇÃO DO SHIFT MANUAL (O PULO DO GATO)
+        df_debug['latitude'] = df_debug['latitude'] + shift_lat
+        df_debug['longitude'] = df_debug['longitude'] + shift_lon
+
+        # 4. Plota
+        if coords_limpas:
             st.pyplot(plotar_conferencia_geometria(df_debug, coords_limpas))
+            st.info("👆 Use os controles na barra lateral para encaixar os pontos vermelhos dentro do contorno azul.")
 
     except Exception as e:
-        st.error(f"Erro no auditor: {e}")
+        st.error(f"Erro diagnóstico: {e}")
 
     if st.button("🚀 Processar Mapas", type="primary"):
         with st.status("Processando...", expanded=True) as status:
             st.cache_data.clear() 
-            df_krig, grid_shape = processar_matrizes_interpolacao(df_debug, geojson_data)
+            df_krig, grid_shape = processar_matrizes_interpolacao(df_debug, geojson_data) # Usa o DF já ajustado
             
             if df_krig.empty: st.error("Tabela vazia."); st.stop()
             
@@ -353,7 +348,7 @@ if st.session_state['dados_processados'] is not None:
                 z_min, z_max = min_max
                 
                 if not sucesso:
-                    st.warning("⚠️ Recorte falhou. Mostrando grid completo.")
+                    st.warning("⚠️ Atenção: Pontos fora do contorno. Use o Ajuste Fino na lateral.")
 
                 centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
                 m = folium.Map(location=centro, zoom_start=14, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satellite')
