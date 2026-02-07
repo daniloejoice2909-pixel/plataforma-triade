@@ -40,31 +40,30 @@ if 'grid_shape' not in st.session_state:
     st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. LIMPEZA DE DADOS (NUCLEAR)
+# 3. LIMPEZA INTELIGENTE (RESOLVE O PROBLEMA DO 0.22 vs 22)
 # ==============================================================================
-def limpar_coluna_numerica(serie):
+def limpar_coluna_inteligente(serie):
     """
-    Remove pontos de milhar, troca vírgula por ponto e força numérico.
-    Ex: '1.200,50' -> 1200.50
-    Ex: '12,5' -> 12.5
-    Ex: '< 0,1' -> NaN
+    Detecta automaticamente se a coluna é BR (vírgula decimal) ou US (ponto decimal).
+    Resolve o erro onde 0.22 virava 22.
     """
-    # Converte para string primeiro
-    serie = serie.astype(str)
+    # Converte para string para analisar
+    s_str = serie.astype(str).str.strip()
     
-    # Remove espaços em branco
-    serie = serie.str.strip()
+    # Verifica se existe vírgula em ALGUM lugar da coluna (amostra)
+    tem_virgula = s_str.str.contains(',', regex=False).any()
     
-    # Remove o ponto de milhar (CUIDADO: assume formato Brasil 1.000,00)
-    # Se o ponto estiver sendo usado como decimal (formato US), isso vai quebrar.
-    # Mas como o contexto é Brasil/Tríade, assumimos ponto = milhar.
-    serie = serie.str.replace('.', '', regex=False)
-    
-    # Troca vírgula decimal por ponto
-    serie = serie.str.replace(',', '.', regex=False)
-    
-    # Converte para número, transformando erros (textos) em NaN
-    return pd.to_numeric(serie, errors='coerce')
+    if tem_virgula:
+        # LÓGICA BRASIL (1.200,50 ou 12,5)
+        # Se tem vírgula, o ponto é milhar (lixo) e a vírgula é decimal.
+        s_str = s_str.str.replace('.', '', regex=False) # Remove milhar
+        s_str = s_str.str.replace(',', '.', regex=False) # Troca decimal
+    else:
+        # LÓGICA US/CIENTÍFICA (0.22 ou 1200.50)
+        # Se NÃO tem vírgula, o ponto é decimal. Não fazemos nada com ele!
+        pass
+        
+    return pd.to_numeric(s_str, errors='coerce')
 
 def extrair_coordenadas_limpas(geojson_data):
     try:
@@ -112,23 +111,19 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         'profundidade', 'zona', 'talhao', 'geometry'
     ]
     
-    # 1. Limpeza Agressiva de TODAS as colunas
     cols_validas = []
     for col in df.columns:
         if col.lower() in cols_proibidas: continue
         
-        # Aplica o limpador nuclear
-        df[col] = limpar_coluna_numerica(df[col])
+        # APLICA A NOVA LIMPEZA INTELIGENTE
+        df[col] = limpar_coluna_inteligente(df[col])
         
-        # Só aceita se tiver dados reais suficientes
         if df[col].notna().sum() >= 3: 
             cols_validas.append(col)
 
-    # Arredonda coordenadas
+    # Arredonda coords
     df['longitude'] = df['longitude'].round(5)
     df['latitude'] = df['latitude'].round(5)
-    
-    # Agrupa pela média (remove duplicatas)
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
     # Grid
@@ -148,7 +143,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
         try:
             dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
             
-            # Se a coluna for toda zero ou constante
             if len(dados_col) < 5 or dados_col[col].nunique() <= 1:
                 df_result[col] = dados_col[col].mean() if len(dados_col) > 0 else 0
                 continue
@@ -182,7 +176,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     x_min, x_max = X_unique.min(), X_unique.max()
     y_min, y_max = Y_unique.min(), Y_unique.max()
 
-    # Recorte
     mask_sucesso = False
     try:
         coords_limpas = extrair_coordenadas_limpas(geojson_data)
@@ -199,18 +192,15 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
                 mask_sucesso = True
     except: pass
 
-    # --- CÁLCULO DE ESCALA V77 (FORÇA CONTRASTE) ---
+    # Escala Percentil (Robusta a outliers)
     dados_validos = Z[~np.isnan(Z)]
-    
     if len(dados_validos) > 0:
-        z_min = np.nanmin(dados_validos)
-        z_max = np.nanmax(dados_validos)
+        z_min = np.percentile(dados_validos, 2)
+        z_max = np.percentile(dados_validos, 98)
         
-        # Se min e max forem iguais (mapa de uma cor), força uma diferença
         if z_min == z_max:
              z_min -= 0.5
              z_max += 0.5
-        # Se a diferença for muito pequena, expande para o Matplotlib gerar cores
         elif (z_max - z_min) < 0.1:
              centro = (z_max + z_min) / 2
              z_min = centro - 0.05
@@ -232,7 +222,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     cmap = plt.get_cmap('jet', 256)
     cmap.set_bad(alpha=0) 
     
-    # Levels forçado para garantir gradiente
     levels = np.linspace(z_min, z_max, 50)
     norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
     
@@ -262,7 +251,6 @@ if not file_csv or not file_geojson:
         st.rerun()
 
 if file_csv and file_geojson:
-    # Leitura
     try:
         df_raw = pd.read_csv(file_csv)
         if len(df_raw.columns) < 2:
@@ -290,29 +278,26 @@ if file_csv and file_geojson:
     
     df_raw = df_raw.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
 
-    # --- AUDITOR DE DADOS (V77) ---
+    # --- AUDITORIA FINAL (V78) ---
     st.divider()
     st.subheader("🕵️ Auditor de Dados & Geometria")
     
     try:
-        # Limpeza prévia das coordenadas
-        df_raw['latitude'] = limpar_coluna_numerica(df_raw['latitude'])
-        df_raw['longitude'] = limpar_coluna_numerica(df_raw['longitude'])
+        # Aplica a limpeza inteligente nas coordenadas também (pois podem ter vírgula)
+        df_raw['latitude'] = limpar_coluna_inteligente(df_raw['latitude'])
+        df_raw['longitude'] = limpar_coluna_inteligente(df_raw['longitude'])
         df_debug = df_raw.dropna(subset=['latitude', 'longitude'])
 
-        # Seletor para auditar uma coluna específica
-        col_audit = st.selectbox("Selecione uma coluna para auditar os valores:", [c for c in df_debug.columns if c not in ['latitude', 'longitude']])
+        # Seletor para auditar
+        col_audit = st.selectbox("Auditar coluna de dados:", [c for c in df_debug.columns if c not in ['latitude', 'longitude']])
         
-        # Mostra como o Python está enxergando os dados dessa coluna
-        vals_sujos = df_raw[col_audit].head(3).tolist() # Como veio
-        vals_limpos = limpar_coluna_numerica(df_raw[col_audit]).head(3).tolist() # Como ficou
+        # Mostra o Antes e Depois da Limpeza
+        vals_sujos = df_raw[col_audit].head(3).tolist()
+        vals_limpos = limpar_coluna_inteligente(df_raw[col_audit]).head(3).tolist()
         
         c_audit1, c_audit2 = st.columns(2)
-        c_audit1.write(f"**Como o arquivo veio (Amostra):** {vals_sujos}")
-        c_audit2.write(f"**Como o Python leu (Números):** {vals_limpos}")
-        
-        if pd.isna(vals_limpos).all():
-            st.error(f"🚨 A coluna '{col_audit}' não pode ser lida como número! Verifique se há textos ou erros de formatação no CSV.")
+        c_audit1.write(f"**Original:** {vals_sujos}")
+        c_audit2.write(f"**Lido como:** {vals_limpos}")
 
         # Correção de Sinal Geográfico
         if coords_limpas:
@@ -325,7 +310,7 @@ if file_csv and file_geojson:
             fator_lon = -1 if (lon_geo < 0 and lon_csv > 0) else 1
             
             if fator_lat == -1 or fator_lon == -1:
-                st.warning("⚠️ CSV com sinal positivo corrigido para negativo (Brasil).")
+                st.warning("⚠️ Sinal positivo corrigido para negativo.")
                 df_debug['latitude'] *= fator_lat
                 df_debug['longitude'] *= fator_lon
 
@@ -337,8 +322,6 @@ if file_csv and file_geojson:
     if st.button("🚀 Processar Mapas", type="primary"):
         with st.status("Processando...", expanded=True) as status:
             st.cache_data.clear() 
-            
-            # Passa o DF já limpo e corrigido para o processamento
             df_krig, grid_shape = processar_matrizes_interpolacao(df_debug, geojson_data)
             
             if df_krig.empty: st.error("Tabela vazia."); st.stop()
@@ -399,7 +382,7 @@ if st.session_state['dados_processados'] is not None:
                 m.get_root().html.add_child(folium.Element(legend_html))
                 st_folium(m, height=500, use_container_width=True)
                 
-                st.info(f"📊 **Dados Reais (Dentro do Talhão):** Mín: {z_min:.2f} | Máx: {z_max:.2f}")
+                st.info(f"📊 **Estatísticas (Filtro 2% - 98%):** Mín: {z_min:.2f} | Máx: {z_max:.2f}")
                 
             except Exception as e:
                 st.error(f"Erro visual: {e}")
