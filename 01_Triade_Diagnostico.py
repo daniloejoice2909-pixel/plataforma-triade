@@ -120,7 +120,7 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO (Krigagem)
+# 4. MOTOR DE CÁLCULO (Krigagem Linear para evitar Olho de Boi)
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
@@ -176,10 +176,10 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
             if len(dados_col) < 5: continue
 
-            # Krigagem Esférica tende a ser melhor para variabilidade de solo que Linear
+            # ALTERAÇÃO: 'linear' reduz o efeito olho de boi comparado ao 'spherical'
             OK = OrdinaryKriging(
                 dados_col['X_m'], dados_col['Y_m'], dados_col[col], 
-                variogram_model='spherical', verbose=False, enable_plotting=False
+                variogram_model='linear', verbose=False, enable_plotting=False
             )
             z, _ = OK.execute('grid', grid_x_m, grid_y_m)
             df_result[col] = z.flatten()
@@ -193,7 +193,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 5. GERAÇÃO DE IMAGEM (CORRIGIDA: ESCALA ABSOLUTA)
+# 5. GERAÇÃO DE IMAGEM (ESTILO INCERES)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all')
@@ -225,18 +225,13 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
             if np.any(mask_grid): Z[~mask_grid] = np.nan
     except: pass
 
-    # --- CORREÇÃO DA ESCALA ---
+    # --- ESCALA DE DADOS ---
     dados_validos = Z[~np.isnan(Z)]
-    
     if len(dados_validos) > 0:
-        # Pega o Mínimo e Máximo REAIS (sem cortes estatísticos)
         z_min = np.nanmin(dados_validos)
         z_max = np.nanmax(dados_validos)
-        
-        # Se os valores forem iguais (ex: tudo 0), cria uma folga artificial para não quebrar
         if z_min == z_max:
-            z_min -= 0.1
-            z_max += 0.1
+            z_min -= 0.1; z_max += 0.1
     else: 
         z_min, z_max = 0, 1
 
@@ -250,13 +245,18 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     ax.set_axis_off()
     ax.patch.set_alpha(0.0)
     
-    # Usa a escala exata dos dados (vmin e vmax)
-    cmap = plt.get_cmap('jet', 256)
-    cmap.set_bad(alpha=0) 
-    levels = np.linspace(z_min, z_max, 50)
-    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
+    # --- CONFIGURAÇÃO VISUAL TIPO INCERES ---
+    # 1. Paleta de Cores: Vermelho -> Laranja -> Amarelo -> Verde Claro -> Verde Escuro -> Azul
+    cores_personalizadas = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
+    cmap_custom = mcolors.ListedColormap(cores_personalizadas)
     
-    ax.contourf(X_unique, Y_unique, Z, levels=levels, cmap=cmap, norm=norm, extend='both', alpha=1.0)
+    # 2. Níveis Discretos (6 Faixas definidas)
+    num_classes = 6
+    levels = np.linspace(z_min, z_max, num_classes + 1)
+    norm = mcolors.BoundaryNorm(levels, len(cores_personalizadas))
+    
+    # 3. Plotagem Sólida (contourf com poucas camadas cria o efeito de zonas)
+    ax.contourf(X_unique, Y_unique, Z, levels=levels, cmap=cmap_custom, norm=norm, extend='both', alpha=0.9)
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     
@@ -355,10 +355,11 @@ if st.session_state['dados_processados'] is not None:
                 
                 folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}).add_to(m)
                 
+                # Legenda Personalizada (Gradiente de 6 cores)
                 legend_html = f"""
                 <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px; font-family: sans-serif;">
                 <b>{atributo}</b><br>
-                <div style="background: linear-gradient(to right, #000080, #0000ff, #00ffff, #ffff00, #ff0000, #800000); height: 10px; width: 150px;"></div>
+                <div style="background: linear-gradient(to right, #d73027, #fc8d59, #fee08b, #d9ef8b, #91cf60, #4575b4); height: 10px; width: 150px;"></div>
                 <div style="display: flex; justify-content: space-between; width: 150px; font-size: 12px;"><span>{z_min:.2f}</span><span>{z_max:.2f}</span></div>
                 </div>
                 """
