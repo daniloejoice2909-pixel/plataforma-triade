@@ -14,8 +14,6 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
 from matplotlib.patches import Polygon as MplPolygon
-
-# Scipy RBF para interpolação suave (Padrão InCeres)
 from scipy.interpolate import Rbf
 import folium
 from streamlit_folium import st_folium
@@ -35,17 +33,57 @@ except ImportError:
 # ==============================================================================
 # 2. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-configurar_pagina("Diagnóstico de Solo")
+configurar_pagina("Tríade VRT Expert")
 renderizar_cabecalho_sidebar()
 
-st.title("🚜 Tríade: Diagnóstico & VRT (Micros)")
+st.title("🚜 Tríade: Sistema VRT (Expert)")
 
 if 'dados_processados' not in st.session_state: st.session_state['dados_processados'] = None
 if 'geojson_data' not in st.session_state: st.session_state['geojson_data'] = None
 if 'grid_shape' not in st.session_state: st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. FUNÇÕES AUXILIARES
+# 3. SIDEBAR DE PARÂMETROS AGRONÔMICOS (COMPLETA E EDITÁVEL)
+# ==============================================================================
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Parâmetros de Recomendação")
+
+# A. Produtividade
+with st.sidebar.expander("1. Meta de Produtividade", expanded=True):
+    meta_prod = st.number_input("Meta Soja (sc/ha):", value=80.0, step=1.0, min_value=0.0, help="Base para cálculo de exportação")
+
+# B. Calagem
+with st.sidebar.expander("2. Calagem (Corretivos)", expanded=False):
+    st.markdown("**Metas de Solo:**")
+    alvo_ca = st.number_input("Alvo Cálcio (% CTC):", value=60.0, step=1.0)
+    alvo_mg = st.number_input("Alvo Magnésio (% CTC):", value=15.0, step=1.0)
+    alvo_v  = st.number_input("Alvo V% (Saturação):", value=70.0, step=1.0)
+    st.markdown("**Dados do Calcário:**")
+    prnt_calc = st.number_input("PRNT (%):", value=80.0, step=1.0)
+    teor_cao = st.number_input("Teor CaO (%):", value=36.0, step=1.0)
+    teor_mgo = st.number_input("Teor MgO (%):", value=9.0, step=1.0)
+
+# C. Fósforo (Lógica de Reserva)
+with st.sidebar.expander("3. Fósforo (P) - Com Reserva", expanded=False):
+    st.markdown("**Exportação:**")
+    export_p_factor = st.number_input("Exportação (kg P₂O₅/sc):", value=0.9, step=0.1, help="Quanto a planta extrai por saca")
+    st.markdown("**Correção (Tampão):**")
+    fator_tam_p = st.number_input("Fator Tampão (kg P₂O₅/mg):", value=4.0, step=0.5, help="Quanto de P2O5 precisa aplicar para subir 1 mg/dm3 no solo")
+    teor_p2o5_adubo = st.number_input("Teor P₂O₅ Adubo (%):", value=52.0, step=1.0) # MAP padrão
+
+# D. Potássio
+with st.sidebar.expander("4. Potássio (K)", expanded=False):
+    st.markdown("**Correção + Exportação:**")
+    alvo_k_ctc = st.number_input("Meta K na CTC (%):", value=3.5, step=0.1)
+    export_k_factor = st.number_input("Exportação (kg K₂O/sc):", value=2.2, step=0.1)
+    teor_k2o_adubo = st.number_input("Teor K₂O Adubo (%):", value=60.0, step=1.0) # KCl padrão
+
+# E. Gesso
+with st.sidebar.expander("5. Gessagem", expanded=False):
+    fator_gesso = st.number_input("Fator x Argila:", value=50.0, step=5.0)
+
+# ==============================================================================
+# 4. FUNÇÕES AUXILIARES
 # ==============================================================================
 def processar_arquivo_geografico(uploaded_file):
     points = []
@@ -56,7 +94,7 @@ def processar_arquivo_geografico(uploaded_file):
                 with z.open(kml_filename) as f: tree = ET.parse(f)
         else:
             uploaded_file.seek(0); tree = ET.parse(uploaded_file)
-            
+        
         root = tree.getroot()
         namespace = {'kml': 'http://www.opengis.net/kml/2.2'}
         placemarks = root.findall('.//kml:Placemark', namespace)
@@ -64,10 +102,10 @@ def processar_arquivo_geografico(uploaded_file):
             
         for placemark in placemarks:
             name_elem = placemark.find('kml:name', namespace)
-            if name_elem is None: name_elem = placemark.find('name')
             name = name_elem.text.strip() if name_elem is not None and name_elem.text else None
             coord_elem = placemark.find('.//kml:coordinates', namespace)
             if coord_elem is None: coord_elem = placemark.find('.//coordinates')
+            
             if coord_elem is not None and coord_elem.text:
                 coords_text = coord_elem.text.strip().split()
                 if coords_text:
@@ -78,8 +116,7 @@ def processar_arquivo_geografico(uploaded_file):
                             points.append({'ID_PONTO': name, 'latitude': lat, 'longitude': lon})
                         except ValueError: pass
         return pd.DataFrame(points)
-    except Exception as e:
-        st.error(f"Erro KML: {e}"); return pd.DataFrame()
+    except Exception as e: st.error(f"Erro KML: {e}"); return pd.DataFrame()
 
 def limpar_coluna_inteligente(serie):
     def clean_val(val):
@@ -104,7 +141,7 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO (RBF LINEAR - SEM OLHO DE BOI)
+# 5. MOTOR DE CÁLCULO (RBF LINEAR - Padrão InCeres)
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
@@ -119,7 +156,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
 
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # Projeção Aproximada (Graus -> Metros)
+    # Projeção (Graus -> Metros)
     lat_mean = df_grouped['latitude'].mean()
     df_grouped['Y_m'] = df_grouped['latitude'] * 111111
     df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
@@ -141,18 +178,21 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
+    grid_y_m = grid_y * 111111
+    grid_x_m = grid_x * 111111 * np.cos(np.radians(lat_mean))
+
     processed_cols = []
     progresso = st.progress(0)
     
     for i, col in enumerate(cols_validas):
         progresso.progress((i + 1) / len(cols_validas))
         try:
-            dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
+            dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
             if len(dados_col) < 5: continue
             
-            # RBF Linear para continuidade visual
-            interpolator = Rbf(dados_col['longitude'], dados_col['latitude'], dados_col[col], function='linear')
-            z = interpolator(xx, yy)
+            # RBF Linear (Sem Olho de Boi)
+            interpolator = Rbf(dados_col['X_m'], dados_col['Y_m'], dados_col[col], function='linear')
+            z = interpolator(grid_x_m, grid_y_m)
             z = np.clip(z, dados_col[col].min(), dados_col[col].max())
             
             df_result[col] = z.flatten()
@@ -164,7 +204,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 5. GERAÇÃO DE IMAGEM (PALETA 6 FAIXAS - INCERES STYLE)
+# 6. GERAÇÃO DE IMAGEM (6 FAIXAS SÓLIDAS)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all'); plt.clf()
@@ -199,7 +239,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     fig = plt.figure(figsize=(10, 10 * (x_max-x_min)/(y_max-y_min)))
     fig.patch.set_alpha(0.0); ax = plt.axes([0,0,1,1]); ax.set_axis_off()
     
-    # Paleta Vermelho -> Azul (6 cores)
+    # Paleta InCeres (6 cores)
     cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
     cmap = mcolors.ListedColormap(cores)
     boundaries = np.linspace(z_min, z_max, 7)
@@ -214,34 +254,115 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
-# 6. INTERFACE PRINCIPAL
+# 7. LÓGICA DE RECOMENDAÇÃO (ATUALIZADA: P COM RESERVA)
 # ==============================================================================
-aba1, aba2 = st.tabs(["🗺️ Diagnóstico Visual", "🚜 Recomendação (VRT)"])
+def calcular_recomendacoes(df):
+    df_rec = df.copy()
+    
+    # Mapeamento
+    cols = {k: next((c for c in df_rec.columns if k in c.lower()), None) 
+            for k in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem']}
+    
+    # --- A. CALAGEM (Lei do Mínimo/Maior Necessidade) ---
+    if cols['ca'] and cols['mg'] and cols['v%'] and cols['ctc']:
+        # Converte para % CTC (assumindo que lab vem em cmolc)
+        ca_pct = (df_rec[cols['ca']] / df_rec[cols['ctc']]) * 100
+        mg_pct = (df_rec[cols['mg']] / df_rec[cols['ctc']]) * 100
+        v_atual = df_rec[cols['v%']]
+        
+        # NC = (Alvo - Atual) * CTC / 100
+        nc_ca = (alvo_ca - ca_pct) * df_rec[cols['ctc']] / 100
+        nc_mg = (alvo_mg - mg_pct) * df_rec[cols['ctc']] / 100
+        nc_v  = (alvo_v - v_atual) * df_rec[cols['ctc']] / 100
+        
+        # Maior dose vence
+        nc_max = np.maximum.reduce([nc_ca, nc_mg, nc_v])
+        
+        df_rec['Calcario_Ton_ha'] = (nc_max * (100 / prnt_calc))
+        df_rec['Calcario_Ton_ha'] = df_rec['Calcario_Ton_ha'].apply(lambda x: x if x > 0 else 0)
 
-# --- ABA 1: DIAGNÓSTICO ---
+    # --- B. POTÁSSIO (Correção + Exportação) ---
+    if cols['k'] and cols['ctc']:
+        k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
+        
+        # Deficit em cmolc
+        def_k_cmolc = ((alvo_k_ctc - k_pct) / 100) * df_rec[cols['ctc']]
+        
+        # Correção: cmolc -> kg K2O (x 942)
+        # Se deficit for negativo (sobra), desconta
+        k2o_corr = def_k_cmolc * 942 
+        
+        # Exportação (Manutenção)
+        k2o_export = meta_prod * export_k_factor
+        
+        # Total
+        total_k2o = k2o_corr + k2o_export
+        df_rec['KCL_Kg_ha'] = (total_k2o * (100 / teor_k2o_adubo)).apply(lambda x: x if x > 0 else 0)
+
+    # --- C. FÓSFORO (Com Reserva que Desconta) ---
+    col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
+    
+    if col_p:
+        # Nível Crítico (mg/dm3) via P-rem
+        if cols['prem'] is not None:
+            conds = [
+                df_rec[cols['prem']] < 10,
+                (df_rec[cols['prem']] >= 10) & (df_rec[cols['prem']] < 19),
+                (df_rec[cols['prem']] >= 19) & (df_rec[cols['prem']] < 30),
+                df_rec[cols['prem']] >= 30
+            ]
+            choices = [20, 25, 30, 35] # Níveis de referência
+            nc_p = np.select(conds, choices, default=30)
+        else: nc_p = 30 
+            
+        # Gap (Déficit ou Superávit)
+        # Se P_solo > NC, gap_p será negativo (Reserva)
+        gap_p = nc_p - df_rec[col_p]
+        
+        # Dose Correção = Gap * Fator Tampão
+        # Se gap_p for -5 (reserva), e fator for 4, temos -20 kg de "crédito"
+        dose_correcao = gap_p * fator_tam_p 
+        
+        # Dose Exportação (Fixa)
+        dose_export = meta_prod * export_p_factor
+        
+        # Dose Final = Exportação + Correção (que pode ser negativa)
+        dose_total_p2o5 = dose_export + dose_correcao
+        
+        # Transforma em produto e corta negativos
+        df_rec['Fosforo_Kg_ha'] = (dose_total_p2o5 * (100 / teor_p2o5_adubo)).apply(lambda x: x if x > 0 else 0)
+
+    # --- D. GESSO ---
+    if cols['argila']:
+        df_rec['Gesso_Ton_ha'] = (df_rec[cols['argila']] * fator_gesso) / 1000
+
+    return df_rec
+
+# ==============================================================================
+# 8. INTERFACE E EXECUÇÃO
+# ==============================================================================
+aba1, aba2 = st.tabs(["🗺️ Diagnóstico", "🚜 Recomendação VRT"])
+
 with aba1:
-    st.header("1. Importação de Dados")
+    st.header("Importação de Dados")
     c1, c2, c3 = st.columns(3)
-    file_lab = c1.file_uploader("Dados Lab (Excel/CSV)", type=["csv", "xlsx"])
-    file_geo = c2.file_uploader("Pontos (.KMZ/.KML)", type=["kmz", "kml"])
-    file_geojson = c3.file_uploader("Contorno (.geojson)", type=["geojson", "json"])
+    file_lab = c1.file_uploader("Dados Lab (CSV/Excel)", type=["csv", "xlsx"])
+    file_geo = c2.file_uploader("Pontos (KMZ/KML)", type=["kmz", "kml"])
+    file_geojson = c3.file_uploader("Contorno (GeoJSON)", type=["geojson", "json"])
 
     if file_lab and file_geo and file_geojson:
         if st.button("🚀 Processar Ponte de Dados", type="primary"):
             try:
-                # 1. Ler Lab
+                # 1. Load Data
                 if file_lab.name.lower().endswith('.csv'):
                     try: df_lab = pd.read_csv(file_lab)
                     except: file_lab.seek(0); df_lab = pd.read_csv(file_lab, sep=';')
                 else: df_lab = pd.read_excel(file_lab)
                 
-                # 2. Ler Geo
                 df_geo_points = processar_arquivo_geografico(file_geo)
-                
-                # 3. Ler Contorno
                 file_geojson.seek(0); st.session_state['geojson_data'] = json.load(file_geojson)
 
-                # 4. Fazer a Ponte (Merge)
+                # 2. Merge
                 if not df_lab.empty and not df_geo_points.empty:
                     col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra', 'codigo']), df_lab.columns[0])
                     df_lab['id_clean'] = df_lab[col_id].apply(lambda x: str(x).split('.')[0].strip())
@@ -250,139 +371,62 @@ with aba1:
                     df_merged = pd.merge(df_lab, df_geo_points, on='id_clean', how='inner')
                     
                     if not df_merged.empty:
+                        # 3. Interpolate
                         df_krig, shape = processar_matrizes_interpolacao(df_merged, st.session_state['geojson_data'], 100)
                         st.session_state['dados_processados'] = df_krig
                         st.session_state['grid_shape'] = shape
-                        st.success(f"Sucesso! {len(df_merged)} pontos processados.")
-                    else: st.error("Erro: IDs não batem entre Planilha e Mapa.")
-            except Exception as e: st.error(f"Erro crítico: {e}")
+                        st.success(f"Dados processados: {len(df_merged)} pontos.")
+                    else: st.error("Erro no cruzamento de IDs.")
+            except Exception as e: st.error(f"Erro: {e}")
 
-    # Visualização Diagnóstico
     if st.session_state['dados_processados'] is not None:
         st.divider()
-        cols_mapas = [c for c in st.session_state['dados_processados'].columns if c not in ['latitude', 'longitude']]
-        atributo = st.selectbox("Selecione o Nutriente:", cols_mapas)
-        
-        img, bounds, minmax = gerar_imagem_overlay(
-            st.session_state['dados_processados'], atributo, 
-            st.session_state['geojson_data'], st.session_state['grid_shape']
-        )
-        
+        cols = [c for c in st.session_state['dados_processados'].columns if c not in ['latitude', 'longitude']]
+        attr = st.selectbox("Nutriente:", cols)
+        img, bounds, mm = gerar_imagem_overlay(st.session_state['dados_processados'], attr, st.session_state['geojson_data'], st.session_state['grid_shape'])
         if img:
             m = folium.Map(location=[bounds[0][0], bounds[0][1]], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
-            img_b64 = base64.b64encode(img.getvalue()).decode()
-            folium.raster_layers.ImageOverlay(
-                image=f"data:image/png;base64,{img_b64}", bounds=bounds, opacity=0.8
-            ).add_to(m)
+            folium.raster_layers.ImageOverlay(image=f"data:image/png;base64,{base64.b64encode(img.getvalue()).decode()}", bounds=bounds, opacity=0.8).add_to(m)
             folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m)
-            
-            legend = f"""<div style="position:fixed; bottom:30px; right:30px; z-index:9999; background:white; padding:10px; border:1px solid black;">
-            <b>{atributo}</b><br>
-            <div style="display:flex; width:150px; height:10px;">
-                <div style="flex:1; background:#d73027;"></div><div style="flex:1; background:#fc8d59;"></div>
-                <div style="flex:1; background:#fee08b;"></div><div style="flex:1; background:#d9ef8b;"></div>
-                <div style="flex:1; background:#91cf60;"></div><div style="flex:1; background:#4575b4;"></div>
-            </div>
-            <div style="display:flex; justify-content:space-between; font-size:10px;"><span>{minmax[0]:.2f}</span><span>{minmax[1]:.2f}</span></div>
-            </div>"""
-            m.get_root().html.add_child(folium.Element(legend))
-            st_folium(m, height=500, use_container_width=True, key=f"mapa_diag_{atributo}")
+            st_folium(m, height=500, use_container_width=True, key=f"mapa_{attr}")
 
-# --- ABA 2: RECOMENDAÇÃO VRT ---
 with aba2:
-    st.header("🚜 Mapas de Recomendação")
-    
+    st.header("Mapas de Recomendação VRT")
     if st.session_state['dados_processados'] is None:
-        st.warning("⚠️ Processe os dados na aba 'Diagnóstico' primeiro.")
+        st.warning("Gere o diagnóstico primeiro.")
     else:
-        df_vrt = st.session_state['dados_processados'].copy()
-        
-        # --- 1. CORRETIVOS ---
-        st.subheader("1. Corretivos (Calcário/Gesso)")
-        c1, c2 = st.columns(2)
-        with c1.expander("🟣 Calagem", expanded=False):
-            v_alvo = st.number_input("V% Alvo:", value=60.0)
-            prnt = st.number_input("PRNT:", value=85.0)
-            col_v = next((c for c in df_vrt.columns if 'v%' in c.lower()), None)
-            col_ctc = next((c for c in df_vrt.columns if 'ctc' in c.lower()), None)
-            if col_v and col_ctc:
-                df_vrt['Calcario_Ton'] = ((v_alvo - df_vrt[col_v]) * df_vrt[col_ctc] / 100) * (100 / prnt)
-                df_vrt['Calcario_Ton'] = df_vrt['Calcario_Ton'].apply(lambda x: x if x > 0 else 0)
+        # Botão para recalcular com os parâmetros da Sidebar
+        if st.button("🔄 Calcular/Atualizar Recomendações"):
+            df_calc = calcular_recomendacoes(st.session_state['dados_processados'])
+            st.session_state['dados_rec'] = df_calc
+            st.success("Recomendações Calculadas!")
 
-        with c2.expander("⚪ Gessagem", expanded=False):
-            col_argila = next((c for c in df_vrt.columns if 'argila' in c.lower()), None)
-            if col_argila:
-                df_vrt['Gesso_Ton'] = (df_vrt[col_argila] * 50) / 1000
+        if 'dados_rec' in st.session_state:
+            cols_rec = [c for c in st.session_state['dados_rec'].columns if any(x in c for x in ['Ton', 'Kg', 'ha'])]
+            if cols_rec:
+                escolha = st.selectbox("Mapa de Aplicação:", cols_rec)
+                
+                # Stats
+                media_dose = st.session_state['dados_rec'][escolha].mean()
+                total_produto = st.session_state['dados_rec'][escolha].sum() * (0.01) # Estimativa
+                
+                c1, c2 = st.columns(2)
+                c1.metric("Dose Média (kg ou ton/ha)", f"{media_dose:.1f}")
+                c2.info(f"Parâmetros usados: Meta {meta_prod} sc/ha, PRNT {prnt_calc}%, K {alvo_k_ctc}% CTC")
 
-        # --- 2. MICRONUTRIENTES (NOVO) ---
-        st.subheader("2. Micronutrientes (Padrão Cerrado)")
-        
-        # Dicionário de Configuração Padrão (Base Embrapa)
-        # Nutriente: [Nível Crítico (Baixo), Dose Recomendada (kg/ha)]
-        micros_config = {
-            'Boro (B)':   {'col': 'b',  'critico': 0.3, 'dose': 2.0},
-            'Zinco (Zn)': {'col': 'zn', 'critico': 1.2, 'dose': 4.0},
-            'Cobre (Cu)': {'col': 'cu', 'critico': 0.5, 'dose': 2.0},
-            'Mang. (Mn)': {'col': 'mn', 'critico': 4.0, 'dose': 5.0}
-        }
-        
-        cm1, cm2 = st.columns(2)
-        count = 0
-        for nome, cfg in micros_config.items():
-            # Tenta achar a coluna na planilha (ex: 'B', 'Boro', 'Zn', 'Zinco')
-            col_real = next((c for c in df_vrt.columns if cfg['col'] == c.lower() or cfg['col'] == c.lower().split(' ')[0]), None)
-            
-            if col_real:
-                with (cm1 if count % 2 == 0 else cm2).expander(f"💊 {nome}", expanded=True):
-                    critico = st.number_input(f"Nível Crítico {nome} (mg/dm³):", value=cfg['critico'], key=f"crit_{nome}")
-                    dose_rec = st.number_input(f"Dose a aplicar (kg/ha):", value=cfg['dose'], key=f"dose_{nome}")
+                img_rec, bounds_rec, mm_rec = gerar_imagem_overlay(
+                    st.session_state['dados_rec'], escolha, 
+                    st.session_state['geojson_data'], st.session_state['grid_shape']
+                )
+                if img_rec:
+                    m2 = folium.Map(location=[bounds_rec[0][0], bounds_rec[0][1]], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
+                    folium.raster_layers.ImageOverlay(image=f"data:image/png;base64,{base64.b64encode(img_rec.getvalue()).decode()}", bounds=bounds_rec, opacity=0.8).add_to(m2)
+                    folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m2)
                     
-                    # Lógica de Recomendação (Simples):
-                    # Se Valor < Crítico -> Aplica Dose. Se Maior -> Aplica 0.
-                    nome_mapa = f"Rec_{nome.split()[0]}_kg_ha"
+                    # Legenda
+                    legend_html = f"""<div style="position:fixed;bottom:30px;right:30px;z-index:9999;background:white;padding:10px;border:1px solid black;"><b>{escolha}</b><br>
+                    <div style="display:flex;width:150px;height:10px;"><div style="flex:1;background:#d73027;"></div><div style="flex:1;background:#fc8d59;"></div><div style="flex:1;background:#fee08b;"></div><div style="flex:1;background:#d9ef8b;"></div><div style="flex:1;background:#91cf60;"></div><div style="flex:1;background:#4575b4;"></div></div>
+                    <div style="display:flex;justify-content:space-between;font-size:10px;"><span>{mm_rec[0]:.1f}</span><span>{mm_rec[1]:.1f}</span></div></div>"""
+                    m2.get_root().html.add_child(folium.Element(legend_html))
                     
-                    # np.where é mais rápido que apply
-                    df_vrt[nome_mapa] = np.where(df_vrt[col_real] < critico, dose_rec, 0.0)
-                count += 1
-        
-        st.divider()
-        
-        # --- VISUALIZAÇÃO VRT ---
-        mapas_vrt = [c for c in df_vrt.columns if 'ton' in c.lower() or 'kg_ha' in c.lower()]
-        
-        if mapas_vrt:
-            escolha_vrt = st.selectbox("Selecione o Mapa de Aplicação:", mapas_vrt)
-            
-            # Filtra apenas onde tem dose > 0 para estatística
-            dose_media = df_vrt[df_vrt[escolha_vrt] > 0][escolha_vrt].mean()
-            if pd.isna(dose_media): dose_media = 0
-            
-            c_info1, c_info2 = st.columns(2)
-            c_info1.info(f"Dose Média (nas áreas de aplicação): {dose_media:.2f}")
-            c_info2.info(f"Área com Deficiência: {(len(df_vrt[df_vrt[escolha_vrt]>0])/len(df_vrt))*100:.1f}% do talhão")
-            
-            img_vrt, bounds_vrt, minmax_vrt = gerar_imagem_overlay(
-                df_vrt, escolha_vrt, 
-                st.session_state['geojson_data'], st.session_state['grid_shape']
-            )
-            
-            if img_vrt:
-                m_vrt = folium.Map(location=[bounds_vrt[0][0], bounds_vrt[0][1]], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
-                img_b64_vrt = base64.b64encode(img_vrt.getvalue()).decode()
-                folium.raster_layers.ImageOverlay(
-                    image=f"data:image/png;base64,{img_b64_vrt}", bounds=bounds_vrt, opacity=0.8
-                ).add_to(m_vrt)
-                folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m_vrt)
-                
-                legend_vrt = f"""<div style="position:fixed; bottom:30px; right:30px; z-index:9999; background:white; padding:10px; border:1px solid black;">
-                <b>{escolha_vrt}</b><br>
-                <div style="display:flex; width:150px; height:10px;">
-                    <div style="flex:1; background:#d73027;"></div><div style="flex:1; background:#fc8d59;"></div>
-                    <div style="flex:1; background:#fee08b;"></div><div style="flex:1; background:#d9ef8b;"></div>
-                    <div style="flex:1; background:#91cf60;"></div><div style="flex:1; background:#4575b4;"></div>
-                </div>
-                <div style="display:flex; justify-content:space-between; font-size:10px;"><span>{minmax_vrt[0]:.2f}</span><span>{minmax_vrt[1]:.2f}</span></div>
-                </div>"""
-                m_vrt.get_root().html.add_child(folium.Element(legend_vrt))
-                
-                st_folium(m_vrt, height=500, use_container_width=True, key=f"mapa_vrt_{escolha_vrt}")
+                    st_folium(m2, height=500, use_container_width=True, key=f"mapa_rec_{escolha}")
