@@ -13,7 +13,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
-from matplotlib.patches import PathPatch # Essencial para o recorte perfeito
+from matplotlib.patches import PathPatch
 from scipy.interpolate import Rbf
 from scipy.interpolate import NearestNDInterpolator
 import folium
@@ -62,7 +62,7 @@ with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
 
 with st.sidebar.expander("3. Fósforo (P)", expanded=False):
     export_p_factor = st.number_input("Exportação P (kg/sc):", value=0.8, step=0.1)
-    teor_p2o5_adubo = st.number_input("Teor P₂O₅ Adubo (%):", value=21.0, step=1.0, help="Insira o teor do adubo escolhido")
+    teor_p2o5_adubo = st.number_input("Teor P₂O₅ Adubo (%):", value=21.0, step=1.0)
     fator_tam_p = st.number_input("Fator Tampão (kg P₂O₅/mg):", value=5.0, step=0.5)
     st.caption("Níveis Críticos P-rem:")
     nc_p1 = st.number_input("0 - 4:", value=6.0)
@@ -174,12 +174,12 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 5. MOTOR DE INTERPOLAÇÃO (EXTRAPOLAÇÃO PARA CORTE LIMPO)
+# 5. MOTOR DE INTERPOLAÇÃO (EXTRAPOLAÇÃO MÁXIMA PARA PREENCHIMENTO)
 # ==============================================================================
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150): # Resolução maior
     df = df_input.copy()
     if 'latitude_y' in df.columns: df.rename(columns={'latitude_y': 'latitude', 'longitude_y': 'longitude'}, inplace=True)
-    elif 'latitude_x' in df.columns: df.rename(columns={'latitude_x': 'latitude', 'longitude_x': 'longitude'}, inplace=True)
+    elif 'latitude_x' in df.columns and 'latitude' not in df.columns: df.rename(columns={'latitude_x': 'latitude', 'longitude_x': 'longitude'}, inplace=True)
     
     df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
     df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
@@ -197,9 +197,10 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     
-    # MARGEM DE EXTRAPOLAÇÃO (IMPORTANTE PARA PREENCHER BORDAS)
-    margin_x = (x_max - x_min) * 0.2 # 20% de margem
-    margin_y = (y_max - y_min) * 0.2
+    # EXTRAPOLAÇÃO AGRESSIVA (30% de margem)
+    # Isso garante que o quadrado de cor seja MAIOR que o polígono
+    margin_x = (x_max - x_min) * 0.3 
+    margin_y = (y_max - y_min) * 0.3
     
     grid_x = np.linspace(x_min - margin_x, x_max + margin_x, resolucao_grid)
     grid_y = np.linspace(y_min - margin_y, y_max + margin_y, resolucao_grid)
@@ -217,15 +218,22 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             X_m = dados['longitude'] * scale_x
             Y_m = dados['latitude'] * scale_y
             
+            # Interpolador RBF (Suave)
             try:
-                # Smooth=0.1 ajuda a espalhar melhor nas bordas
-                interp = Rbf(X_m, Y_m, dados[col], function='linear', smooth=0.1)
+                # smooth=0.1 evita buracos nos pontos
+                interp = Rbf(X_m, Y_m, dados[col], function='linear', smooth=0.1) 
                 z = interp(xx * scale_x, yy * scale_y)
             except:
+                # Fallback para Nearest (Garante que TODO pixel tenha cor)
                 interp = NearestNDInterpolator(list(zip(X_m, Y_m)), dados[col])
                 z = interp(xx * scale_x, yy * scale_y)
             
-            # Clip
+            # Fallback 2: Se RBF gerar NaNs nas bordas, preenche com Nearest
+            if np.isnan(z).any():
+                interp_near = NearestNDInterpolator(list(zip(X_m, Y_m)), dados[col])
+                z_near = interp_near(xx * scale_x, yy * scale_y)
+                z = np.where(np.isnan(z), z_near, z)
+
             z = np.clip(z, dados[col].min(), dados[col].max())
             df_result[col] = z.flatten()
         except: continue
@@ -235,7 +243,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 6. GERAÇÃO DE IMAGEM (COM CLIPPING VETORIAL)
+# 6. GERAÇÃO DE IMAGEM (CORTE CIRÚRGICO)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all'); plt.clf()
@@ -252,7 +260,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     z_min, z_max = np.nanmin(dados_validos), np.nanmax(dados_validos)
     if z_min == z_max: z_min -= 0.01; z_max += 0.01
 
-    fig = plt.figure(figsize=(10, 10)) # Resolução maior
+    fig = plt.figure(figsize=(10, 10), dpi=150) # Resolução Alta
     ax = plt.axes([0,0,1,1]); ax.set_axis_off()
     
     cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
@@ -260,36 +268,40 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     bounds = np.linspace(z_min, z_max, 7)
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
     
-    # 1. Plota o retângulo inteiro (com excesso)
+    # 1. Desenha o quadrado inteiro (passando das bordas)
     contour = ax.contourf(X_unique, Y_unique, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=0.9)
     
-    # 2. Aplica o "Cookie Cutter" (Máscara Vetorial Perfeita)
+    # 2. Aplica o CLIPPING usando o GeoJSON
     try:
         coords = extrair_coordenadas_limpas(geojson_data)
         if coords:
-            # Cria o caminho do polígono
             path = MplPath(coords)
-            # Cria o Patch (o formato do corte)
             patch = PathPatch(path, facecolor='none', edgecolor='none', transform=ax.transData)
             ax.add_patch(patch)
             
-            # Aplica o corte em CADA pedaço do contourf
+            # Corta tudo que estiver fora do Patch
             for collection in contour.collections:
                 collection.set_clip_path(patch)
-                
-            # Ajusta o zoom para a área do polígono (não do grid estendido)
+            
+            # Ajusta o foco da câmera (Limites) exatamente para o polígono
+            # Isso elimina as áreas brancas extras da extrapolação
             poly_arr = np.array(coords)
             ax.set_xlim(poly_arr[:,0].min(), poly_arr[:,0].max())
             ax.set_ylim(poly_arr[:,1].min(), poly_arr[:,1].max())
-    except Exception as e:
-        # Se falhar o recorte, mostra o quadrado normal
-        pass
+    except: pass
     
     img_data = BytesIO()
     plt.savefig(img_data, format='png', transparent=True, bbox_inches='tight', pad_inches=0)
     img_data.seek(0); plt.close(fig)
     
-    return img_data, [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]], [z_min, z_max]
+    # Retorna bounds do polígono (para o Folium encaixar certo)
+    if coords:
+        poly_arr = np.array(coords)
+        final_bounds = [[poly_arr[:,1].min(), poly_arr[:,0].min()], [poly_arr[:,1].max(), poly_arr[:,0].max()]]
+    else:
+        final_bounds = [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]]
+
+    return img_data, final_bounds, [z_min, z_max]
 
 def criar_legenda_html(min_val, max_val, titulo):
     cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
@@ -346,8 +358,11 @@ def calcular_vrt(df):
             df_rec[cols['prem']] > 30
         ]
         nc_grid = np.select(conds, [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5], default=30)
-        gap = nc_grid - df_rec[col_p]
+        gap = nc_grid - df_rec[col_p] # Se P_solo > NC, gap é negativo (reserva)
+        
+        # Dose total = Exportação + Correção (que pode ser negativa)
         dose_p_total = (gap * fator_tam_p) + (meta_prod * export_p_factor)
+        
         df_rec['Adubo_Fosfatado_Kg_ha'] = (dose_p_total * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
     # 4. GESSO
@@ -406,11 +421,11 @@ with aba1:
                 
                 if not df_m.empty:
                     st.session_state['geojson_data'] = geo_data
-                    df_krig, shape = processar_matrizes_interpolacao(df_m, geo_data, 100)
+                    df_krig, shape = processar_matrizes_interpolacao(df_m, geo_data, 150) # GRID FINO
                     if not df_krig.empty:
                         st.session_state['dados_processados'] = df_krig
                         st.session_state['grid_shape'] = shape
-                        st.success(f"Sucesso! {len(df_m)} pontos.")
+                        st.success(f"Sucesso! {len(df_m)} pontos usados.")
                     else: st.warning("Erro na interpolação.")
                 else: st.error("Erro IDs.")
             except Exception as e: st.error(f"Erro: {e}")
