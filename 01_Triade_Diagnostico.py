@@ -75,6 +75,7 @@ with st.sidebar.expander("3. Fósforo (P)", expanded=False):
 
 # D. Potássio
 with st.sidebar.expander("4. Potássio (K)", expanded=False):
+    st.info("A exportação será somada integralmente (sem desconto de reserva).")
     alvo_k_ctc = st.number_input("Meta K na CTC (%):", value=3.5, step=0.1)
     export_k_factor = st.number_input("Exportação K (kg/sc):", value=1.2, step=0.1)
     teor_k2o_adubo = st.number_input("Teor K₂O Adubo (%):", value=60.0, step=1.0)
@@ -233,9 +234,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     cols_finais = ['latitude', 'longitude'] + [c for c in cols_validas if c in df_result.columns]
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
-# ==============================================================================
-# 6. GERAÇÃO DE IMAGEM COM LEGENDA
-# ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all'); plt.clf()
     try:
@@ -264,9 +262,8 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     fig = plt.figure(figsize=(8, 8))
     ax = plt.axes([0,0,1,1]); ax.set_axis_off()
     
-    # Paleta Fixa
-    cores_hex = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
-    cmap = mcolors.ListedColormap(cores_hex)
+    cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
+    cmap = mcolors.ListedColormap(cores)
     bounds = np.linspace(z_min, z_max, 7)
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
     
@@ -279,30 +276,20 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]], [z_min, z_max]
 
 def criar_legenda_html(min_val, max_val, titulo):
-    # Cria uma legenda HTML horizontal
     cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
-    width = 100 / len(cores)
-    
-    div_cores = ""
-    for cor in cores:
-        div_cores += f'<div style="flex:1; background:{cor}; height:15px;"></div>'
-        
-    html = f"""
-    <div style="position: fixed; bottom: 50px; right: 50px; z-index:9999; background-color: rgba(255,255,255,0.9); padding: 10px; border-radius: 5px; border: 1px solid grey; font-family: sans-serif; font-size: 12px;">
+    div_cores = "".join([f'<div style="flex:1; background:{c}; height:15px;"></div>' for c in cores])
+    return f"""
+    <div style="position: fixed; bottom: 50px; right: 50px; z-index:9999; background: rgba(255,255,255,0.9); padding: 10px; border: 1px solid #ccc; border-radius: 5px; font-family: sans-serif; font-size: 12px;">
         <b>{titulo}</b><br>
-        <div style="display:flex; width:200px; margin-top:5px; border:1px solid #ccc;">
-            {div_cores}
-        </div>
+        <div style="display:flex; width:200px; margin-top:5px; border:1px solid #999;">{div_cores}</div>
         <div style="display:flex; justify-content: space-between; width:200px; margin-top:2px;">
-            <span>{min_val:.2f}</span>
-            <span>{max_val:.2f}</span>
+            <span>{min_val:.2f}</span><span>{max_val:.2f}</span>
         </div>
     </div>
     """
-    return html
 
 # ==============================================================================
-# 7. CÁLCULO VRT
+# 6. CÁLCULO VRT
 # ==============================================================================
 def calcular_vrt(df):
     df_rec = df.copy()
@@ -311,6 +298,7 @@ def calcular_vrt(df):
     for alvo in targets:
         cols[alvo] = next((c for c in df_rec.columns if alvo == c.lower() or (alvo in c.lower() and len(c) < 15)), None)
 
+    # 1. CALAGEM
     if cols['ca'] and cols['mg'] and cols['ctc']:
         def_ca = ((alvo_ca/100) * df_rec[cols['ctc']]) - df_rec[cols['ca']]
         def_mg = ((alvo_mg/100) * df_rec[cols['ctc']]) - df_rec[cols['mg']]
@@ -321,13 +309,22 @@ def calcular_vrt(df):
         dose_final = np.maximum(dose_ca, dose_mg) * (100 / (prnt_calc if prnt_calc > 0 else 1))
         df_rec['Calcario_Ton_ha'] = dose_final.apply(lambda x: x if x > 0 else 0)
 
+    # 2. POTÁSSIO (Lógica: Correção >= 0 + Exportação Total)
     if cols['k'] and cols['ctc']:
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
+        # Deficit para chegar na meta (cmol)
         def_k = ((alvo_k_ctc - k_pct)/100) * df_rec[cols['ctc']]
-        k_repo = (def_k * 942) + (meta_prod * export_k_factor)
-        df_rec['KCL_Kg_ha'] = (k_repo * (100 / (teor_k2o_adubo if teor_k2o_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
+        
+        # Converte para kg K2O/ha. SE for negativo (sobra), vira ZERO.
+        k_correcao = (def_k * 942).clip(lower=0) 
+        
+        # Exportação SEMPRE é somada
+        k_export = meta_prod * export_k_factor
+        
+        k_total = k_correcao + k_export
+        df_rec['KCL_Kg_ha'] = (k_total * (100 / (teor_k2o_adubo if teor_k2o_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
-    # FÓSFORO GENÉRICO
+    # 3. FÓSFORO (Com Reserva)
     col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
     if col_p and cols['prem']:
         conds = [
@@ -338,14 +335,18 @@ def calcular_vrt(df):
             df_rec[cols['prem']] > 30
         ]
         nc_grid = np.select(conds, [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5], default=30)
-        gap = nc_grid - df_rec[col_p]
-        dose_p = (gap * fator_tam_p) + (meta_prod * export_p_factor)
-        # NOME GENÉRICO
-        df_rec['Adubo_Fosfatado_Kg_ha'] = (dose_p * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
+        gap = nc_grid - df_rec[col_p] # Se P_solo > NC, gap é negativo (reserva)
+        
+        # Aqui a reserva (gap negativo) ABATE a exportação
+        dose_p_total = (gap * fator_tam_p) + (meta_prod * export_p_factor)
+        
+        df_rec['Adubo_Fosfatado_Kg_ha'] = (dose_p_total * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
+    # 4. GESSO
     if cols['argila']:
         df_rec['Gesso_Ton_ha'] = (df_rec[cols['argila']] * fator_gesso) / 1000
 
+    # 5. MICROS
     if cols['b']: df_rec['Boro_Kg_ha'] = np.where(df_rec[cols['b']] < crit_b, dose_b, 0)
     if cols['zn']: df_rec['Zinco_Kg_ha'] = np.where(df_rec[cols['zn']] < crit_zn, dose_zn, 0)
     if cols['mn']: df_rec['Manganes_Kg_ha'] = np.where(df_rec[cols['mn']] < crit_mn, dose_mn, 0)
@@ -386,7 +387,8 @@ with aba1:
                 if f_lab.name.endswith('.csv'):
                     try: df_lab = pd.read_csv(f_lab, header=header_row)
                     except: f_lab.seek(0); df_lab = pd.read_csv(f_lab, sep=';', header=header_row)
-                else: df_lab = pd.read_excel(f_lab, sheet_name=selected_sheet, header=header_row)
+                else:
+                    df_lab = pd.read_excel(f_lab, sheet_name=selected_sheet, header=header_row)
                 
                 df_pts = processar_arquivo_geografico(f_geo)
                 f_json.seek(0); geo_data = json.load(f_json)
@@ -414,16 +416,10 @@ with aba1:
             csv = st.session_state['dados_processados'].to_csv(index=False).encode('utf-8')
             st.download_button("💾 Baixar Ponte (CSV)", csv, "ponte_vrt.csv", "text/csv")
             
-            # Estatísticas
-            series = st.session_state['dados_processados'][attr]
-            s_min, s_max, s_mean = series.min(), series.max(), series.mean()
-            # Tenta inferir unidade
-            unit = "mg/dm³"
-            if "ph" in attr.lower(): unit = ""
-            elif "v%" in attr.lower(): unit = "%"
-            elif "ca" in attr.lower() or "mg" in attr.lower() or "k" in attr.lower() and "kg" not in attr.lower(): unit = "cmol_c/dm³"
-            
-            st.info(f"📊 **{attr}** | Mín: {s_min:.2f} {unit} | Máx: {s_max:.2f} {unit} | Média: {s_mean:.2f} {unit}")
+            # Estatísticas e Legenda
+            s_val = st.session_state['dados_processados'][attr]
+            s_min, s_max, s_mean = s_val.min(), s_val.max(), s_val.mean()
+            st.info(f"📊 **{attr}** | Mín: {s_min:.2f} | Máx: {s_max:.2f} | Média: {s_mean:.2f}")
 
             img, bounds, mm = gerar_imagem_overlay(st.session_state['dados_processados'], attr, st.session_state['geojson_data'], st.session_state['grid_shape'])
             if img:
@@ -432,9 +428,8 @@ with aba1:
                 folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x:{'color':'black','fillOpacity':0}).add_to(m)
                 
                 # Legenda Flutuante
-                legend_html = criar_legenda_html(mm[0], mm[1], f"{attr} ({unit})")
+                legend_html = criar_legenda_html(mm[0], mm[1], attr)
                 m.get_root().html.add_child(folium.Element(legend_html))
-                
                 st_folium(m, height=500, use_container_width=True, key="mapa_diag")
 
 # --- ABA 2: VRT ---
@@ -452,15 +447,10 @@ with aba2:
                 escolha = st.selectbox("Mapa de Aplicação:", cols_rec)
                 
                 # Estatísticas
-                series_rec = st.session_state['dados_rec'][escolha]
-                # Filtra apenas onde aplica (>0) para média real
-                aplicaveis = series_rec[series_rec > 0]
-                r_min, r_max = series_rec.min(), series_rec.max()
-                r_mean = aplicaveis.mean() if not aplicaveis.empty else 0
-                r_total = series_rec.sum() * 0.01 # Estimativa grosseira por pixel (ajuste conforme area real)
-                
-                unit_rec = "Ton/ha" if "Ton" in escolha else "kg/ha"
-                st.info(f"🚜 **{escolha}** | Dose Média (onde aplica): {r_mean:.1f} {unit_rec} | Máx: {r_max:.1f} {unit_rec}")
+                s_rec = st.session_state['dados_rec'][escolha]
+                r_min, r_max = s_rec.min(), s_rec.max()
+                r_mean = s_rec[s_rec > 0].mean() if not s_rec[s_rec > 0].empty else 0
+                st.info(f"🚜 **{escolha}** | Dose Média: {r_mean:.1f} | Máx: {r_max:.1f}")
                 
                 img, bounds, mm = gerar_imagem_overlay(st.session_state['dados_rec'], escolha, st.session_state['geojson_data'], st.session_state['grid_shape'])
                 if img:
@@ -468,7 +458,6 @@ with aba2:
                     folium.raster_layers.ImageOverlay(image=f"data:image/png;base64,{base64.b64encode(img.getvalue()).decode()}", bounds=bounds, opacity=0.8).add_to(m2)
                     folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x:{'color':'black','fillOpacity':0}).add_to(m2)
                     
-                    legend_html = criar_legenda_html(mm[0], mm[1], f"{escolha}")
+                    legend_html = criar_legenda_html(mm[0], mm[1], escolha)
                     m2.get_root().html.add_child(folium.Element(legend_html))
-                    
                     st_folium(m2, height=500, use_container_width=True, key="mapa_vrt")
