@@ -12,3 +12,4 @@ openpyxl
 pillow
 plotly
 scikit-learn
+xlrd
