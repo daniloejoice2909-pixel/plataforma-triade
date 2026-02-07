@@ -40,50 +40,51 @@ if 'grid_shape' not in st.session_state:
     st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. FUNÇÕES DE DEBUG E AUXILIARES
+# 3. FAXINEIRO DE GEOJSON (NOVA FUNÇÃO CRÍTICA)
 # ==============================================================================
-def extrair_centroide_geojson(geojson_data):
-    """Calcula o centro aproximado do GeoJSON para comparação"""
+def extrair_coordenadas_limpas(geojson_data):
+    """
+    Entra no GeoJSON, ignora metadados complexos e remove a Altitude (Z)
+    se ela existir. Retorna apenas a lista plana de [Lon, Lat].
+    """
     try:
-        coords = []
-        tipo = geojson_data['features'][0]['geometry']['type']
+        # Tenta achar a geometria
+        if 'features' in geojson_data:
+            geom = geojson_data['features'][0]['geometry']
+        elif 'geometry' in geojson_data:
+            geom = geojson_data['geometry']
+        else:
+            geom = geojson_data
+            
+        coords_raw = []
+        tipo = geom['type']
+        
         if tipo == 'Polygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+            coords_raw = geom['coordinates'][0]
         elif tipo == 'MultiPolygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
+            coords_raw = geom['coordinates'][0][0]
+            
+        # O PULO DO GATO: Remove o 3º elemento (Altitude) se existir
+        # Transforma [Lon, Lat, Alt] -> [Lon, Lat]
+        coords_limpas = [ponto[:2] for ponto in coords_raw]
         
-        if not coords: return None, None
-        
-        # Converte para array numpy
-        arr = np.array(coords)
-        # GeoJSON é sempre [Lon, Lat] (X, Y)
-        lon_geo = np.mean(arr[:, 0])
-        lat_geo = np.mean(arr[:, 1])
-        return lat_geo, lon_geo
-    except:
-        return None, None
+        return coords_limpas
+    except Exception as e:
+        print(f"Erro ao limpar GeoJSON: {e}")
+        return []
 
-def plotar_conferencia_geometria(df, geojson_data):
+def plotar_conferencia_geometria(df, coords_geojson):
     fig, ax = plt.subplots(figsize=(6, 6))
     
     # Pontos CSV
     ax.scatter(df['longitude'], df['latitude'], c='red', s=15, label='Pontos CSV', alpha=0.7, zorder=5)
     
-    # GeoJSON
-    try:
-        tipo = geojson_data['features'][0]['geometry']['type']
-        coords = []
-        if tipo == 'Polygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
-        elif tipo == 'MultiPolygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
-            
-        if coords:
-            poly = MplPolygon(coords, closed=True, edgecolor='blue', facecolor='none', linewidth=2, label='GeoJSON', zorder=10)
-            ax.add_patch(poly)
-    except: pass
+    # GeoJSON Limpo
+    if coords_geojson:
+        poly = MplPolygon(coords_geojson, closed=True, edgecolor='blue', facecolor='none', linewidth=2, label='GeoJSON', zorder=10)
+        ax.add_patch(poly)
 
-    ax.set_title("Visualização Espacial")
+    ax.set_title("Visualização Espacial (Tira-Teima)")
     ax.legend()
     ax.grid(True, linestyle='--', alpha=0.5)
     ax.autoscale(enable=True)
@@ -116,7 +117,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df['latitude'] = df['latitude'].round(5)
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # Grid com margem generosa para evitar cortes errados
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
     y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
     
@@ -147,7 +147,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_result, (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 5. GERAÇÃO DE IMAGEM
+# 5. GERAÇÃO DE IMAGEM BLINDADA (V74)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     df_sorted = df_plot.sort_values(by=['latitude', 'longitude'])
@@ -165,29 +165,33 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     x_min, x_max = X_unique.min(), X_unique.max()
     y_min, y_max = Y_unique.min(), Y_unique.max()
 
-    # Recorte (Cookie Cutter)
+    # --- RECORTE BLINDADO COM CLEANER ---
     mask_sucesso = False
+    coords_limpas = []
     try:
-        coords = []
-        tipo = geojson_data['features'][0]['geometry']['type']
-        if tipo == 'Polygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
-        elif tipo == 'MultiPolygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
-            
-        if len(coords) > 0:
-            poly_path = MplPath(coords)
+        # Usa o Faxineiro para pegar coordenadas puras [Lon, Lat]
+        coords_limpas = extrair_coordenadas_limpas(geojson_data)
+        
+        if len(coords_limpas) > 0:
+            poly_path = MplPath(coords_limpas)
             XX, YY = np.meshgrid(X_unique, Y_unique)
             points = np.column_stack((XX.flatten(), YY.flatten()))
             
             mask_flat = poly_path.contains_points(points)
             mask_grid = mask_flat.reshape(Z.shape)
             
+            # Só aplica se não apagar o mapa inteiro
             if np.any(mask_grid): 
                 Z[~mask_grid] = np.nan
                 mask_sucesso = True
-    except: pass
+            else:
+                # Debug no Console
+                print("Mascara resultou em tudo False (Mapa Vazio).")
+                
+    except Exception as e:
+        print(f"Erro fatal no recorte: {e}")
 
+    # Escalas e Cores
     z_min, z_max = np.nanmin(Z), np.nanmax(Z)
     if np.isnan(z_min): z_min = 0
     if np.isnan(z_max): z_max = 1
@@ -235,6 +239,7 @@ if not file_csv or not file_geojson:
         st.rerun()
 
 if file_csv and file_geojson:
+    # 1. Leitura CSV
     try:
         df_raw = pd.read_csv(file_csv)
         if len(df_raw.columns) < 2:
@@ -244,10 +249,16 @@ if file_csv and file_geojson:
     except Exception as e:
         st.error(f"Erro CSV: {e}"); st.stop()
 
+    # 2. Leitura GeoJSON
     try:
         file_geojson.seek(0)
         geojson_data = json.load(file_geojson)
         st.session_state['geojson_data'] = geojson_data
+        
+        # --- NOVO: Extrai coordenadas limpas imediatamente ---
+        coords_limpas = extrair_coordenadas_limpas(geojson_data)
+        if not coords_limpas:
+            st.warning("⚠️ O GeoJSON parece vazio ou inválido. O recorte não funcionará.")
     except:
         st.error("GeoJSON inválido."); st.stop()
 
@@ -262,62 +273,60 @@ if file_csv and file_geojson:
     df_raw = df_raw.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
 
     # ------------------------------------------------------------------
-    # O TIRA-TEIMA NUMÉRICO (V73)
+    # PAINEL DE DIAGNÓSTICO INTELIGENTE
     # ------------------------------------------------------------------
     st.divider()
     st.subheader("🕵️ Diagnóstico de Coordenadas")
 
-    # 1. Tratamento Prévio para o Debug
     try:
         df_raw['latitude'] = pd.to_numeric(df_raw['latitude'].astype(str).str.replace(',', '.'), errors='coerce')
         df_raw['longitude'] = pd.to_numeric(df_raw['longitude'].astype(str).str.replace(',', '.'), errors='coerce')
         df_debug = df_raw.dropna(subset=['latitude', 'longitude'])
 
-        # Médias do CSV
-        lat_csv = df_debug['latitude'].mean()
-        lon_csv = df_debug['longitude'].mean()
+        # Se temos coordenadas limpas do GeoJSON, comparamos
+        if coords_limpas:
+            # Pega o primeiro ponto do GeoJSON para comparar
+            lon_geo_sample = coords_limpas[0][0]
+            lat_geo_sample = coords_limpas[0][1]
+            
+            lat_csv_sample = df_debug['latitude'].mean()
+            lon_csv_sample = df_debug['longitude'].mean()
 
-        # Médias do GeoJSON
-        lat_geo, lon_geo = extrair_centroide_geojson(geojson_data)
-
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            st.info(f"📍 **Centro do CSV:**\n\nLat: {lat_csv:.5f}\n\nLon: {lon_csv:.5f}")
-        with col_d2:
-            if lat_geo:
-                st.info(f"🗺️ **Centro do GeoJSON:**\n\nLat: {lat_geo:.5f}\n\nLon: {lon_geo:.5f}")
+            # Lógica de Correção de Sinal
+            sugestao_lat = 1
+            sugestao_lon = 1
+            
+            # Detecta inversão de sinal (Brasil é negativo)
+            if lat_geo_sample < 0 and lat_csv_sample > 0:
+                sugestao_lat = -1
+            if lon_geo_sample < 0 and lon_csv_sample > 0:
+                sugestao_lon = -1
                 
-                # Análise Automática de Erro
-                dist_lat = abs(lat_csv - lat_geo)
-                dist_lon = abs(lon_csv - lon_geo)
-                
-                if dist_lat > 1 or dist_lon > 1:
-                    st.error("🚨 **ALERTA CRÍTICO:** As coordenadas estão muito distantes (>1 grau)!")
-                    if abs(lat_csv) > 1000 or abs(lat_geo) > 1000:
-                         st.write("👉 Parece que um dos arquivos está em **UTM (Metros)** e o outro em **Graus**. Converta tudo para Lat/Long WGS84.")
-                    elif abs(lat_csv) == abs(lon_geo) and abs(lon_csv) == abs(lat_geo): # Aproximado
-                         st.write("👉 Parece que **Latitude e Longitude estão invertidas**.")
-                    elif (lat_csv > 0 and lat_geo < 0) or (lon_csv > 0 and lon_geo < 0):
-                         st.write("👉 Parece que o **sinal (positivo/negativo)** está trocado. Tentaremos corrigir automaticamente no processamento.")
-                else:
-                    st.success("✅ As coordenadas parecem alinhadas.")
-            else:
-                st.warning("Não foi possível ler as coordenadas do GeoJSON.")
+            if sugestao_lat == -1 or sugestao_lon == -1:
+                st.warning(f"⚠️ Detectamos sinal positivo no CSV, mas o contorno é negativo. Vamos corrigir automaticamente multiplicando por -1.")
 
-        # Gráfico
-        st.pyplot(plotar_conferencia_geometria(df_debug, geojson_data))
+            # Aplica correção temporária para o gráfico
+            df_debug['latitude'] = df_debug['latitude'] * sugestao_lat
+            df_debug['longitude'] = df_debug['longitude'] * sugestao_lon
+            
+            # Plota
+            st.pyplot(plotar_conferencia_geometria(df_debug, coords_limpas))
+        else:
+            st.warning("Não foi possível extrair coordenadas do GeoJSON para comparação.")
 
     except Exception as e:
-        st.error(f"Erro no diagnóstico: {e}")
+        st.error(f"Erro diagnóstico: {e}")
+
     # ------------------------------------------------------------------
 
     if st.button("🚀 Processar Mapas", type="primary"):
         with st.status("Processando...", expanded=True) as status:
             st.cache_data.clear() 
             
-            # Correção Automática de Sinal (Se necessário)
-            if lat_csv > 0 and lat_geo < 0: df_debug['latitude'] = df_debug['latitude'] * -1
-            if lon_csv > 0 and lon_geo < 0: df_debug['longitude'] = df_debug['longitude'] * -1
+            # Aplica as correções sugeridas no DF oficial
+            if 'sugestao_lat' in locals():
+                df_debug['latitude'] = df_debug['latitude'] # Já está corrigido acima
+                df_debug['longitude'] = df_debug['longitude']
 
             df_krig, grid_shape = processar_matrizes_interpolacao(df_debug, geojson_data)
             
@@ -353,7 +362,7 @@ if st.session_state['dados_processados'] is not None:
                 z_min, z_max = min_max
                 
                 if not sucesso:
-                    st.warning("⚠️ Recorte falhou. Mostrando grid completo. Verifique o diagnóstico acima.")
+                    st.warning("⚠️ O recorte ainda falhou. Verifique se o GeoJSON não está em UTM (Metros) em vez de Graus.")
 
                 centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
                 m = folium.Map(location=centro, zoom_start=14, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satellite')
@@ -366,6 +375,18 @@ if st.session_state['dados_processados'] is not None:
                 
                 folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}).add_to(m)
                 
+                legend_html = f"""
+                <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; 
+                            background: white; padding: 10px; border: 2px solid black; border-radius: 5px; font-family: sans-serif;">
+                <b>{atributo}</b><br>
+                <div style="background: linear-gradient(to right, #000080, #0000ff, #00ffff, #ffff00, #ff0000, #800000); height: 10px; width: 150px;"></div>
+                <div style="display: flex; justify-content: space-between; width: 150px; font-size: 12px;">
+                    <span>{z_min:.2f}</span>
+                    <span>{z_max:.2f}</span>
+                </div>
+                </div>
+                """
+                m.get_root().html.add_child(folium.Element(legend_html))
                 st_folium(m, height=500, use_container_width=True)
                 
             except Exception as e:
