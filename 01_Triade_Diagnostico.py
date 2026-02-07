@@ -14,11 +14,14 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
 from matplotlib.patches import Polygon as MplPolygon
+
+# Importa ambos os motores para ter Plano B
 from scipy.interpolate import Rbf
+from pykrige.ok import OrdinaryKriging
 import folium
 from streamlit_folium import st_folium
 
-# Tenta importar funções utilitárias se existirem, senão define mocks
+# Tenta importar funções utilitárias
 try:
     from utils_v43 import (
         configurar_pagina, renderizar_cabecalho_sidebar, 
@@ -52,7 +55,7 @@ st.sidebar.header("⚙️ Parâmetros de Recomendação")
 with st.sidebar.expander("1. Meta de Produtividade", expanded=True):
     meta_prod = st.number_input("Meta Soja (sc/ha):", value=80.0, step=1.0, min_value=0.0)
 
-# B. Calagem (Atualizado: Elevação Ca/Mg)
+# B. Calagem
 with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
     st.markdown("**Metas na CTC (%):**")
     alvo_ca = st.number_input("Alvo Cálcio (%):", value=60.0, step=1.0)
@@ -63,7 +66,7 @@ with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
     teor_cao = st.number_input("Teor CaO (%):", value=60.0, step=1.0) 
     teor_mgo = st.number_input("Teor MgO (%):", value=18.0, step=1.0) 
 
-# C. Fósforo (Tabela P-rem + Exportação)
+# C. Fósforo
 with st.sidebar.expander("3. Fósforo (P)", expanded=False):
     st.markdown("**Parâmetros:**")
     export_p_factor = st.number_input("Exportação P (kg/sc):", value=0.8, step=0.1)
@@ -71,7 +74,6 @@ with st.sidebar.expander("3. Fósforo (P)", expanded=False):
     fator_tam_p = st.number_input("Fator Tampão (kg P₂O₅/mg):", value=5.0, step=0.5, help="Qtd de adubo para subir 1 mg no solo")
 
     st.markdown("**Níveis Críticos (P-rem):**")
-    st.caption("Conforme P-rem do solo:")
     nc_p1 = st.number_input("0 - 4 mg/dm³:", value=6.0, step=0.5)
     nc_p2 = st.number_input("4.1 - 10 mg/dm³:", value=7.5, step=0.5)
     nc_p3 = st.number_input("10.1 - 19 mg/dm³:", value=11.5, step=0.5)
@@ -150,22 +152,20 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 5. MOTOR DE CÁLCULO (RBF LINEAR - CORRIGIDO PARA EXIBIR MAPAS)
+# 5. MOTOR DE CÁLCULO (HÍBRIDO E BLINDADO)
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
     
-    # --- CORREÇÃO DE COLUNAS DE COORDENADAS (CRUCIAL) ---
-    # Prioriza as coordenadas do KML (geralmente sufixo _y no merge)
+    # 1. Correção de Coordenadas (Garante que lat/lon sejam números)
     if 'latitude_y' in df.columns:
         df.rename(columns={'latitude_y': 'latitude', 'longitude_y': 'longitude'}, inplace=True)
     elif 'latitude_x' in df.columns and 'latitude' not in df.columns:
         df.rename(columns={'latitude_x': 'latitude', 'longitude_x': 'longitude'}, inplace=True)
         
-    # Garante que latitude e longitude existem
-    if 'latitude' not in df.columns or 'longitude' not in df.columns:
-        st.error("Erro crítico: Coordenadas não encontradas após a fusão.")
-        return pd.DataFrame(), None
+    df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
+    df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
+    df = df.dropna(subset=['latitude', 'longitude'])
 
     cols_proibidas = ['id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean', 'unnamed', 'obs']
     
@@ -173,11 +173,13 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     for col in df.columns:
         if any(p in str(col).lower() for p in cols_proibidas): continue
         df[col] = limpar_coluna_inteligente(df[col])
-        if df[col].notna().sum() >= 5: # Relaxei a regra de variância para garantir que plote
+        if df[col].notna().sum() >= 5: # Aceita colunas com pelo menos 5 pontos
             cols_validas.append(col)
 
+    # Agrupa dados repetidos na mesma coordenada
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
+    # Projeção Aproximada (Graus -> Metros)
     lat_mean = df_grouped['latitude'].mean()
     df_grouped['Y_m'] = df_grouped['latitude'] * 111111
     df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
@@ -209,16 +211,33 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
         progresso.progress((i + 1) / len(cols_validas))
         try:
             dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
-            if len(dados_col) < 5: continue
             
-            interpolator = Rbf(dados_col['X_m'], dados_col['Y_m'], dados_col[col], function='linear')
-            z = interpolator(grid_x_m, grid_y_m)
-            # Clip robusto para evitar cores malucas
+            # Validação extra: precisa de variância para interpolar
+            if len(dados_col) < 5 or dados_col[col].nunique() < 2: 
+                df_result[col] = dados_col[col].mean() # Se tudo igual, preenche com média
+                processed_cols.append(col)
+                continue
+            
+            # TENTA RBF (Interpolador Suave)
+            try:
+                interpolator = Rbf(dados_col['X_m'], dados_col['Y_m'], dados_col[col], function='linear', smooth=1e-5)
+                z = interpolator(grid_x_m, grid_y_m)
+            except:
+                # PLANO B: Krigagem (Se RBF falhar por matriz singular)
+                OK = OrdinaryKriging(
+                    dados_col['X_m'], dados_col['Y_m'], dados_col[col], 
+                    variogram_model='linear', verbose=False, enable_plotting=False
+                )
+                z, _ = OK.execute('grid', grid_x_m, grid_y_m)
+                z = z.flatten()
+
             z = np.clip(z, dados_col[col].min(), dados_col[col].max())
-            
-            df_result[col] = z.flatten()
+            df_result[col] = z
             processed_cols.append(col)
-        except: continue
+        except Exception as e:
+            # Não para o loop, mas loga erro no terminal se precisar debugar
+            print(f"Erro ao processar {col}: {e}")
+            continue
     
     progresso.empty()
     cols_finais = ['latitude', 'longitude'] + processed_cols
@@ -274,39 +293,35 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
-# 7. LÓGICA DE RECOMENDAÇÃO (FÓRMULAS VRT PRO)
+# 7. LÓGICA DE RECOMENDAÇÃO (FÓRMULAS DEFINITIVAS)
 # ==============================================================================
 def calcular_recomendacoes(df):
     df_rec = df.copy()
     
-    # Mapeamento
     cols = {k: next((c for c in df_rec.columns if k in c.lower()), None) 
             for k in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem']}
     
-    # --- A. CALAGEM (ELEVAÇÃO Ca e Mg - MAIOR DOSE) ---
+    # --- A. CALAGEM (ELEVAÇÃO Ca e Mg) ---
     if cols['ca'] and cols['mg'] and cols['ctc']:
-        # Deficit Ca (cmolc/dm3)
+        # Deficit Ca e Mg (cmolc)
         ca_atual = df_rec[cols['ca']]
-        ca_alvo_val = (alvo_ca / 100) * df_rec[cols['ctc']]
-        def_ca = ca_alvo_val - ca_atual
+        def_ca = ((alvo_ca / 100) * df_rec[cols['ctc']]) - ca_atual
         
-        # Deficit Mg (cmolc/dm3)
         mg_atual = df_rec[cols['mg']]
-        mg_alvo_val = (alvo_mg / 100) * df_rec[cols['ctc']]
-        def_mg = mg_alvo_val - mg_atual
+        def_mg = ((alvo_mg / 100) * df_rec[cols['ctc']]) - mg_atual
         
-        # Estequiometria: 1 cmolc Ca = 560 kg CaO | 1 cmolc Mg = 403 kg MgO
-        need_cao_kg = def_ca * 560
-        need_mgo_kg = def_mg * 403
+        # Kg de Óxido puro necessário
+        need_cao = def_ca * 560
+        need_mgo = def_mg * 403
         
-        # Conversão para Toneladas de Produto Comercial
+        # Dose de Produto (Ton/ha)
         t_cao = teor_cao if teor_cao > 0 else 1
         t_mgo = teor_mgo if teor_mgo > 0 else 1
         
-        dose_ton_ca = (need_cao_kg / t_cao) / 10
-        dose_ton_mg = (need_mgo_kg / t_mgo) / 10
+        dose_ton_ca = (need_cao / t_cao) / 10
+        dose_ton_mg = (need_mgo / t_mgo) / 10
         
-        # Maior Dose vence + PRNT
+        # Maior Dose + PRNT
         dose_base = np.maximum(dose_ton_ca, dose_ton_mg)
         prnt_fator = 100 / prnt_calc if prnt_calc > 0 else 1
         
@@ -316,11 +331,9 @@ def calcular_recomendacoes(df):
     if cols['k'] and cols['ctc']:
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
         
-        # Deficit para atingir meta (ex: 3.5%)
         def_k_cmolc = ((alvo_k_ctc - k_pct) / 100) * df_rec[cols['ctc']]
         def_k_cmolc = def_k_cmolc.apply(lambda x: x if x > 0 else 0)
         
-        # Correção
         k2o_corr = def_k_cmolc * 942 
         k2o_export = meta_prod * export_k_factor
         
@@ -333,7 +346,6 @@ def calcular_recomendacoes(df):
     col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
     
     if col_p and cols['prem']:
-        # Níveis Críticos (Sidebar)
         conds = [
             df_rec[cols['prem']] <= 4.0,
             (df_rec[cols['prem']] > 4.0) & (df_rec[cols['prem']] <= 10.0),
@@ -345,20 +357,15 @@ def calcular_recomendacoes(df):
         
         nc_p_grid = np.select(conds, choices, default=30.0)
             
-        # Gap: Se P_solo > NC, fica negativo (Reserva)
+        # Gap Negativo = Reserva
         gap_p = nc_p_grid - df_rec[col_p]
         
-        # Correção (Pode ser negativa se houver sobra)
         dose_correcao = gap_p * fator_tam_p 
-        
-        # Exportação (Sempre positiva)
         dose_export = meta_prod * export_p_factor
-        
-        # Soma Algébrica: Se dose_correcao for -20 e export for 60, aplica 40.
-        dose_total_p2o5 = dose_export + dose_correcao
+        dose_total = dose_export + dose_correcao
         
         t_p2o5 = teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1
-        df_rec['Adubo_P_Kg_ha'] = (dose_total_p2o5 * (100 / t_p2o5)).apply(lambda x: x if x > 0 else 0)
+        df_rec['Adubo_P_Kg_ha'] = (dose_total * (100 / t_p2o5)).apply(lambda x: x if x > 0 else 0)
 
     # --- D. GESSO ---
     if cols['argila']:
@@ -381,7 +388,6 @@ with aba1:
     if file_lab and file_geo and file_geojson:
         if st.button("🚀 Processar Ponte de Dados", type="primary"):
             try:
-                # 1. Load Data
                 if file_lab.name.lower().endswith('.csv'):
                     try: df_lab = pd.read_csv(file_lab)
                     except: file_lab.seek(0); df_lab = pd.read_csv(file_lab, sep=';')
@@ -399,9 +405,13 @@ with aba1:
                     
                     if not df_merged.empty:
                         df_krig, shape = processar_matrizes_interpolacao(df_merged, st.session_state['geojson_data'], 100)
-                        st.session_state['dados_processados'] = df_krig
-                        st.session_state['grid_shape'] = shape
-                        st.success(f"Dados processados: {len(df_merged)} pontos.")
+                        
+                        if not df_krig.empty:
+                            st.session_state['dados_processados'] = df_krig
+                            st.session_state['grid_shape'] = shape
+                            st.success(f"Dados processados: {len(df_merged)} pontos.")
+                        else:
+                            st.warning("A interpolação não gerou colunas válidas. Verifique os dados numéricos.")
                     else: st.error("Erro no cruzamento de IDs.")
             except Exception as e: st.error(f"Erro: {e}")
 
@@ -417,7 +427,7 @@ with aba1:
                 folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m)
                 st_folium(m, height=500, use_container_width=True, key=f"mapa_{attr}")
         else:
-            st.warning("Nenhum mapa gerado. Verifique se a planilha contém dados numéricos válidos.")
+            st.warning("Sem dados numéricos para exibir.")
 
 with aba2:
     st.header("Mapas de Recomendação VRT")
@@ -433,12 +443,11 @@ with aba2:
             cols_rec = [c for c in st.session_state['dados_rec'].columns if any(x in c for x in ['Ton', 'Kg', 'ha'])]
             if cols_rec:
                 escolha = st.selectbox("Mapa de Aplicação:", cols_rec)
-                
                 media_dose = st.session_state['dados_rec'][escolha].mean()
                 
                 c1, c2 = st.columns(2)
                 c1.metric("Dose Média", f"{media_dose:.1f}")
-                c2.info(f"Produtividade Alvo: {meta_prod} sc/ha")
+                c2.info(f"Parâmetros: Meta {meta_prod} sc/ha | PRNT {prnt_calc}%")
 
                 img_rec, bounds_rec, mm_rec = gerar_imagem_overlay(
                     st.session_state['dados_rec'], escolha, 
