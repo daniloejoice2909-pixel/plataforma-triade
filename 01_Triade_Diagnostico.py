@@ -1,3 +1,10 @@
+Esse erro acontece porque o Pandas é muito "rigoroso" com tipos de dados. Mesmo que a coluna pareça ser texto, se você introduzir um valor NaN (nulo/vazio) nela, ela vira "mista" e o comando .str para de funcionar em algumas versões, causando esse travamento.
+
+Para resolver definitivamente, vamos usar a "Opção Nuclear": substituir os comandos .str por .apply(). O .apply() roda linha por linha usando Python puro, o que ignora completamente as restrições de tipo do Pandas. É a forma mais blindada de limpar dados.
+
+Aqui está o código completo corrigido. Substitua todo o seu arquivo por este:
+
+Python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -113,19 +120,29 @@ def processar_arquivo_geografico(uploaded_file):
         return pd.DataFrame()
 
 def limpar_coluna_inteligente(serie):
-    """Detecta numéricos mistos (BR/US), remove 'ns' e limpa"""
-    # Converte para string, remove espaços e força minúsculo para detectar 'ns'
-    s_str = serie.astype(str).str.strip()
+    """
+    Detecta numéricos mistos (BR/US), remove 'ns' e limpa.
+    VERSÃO BLINDADA: Usa .apply() para evitar erro de accessor .str em tipos mistos.
+    """
+    # Função interna para limpar valor por valor (evita erro de tipo)
+    def clean_val(val):
+        if pd.isna(val): return np.nan
+        s = str(val).strip()
+        if s.lower() in ['ns', 'nan', '', 'null']: return np.nan
+        return s
+
+    # 1. Converte tudo para string limpa ou NaN
+    s_clean = serie.apply(clean_val)
     
-    # Substitui 'ns' (não amostrado) por NaN
-    s_str = s_str.replace(['ns', 'NS', 'nan', 'NaN'], np.nan)
+    # 2. Verifica se existe vírgula (padrão BR) ignorando NaNs
+    # dropna() garante que só verificamos strings, evitando o erro .str
+    tem_virgula = s_clean.dropna().apply(lambda x: ',' in x).any()
     
-    # Se tiver vírgula, assume BR (remove ponto milhar, troca vírgula decimal)
-    if s_str.str.contains(',', regex=False).any():
-        s_str = s_str.str.replace('.', '', regex=False)
-        s_str = s_str.str.replace(',', '.', regex=False)
+    if tem_virgula:
+        # Troca ponto por nada e vírgula por ponto (Padrão BR -> US)
+        s_clean = s_clean.apply(lambda x: x.replace('.', '').replace(',', '.') if isinstance(x, str) else x)
         
-    return pd.to_numeric(s_str, errors='coerce')
+    return pd.to_numeric(s_clean, errors='coerce')
 
 def extrair_coordenadas_limpas(geojson_data):
     try:
@@ -147,7 +164,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df = df_input.copy()
     
     # Adicionado 'id_clean' para não tentar interpolar o ID
-    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean']
+    cols_proibidas = ['id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean']
     
     cols_validas = []
     for col in df.columns:
@@ -330,7 +347,7 @@ if file_lab and file_geo and file_geojson:
         geojson_data = json.load(file_geojson)
         st.session_state['geojson_data'] = geojson_data
 
-        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA - VERSÃO "APPLY"
+        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA - VERSÃO NUCLEAR (APPLY)
         if not df_lab.empty and not df_geo_points.empty:
             
             # Identificação de Coluna ID no Lab
@@ -346,8 +363,7 @@ if file_lab and file_geo and file_geojson:
                 col_id_lab = st.selectbox("Coluna de ID na Planilha:", df_lab.columns)
             
             # --- LIMPEZA DE IDs "NUCLEAR" (SEM ERRO DE TIPO) ---
-            # Usamos apply(lambda x: ...) que roda em Python puro e não quebra
-            # se o tipo da coluna for numérico ou misto.
+            # Usamos apply(lambda x: ...) que roda em Python puro e não quebra.
             
             # 1. Limpa IDs da Planilha (ex: 55.0 -> "55")
             df_lab['id_clean'] = df_lab[col_id_lab].apply(lambda x: str(x).split('.')[0].strip())
