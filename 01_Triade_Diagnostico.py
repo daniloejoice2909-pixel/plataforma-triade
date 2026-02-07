@@ -316,7 +316,7 @@ if file_lab and file_geo and file_geojson:
                 df_lab = pd.read_excel(file_lab)
             except ImportError as e:
                 if 'xlrd' in str(e):
-                    st.error("🛑 O arquivo enviado é .xls antigo. Por favor, salve como .xlsx ou .csv no Excel e tente novamente.")
+                    st.error("🛑 O arquivo enviado é .xls antigo. Instale 'xlrd' ou salve como .xlsx.")
                     st.stop()
                 else:
                     st.error(f"Erro ao ler Excel: {e}")
@@ -330,7 +330,7 @@ if file_lab and file_geo and file_geojson:
         geojson_data = json.load(file_geojson)
         st.session_state['geojson_data'] = geojson_data
 
-        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA
+        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA - VERSÃO "APPLY"
         if not df_lab.empty and not df_geo_points.empty:
             
             # Identificação de Coluna ID no Lab
@@ -345,17 +345,15 @@ if file_lab and file_geo and file_geojson:
                 st.warning("Não encontrei coluna 'ID' ou 'Ponto' na planilha. Selecione abaixo:")
                 col_id_lab = st.selectbox("Coluna de ID na Planilha:", df_lab.columns)
             
-            # --- LIMPEZA DE IDs (Resolve o erro "Can only use .str accessor") ---
-            # Usa .apply(lambda x: str(x)) para garantir que tudo vire texto, sem erro de atributo
+            # --- LIMPEZA DE IDs "NUCLEAR" (SEM ERRO DE TIPO) ---
+            # Usamos apply(lambda x: ...) que roda em Python puro e não quebra
+            # se o tipo da coluna for numérico ou misto.
             
-            # 1. Limpa IDs da Planilha
-            df_lab['id_clean'] = df_lab[col_id_lab].apply(lambda x: str(x).strip() if pd.notnull(x) else "")
-            # Remove decimais (.0) caso existam
-            df_lab['id_clean'] = df_lab['id_clean'].apply(lambda x: x.split('.')[0])
+            # 1. Limpa IDs da Planilha (ex: 55.0 -> "55")
+            df_lab['id_clean'] = df_lab[col_id_lab].apply(lambda x: str(x).split('.')[0].strip())
 
             # 2. Limpa IDs do Mapa (KML/KMZ)
-            df_geo_points['id_clean'] = df_geo_points['ID_PONTO'].apply(lambda x: str(x).strip() if pd.notnull(x) else "")
-            df_geo_points['id_clean'] = df_geo_points['id_clean'].apply(lambda x: x.split('.')[0])
+            df_geo_points['id_clean'] = df_geo_points['ID_PONTO'].apply(lambda x: str(x).split('.')[0].strip())
             
             # ---------------------------------------------------------------------
             
@@ -364,12 +362,12 @@ if file_lab and file_geo and file_geojson:
             
             if df_merged.empty:
                 st.error("❌ Erro na fusão: Nenhum ID da planilha coincidiu com o arquivo de pontos.")
-                st.markdown("**Diagnóstico:**")
+                st.markdown("**Diagnóstico de Falha:**")
                 c1, c2 = st.columns(2)
                 with c1:
-                    st.write("Amostra IDs Planilha:", df_lab['id_clean'].unique()[:5])
+                    st.write(f"IDs Planilha (Coluna: {col_id_lab}):", df_lab['id_clean'].head().tolist())
                 with c2:
-                    st.write("Amostra IDs Mapa (KMZ):", df_geo_points['id_clean'].unique()[:5])
+                    st.write("IDs Mapa (KML/KMZ):", df_geo_points['id_clean'].head().tolist())
                 st.stop()
             else:
                 st.success(f"✅ {len(df_merged)} pontos combinados com sucesso!")
