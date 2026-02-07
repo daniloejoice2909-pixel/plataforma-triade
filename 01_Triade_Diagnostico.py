@@ -40,28 +40,16 @@ if 'grid_shape' not in st.session_state:
     st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. LIMPEZA INTELIGENTE (RESOLVE O PROBLEMA DO 0.22 vs 22)
+# 3. LIMPEZA E DIAGNÓSTICO
 # ==============================================================================
 def limpar_coluna_inteligente(serie):
-    """
-    Detecta automaticamente se a coluna é BR (vírgula decimal) ou US (ponto decimal).
-    Resolve o erro onde 0.22 virava 22.
-    """
-    # Converte para string para analisar
+    """Detecta se é 0.22 (US) ou 0,22 (BR) e converte corretamente"""
     s_str = serie.astype(str).str.strip()
-    
-    # Verifica se existe vírgula em ALGUM lugar da coluna (amostra)
     tem_virgula = s_str.str.contains(',', regex=False).any()
     
     if tem_virgula:
-        # LÓGICA BRASIL (1.200,50 ou 12,5)
-        # Se tem vírgula, o ponto é milhar (lixo) e a vírgula é decimal.
-        s_str = s_str.str.replace('.', '', regex=False) # Remove milhar
-        s_str = s_str.str.replace(',', '.', regex=False) # Troca decimal
-    else:
-        # LÓGICA US/CIENTÍFICA (0.22 ou 1200.50)
-        # Se NÃO tem vírgula, o ponto é decimal. Não fazemos nada com ele!
-        pass
+        s_str = s_str.str.replace('.', '', regex=False)
+        s_str = s_str.str.replace(',', '.', regex=False)
         
     return pd.to_numeric(s_str, errors='coerce')
 
@@ -88,18 +76,32 @@ def extrair_coordenadas_limpas(geojson_data):
 
 def plotar_conferencia_geometria(df, coords_geojson):
     fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(df['longitude'], df['latitude'], c='red', s=15, label='Pontos CSV', alpha=0.7, zorder=5)
+    # Pontos menores para ver melhor a precisão
+    ax.scatter(df['longitude'], df['latitude'], c='red', s=5, label='Pontos CSV', alpha=0.8, zorder=5)
+    
     if coords_geojson:
-        poly = MplPolygon(coords_geojson, closed=True, edgecolor='blue', facecolor='none', linewidth=2, label='GeoJSON', zorder=10)
+        poly = MplPolygon(coords_geojson, closed=True, edgecolor='blue', facecolor='none', linewidth=1.5, label='GeoJSON', zorder=10)
         ax.add_patch(poly)
-    ax.set_title("Visualização Espacial")
+        
+        # Ajusta o zoom para focar na união dos dois
+        lons_geo = [p[0] for p in coords_geojson]
+        lats_geo = [p[1] for p in coords_geojson]
+        
+        min_x = min(df['longitude'].min(), min(lons_geo))
+        max_x = max(df['longitude'].max(), max(lons_geo))
+        min_y = min(df['latitude'].min(), min(lats_geo))
+        max_y = max(df['latitude'].max(), max(lats_geo))
+        
+        ax.set_xlim(min_x - 0.002, max_x + 0.002)
+        ax.set_ylim(min_y - 0.002, max_y + 0.002)
+
+    ax.set_title("Conferência de Limites (Zoom Automático)")
     ax.legend()
     ax.grid(True, linestyle='--', alpha=0.5)
-    ax.autoscale(enable=True)
     return fig
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO
+# 4. MOTOR DE CÁLCULO (V79 - PRECISÃO MÁXIMA)
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
@@ -114,27 +116,36 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     cols_validas = []
     for col in df.columns:
         if col.lower() in cols_proibidas: continue
-        
-        # APLICA A NOVA LIMPEZA INTELIGENTE
         df[col] = limpar_coluna_inteligente(df[col])
-        
-        if df[col].notna().sum() >= 3: 
-            cols_validas.append(col)
+        if df[col].notna().sum() >= 3: cols_validas.append(col)
 
-    # Arredonda coords
-    df['longitude'] = df['longitude'].round(5)
-    df['latitude'] = df['latitude'].round(5)
+    # V79: Aumentei precisão para 7 casas (aprox 1cm) para não deslocar pontos
+    df['longitude'] = df['longitude'].round(7)
+    df['latitude'] = df['latitude'].round(7)
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # Grid
+    # Define a área de interpolação
+    # IMPORTANTE: Pegamos a área que cobre TANTO os pontos QUANTO o GeoJSON
+    # Isso garante que se um ponto estiver fora, ele ainda entra no cálculo
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
     y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
     
-    buffer_x = (x_max - x_min) * 0.2
-    buffer_y = (y_max - y_min) * 0.2
+    try:
+        coords_geo = extrair_coordenadas_limpas(geojson_data)
+        if coords_geo:
+            lons_g = [p[0] for p in coords_geo]
+            lats_g = [p[1] for p in coords_geo]
+            x_min = min(x_min, min(lons_g))
+            x_max = max(x_max, max(lons_g))
+            y_min = min(y_min, min(lats_g))
+            y_max = max(y_max, max(lats_g))
+    except: pass
+
+    # Buffer de segurança (Margem de erro)
+    buffer = 0.002 # ~200 metros
     
-    grid_x = np.linspace(x_min - buffer_x, x_max + buffer_x, resolucao_grid)
-    grid_y = np.linspace(y_min - buffer_y, y_max + buffer_y, resolucao_grid)
+    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
+    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
     xx, yy = np.meshgrid(grid_x, grid_y)
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
@@ -192,15 +203,12 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
                 mask_sucesso = True
     except: pass
 
-    # Escala Percentil (Robusta a outliers)
+    # Escala Percentil
     dados_validos = Z[~np.isnan(Z)]
     if len(dados_validos) > 0:
         z_min = np.percentile(dados_validos, 2)
         z_max = np.percentile(dados_validos, 98)
-        
-        if z_min == z_max:
-             z_min -= 0.5
-             z_max += 0.5
+        if z_min == z_max: z_min -= 0.5; z_max += 0.5
         elif (z_max - z_min) < 0.1:
              centro = (z_max + z_min) / 2
              z_min = centro - 0.05
@@ -278,28 +286,18 @@ if file_csv and file_geojson:
     
     df_raw = df_raw.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
 
-    # --- AUDITORIA FINAL (V78) ---
     st.divider()
     st.subheader("🕵️ Auditor de Dados & Geometria")
     
     try:
-        # Aplica a limpeza inteligente nas coordenadas também (pois podem ter vírgula)
         df_raw['latitude'] = limpar_coluna_inteligente(df_raw['latitude'])
         df_raw['longitude'] = limpar_coluna_inteligente(df_raw['longitude'])
         df_debug = df_raw.dropna(subset=['latitude', 'longitude'])
 
-        # Seletor para auditar
         col_audit = st.selectbox("Auditar coluna de dados:", [c for c in df_debug.columns if c not in ['latitude', 'longitude']])
-        
-        # Mostra o Antes e Depois da Limpeza
-        vals_sujos = df_raw[col_audit].head(3).tolist()
         vals_limpos = limpar_coluna_inteligente(df_raw[col_audit]).head(3).tolist()
-        
-        c_audit1, c_audit2 = st.columns(2)
-        c_audit1.write(f"**Original:** {vals_sujos}")
-        c_audit2.write(f"**Lido como:** {vals_limpos}")
+        st.write(f"**Valores Lidos (Amostra):** {vals_limpos}")
 
-        # Correção de Sinal Geográfico
         if coords_limpas:
             lat_geo = coords_limpas[0][1]
             lon_geo = coords_limpas[0][0]
