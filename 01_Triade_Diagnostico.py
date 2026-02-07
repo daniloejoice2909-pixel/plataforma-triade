@@ -149,13 +149,12 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO (OTIMIZADO)
+# 4. MOTOR DE CÁLCULO (COM PROJEÇÃO MÉTRICA PARA CORRIGIR CORES)
 # ==============================================================================
-# Removemos o @st.cache_data daqui para permitir a barra de progresso funcionar
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
     
-    # Lista expandida de colunas ignoradas para ganhar performance
+    # Lista de colunas para ignorar (IDs, Textos, etc)
     cols_proibidas = [
         'id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 
         'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 
@@ -164,22 +163,26 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     
     cols_validas = []
     for col in df.columns:
-        # Verifica se o nome da coluna contém termos proibidos
         if any(p in str(col).lower() for p in cols_proibidas): continue
-        
-        # Limpeza Forçada
         df[col] = limpar_coluna_inteligente(df[col])
-        # Aceita colunas com pelo menos 5 valores válidos e variância > 0
         if df[col].notna().sum() >= 5 and df[col].nunique() > 1: 
             cols_validas.append(col)
 
-    # Coordenadas ajustadas
+    # Agrupa por coordenada para média (caso haja duplicatas)
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # Grid cobrindo tudo
+    # --- CORREÇÃO DE ESCALA (PROJEÇÃO) ---
+    # Converte Graus para Metros (Aprox) para a Krigagem funcionar direito
+    lat_mean = df_grouped['latitude'].mean()
+    # Fatores: 1 grau lat ~ 111km, 1 grau lon ~ 111km * cos(lat)
+    df_grouped['Y_m'] = df_grouped['latitude'] * 111111
+    df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
+
+    # Define Grid em Graus (Original)
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
     y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
     
+    # Ajusta Grid pelo GeoJSON se existir
     try:
         coords_geo = extrair_coordenadas_limpas(geojson_data)
         if coords_geo:
@@ -191,15 +194,21 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             y_max = max(y_max, max(lats_g))
     except: pass
 
+    # Cria o Grid Linear em Graus
     grid_x = np.linspace(x_min, x_max, resolucao_grid)
     grid_y = np.linspace(y_min, y_max, resolucao_grid)
-    
     xx, yy = np.meshgrid(grid_x, grid_y)
+
+    # Converte o Grid para Metros (usando a mesma projeção)
+    # Isso permite que a Krigagem trabalhe em metros, mas o resultado caia no mapa certo
+    grid_y_m = grid_y * 111111
+    grid_x_m = grid_x * 111111 * np.cos(np.radians(lat_mean))
+    
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
     processed_cols = []
     
-    # --- BARRA DE PROGRESSO ---
+    # Barra de Progresso para não parecer travado
     progresso_texto = st.empty()
     bar = st.progress(0)
     total_cols = len(cols_validas)
@@ -209,23 +218,25 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
         bar.progress((i + 1) / total_cols)
         
         try:
-            dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
+            # Pega dados válidos
+            dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
             
-            # Se for constante ou vazio
             if len(dados_col) < 5: continue
 
+            # Krigagem usando coordenadas em METROS (X_m, Y_m)
             OK = OrdinaryKriging(
-                dados_col['longitude'], dados_col['latitude'], dados_col[col], 
+                dados_col['X_m'], dados_col['Y_m'], dados_col[col], 
                 variogram_model='linear', verbose=False, enable_plotting=False
             )
-            z, _ = OK.execute('grid', grid_x, grid_y)
+            # Executa no grid em METROS
+            z, _ = OK.execute('grid', grid_x_m, grid_y_m)
+            
             df_result[col] = z.flatten()
             processed_cols.append(col)
         except Exception as e:
-            print(f"Erro em {col}: {e}")
+            print(f"Erro ao processar {col}: {e}")
             continue
             
-    # Limpa a barra de progresso
     progresso_texto.empty()
     bar.empty()
 
@@ -264,14 +275,19 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
                 mask_sucesso = True
     except: pass
 
-    # Escala
+    # Escala Robusta (Evita mapa de uma cor só)
     dados_validos = Z[~np.isnan(Z)]
     if len(dados_validos) > 0:
         z_min = np.percentile(dados_validos, 2)
         z_max = np.percentile(dados_validos, 98)
-        if z_min == z_max: z_min -= 0.1; z_max += 0.1
-        elif (z_max - z_min) < 0.01: z_max += 0.01
-    else: z_min, z_max = 0, 1
+        
+        # Se a variação for muito pequena (ex: 1.06 a 1.07), força uma escala visual
+        if (z_max - z_min) < 0.1: 
+            media = (z_max + z_min) / 2
+            z_min = media - 0.5
+            z_max = media + 0.5
+    else: 
+        z_min, z_max = 0, 1
 
     plt.close('all') 
     aspect_ratio = (x_max - x_min) / (y_max - y_min)
@@ -324,11 +340,10 @@ if not file_lab or not file_geo or not file_geojson:
 if file_lab and file_geo and file_geojson:
     # 1. PROCESSAR DADOS
     try:
-        # A) Ler Planilha Lab (BLINDAGEM EXCEL ANTIGO)
+        # A) Ler Planilha Lab
         if file_lab.name.lower().endswith('.csv'):
             try:
                 df_lab = pd.read_csv(file_lab)
-                # Tenta separador ; se falhar
                 if len(df_lab.columns) < 2:
                     file_lab.seek(0)
                     df_lab = pd.read_csv(file_lab, sep=';')
@@ -354,7 +369,7 @@ if file_lab and file_geo and file_geojson:
         geojson_data = json.load(file_geojson)
         st.session_state['geojson_data'] = geojson_data
 
-        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA - VERSÃO NUCLEAR (APPLY)
+        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA
         if not df_lab.empty and not df_geo_points.empty:
             
             # Identificação de Coluna ID no Lab
@@ -369,51 +384,39 @@ if file_lab and file_geo and file_geojson:
                 st.warning("Não encontrei coluna 'ID' ou 'Ponto' na planilha. Selecione abaixo:")
                 col_id_lab = st.selectbox("Coluna de ID na Planilha:", df_lab.columns)
             
-            # --- LIMPEZA DE IDs "NUCLEAR" (SEM ERRO DE TIPO) ---
-            # Usamos apply(lambda x: ...) que roda em Python puro e não quebra.
-            
-            # 1. Limpa IDs da Planilha (ex: 55.0 -> "55")
+            # Limpeza de IDs
             df_lab['id_clean'] = df_lab[col_id_lab].apply(lambda x: str(x).split('.')[0].strip())
-
-            # 2. Limpa IDs do Mapa (KML/KMZ)
             df_geo_points['id_clean'] = df_geo_points['ID_PONTO'].apply(lambda x: str(x).split('.')[0].strip())
             
-            # ---------------------------------------------------------------------
-            
-            # Merge (Inner Join) - Só mantém o que tem coordenada E dados de lab
+            # Merge
             df_merged = pd.merge(df_lab, df_geo_points, on='id_clean', how='inner')
             
             if df_merged.empty:
                 st.error("❌ Erro na fusão: Nenhum ID da planilha coincidiu com o arquivo de pontos.")
                 st.markdown("**Diagnóstico de Falha:**")
                 c1, c2 = st.columns(2)
-                with c1:
-                    st.write(f"IDs Planilha (Coluna: {col_id_lab}):", df_lab['id_clean'].head().tolist())
-                with c2:
-                    st.write("IDs Mapa (KML/KMZ):", df_geo_points['id_clean'].head().tolist())
+                with c1: st.write(f"IDs Planilha:", df_lab['id_clean'].head().tolist())
+                with c2: st.write("IDs Mapa:", df_geo_points['id_clean'].head().tolist())
                 st.stop()
             else:
                 st.success(f"✅ {len(df_merged)} pontos combinados com sucesso!")
                 
-                # Aplica Ajuste Fino se necessário
+                # Aplica Ajuste Fino
                 df_merged['latitude'] = df_merged['latitude'] + shift_lat
                 df_merged['longitude'] = df_merged['longitude'] + shift_lon
 
-                # Visualização Prévia (Mapa de Bolinhas)
+                # Visualização Prévia
                 st.subheader("📍 Conferência dos Pontos")
                 col1, col2 = st.columns([3, 1])
-                with col1:
-                    # Mapa Simples
-                    st.map(df_merged[['latitude', 'longitude']])
-                with col2:
-                    st.dataframe(df_merged[[col_id_lab, 'latitude', 'longitude']].head())
+                with col1: st.map(df_merged[['latitude', 'longitude']])
+                with col2: st.dataframe(df_merged[[col_id_lab, 'latitude', 'longitude']].head())
 
                 # 3. BOTÃO DE PROCESSAMENTO
                 if st.button("🚀 Gerar Mapas de Fertilidade", type="primary"):
                     
                     st.cache_data.clear() 
                     
-                    # Chama a função otimizada (resolucao_grid=100 para não travar)
+                    # Chama função OTIMIZADA com projeção métrica
                     df_krig, grid_shape = processar_matrizes_interpolacao(df_merged, geojson_data, resolucao_grid=100)
                     
                     if df_krig.empty: 
