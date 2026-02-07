@@ -63,6 +63,7 @@ def processar_arquivo_geografico(uploaded_file):
         # Verifica se é KMZ (ZIP)
         if uploaded_file.name.lower().endswith('.kmz'):
             with zipfile.ZipFile(uploaded_file, 'r') as z:
+                # Pega o primeiro KML dentro do ZIP
                 kml_filename = [f for f in z.namelist() if f.endswith('.kml')][0]
                 with z.open(kml_filename) as f:
                     tree = ET.parse(f)
@@ -92,10 +93,10 @@ def processar_arquivo_geografico(uploaded_file):
             if coord_elem is None: coord_elem = placemark.find('.//coordinates')
             
             if coord_elem is not None and coord_elem.text:
-                # KML padrão: lon,lat,alt
+                # KML padrão: lon,lat,alt (separados por espaço se houver vários)
                 coords_text = coord_elem.text.strip().split()
                 if coords_text:
-                    # Pega a primeira coordenada se houver várias (ex: polígono)
+                    # Pega a primeira coordenada
                     first_coord = coords_text[0].split(',')
                     if len(first_coord) >= 2:
                         try:
@@ -145,6 +146,7 @@ def extrair_coordenadas_limpas(geojson_data):
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df = df_input.copy()
     
+    # Adicionado 'id_clean' para não tentar interpolar o ID
     cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean']
     
     cols_validas = []
@@ -207,7 +209,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 5. GERAÇÃO DE IMAGEM (Mesma lógica anterior)
+# 5. GERAÇÃO DE IMAGEM
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     df_sorted = df_plot.sort_values(by=['latitude', 'longitude'])
@@ -275,7 +277,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max], mask_sucesso
 
 # ==============================================================================
-# 6. INTERFACE DE UPLOAD E FUSÃO
+# 6. INTERFACE DE UPLOAD E FUSÃO (Atualizado e Blindado)
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
 
@@ -298,15 +300,27 @@ if not file_lab or not file_geo or not file_geojson:
 if file_lab and file_geo and file_geojson:
     # 1. PROCESSAR DADOS
     try:
-        # A) Ler Planilha Lab
-        if file_lab.name.endswith('.csv'):
+        # A) Ler Planilha Lab (BLINDAGEM EXCEL ANTIGO)
+        if file_lab.name.lower().endswith('.csv'):
             try:
                 df_lab = pd.read_csv(file_lab)
-            except:
-                file_lab.seek(0)
-                df_lab = pd.read_csv(file_lab, sep=';')
+                # Tenta separador ; se falhar
+                if len(df_lab.columns) < 2:
+                    file_lab.seek(0)
+                    df_lab = pd.read_csv(file_lab, sep=';')
+            except Exception as e:
+                st.error(f"Erro ao ler CSV: {e}")
+                st.stop()
         else:
-            df_lab = pd.read_excel(file_lab)
+            try:
+                df_lab = pd.read_excel(file_lab)
+            except ImportError as e:
+                if 'xlrd' in str(e):
+                    st.error("🛑 O arquivo enviado é .xls antigo. Por favor, salve como .xlsx ou .csv no Excel e tente novamente.")
+                    st.stop()
+                else:
+                    st.error(f"Erro ao ler Excel: {e}")
+                    st.stop()
         
         # B) Ler Pontos KML/KMZ
         df_geo_points = processar_arquivo_geografico(file_geo)
@@ -316,7 +330,7 @@ if file_lab and file_geo and file_geojson:
         geojson_data = json.load(file_geojson)
         st.session_state['geojson_data'] = geojson_data
 
-        # 2. LÓGICA DE FUSÃO (MERGE)
+        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA
         if not df_lab.empty and not df_geo_points.empty:
             
             # Identificação de Coluna ID no Lab
@@ -331,18 +345,31 @@ if file_lab and file_geo and file_geojson:
                 st.warning("Não encontrei coluna 'ID' ou 'Ponto' na planilha. Selecione abaixo:")
                 col_id_lab = st.selectbox("Coluna de ID na Planilha:", df_lab.columns)
             
-            # Limpeza de IDs para garantir o Match (Remove .0 e espaços)
-            # Ex: 55.0 -> "55", " 55 " -> "55"
-            df_lab['id_clean'] = df_lab[col_id_lab].astype(str).str.split('.').str[0].str.strip()
-            df_geo_points['id_clean'] = df_geo_points['ID_PONTO'].astype(str).str.split('.').str[0].str.strip()
+            # --- LIMPEZA DE IDs (Resolve o erro "Can only use .str accessor") ---
+            # Usa .apply(lambda x: str(x)) para garantir que tudo vire texto, sem erro de atributo
+            
+            # 1. Limpa IDs da Planilha
+            df_lab['id_clean'] = df_lab[col_id_lab].apply(lambda x: str(x).strip() if pd.notnull(x) else "")
+            # Remove decimais (.0) caso existam
+            df_lab['id_clean'] = df_lab['id_clean'].apply(lambda x: x.split('.')[0])
+
+            # 2. Limpa IDs do Mapa (KML/KMZ)
+            df_geo_points['id_clean'] = df_geo_points['ID_PONTO'].apply(lambda x: str(x).strip() if pd.notnull(x) else "")
+            df_geo_points['id_clean'] = df_geo_points['id_clean'].apply(lambda x: x.split('.')[0])
+            
+            # ---------------------------------------------------------------------
             
             # Merge (Inner Join) - Só mantém o que tem coordenada E dados de lab
             df_merged = pd.merge(df_lab, df_geo_points, on='id_clean', how='inner')
             
             if df_merged.empty:
                 st.error("❌ Erro na fusão: Nenhum ID da planilha coincidiu com o arquivo de pontos.")
-                st.write("Exemplo IDs Planilha:", df_lab['id_clean'].head().tolist())
-                st.write("Exemplo IDs Mapa:", df_geo_points['id_clean'].head().tolist())
+                st.markdown("**Diagnóstico:**")
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.write("Amostra IDs Planilha:", df_lab['id_clean'].unique()[:5])
+                with c2:
+                    st.write("Amostra IDs Mapa (KMZ):", df_geo_points['id_clean'].unique()[:5])
                 st.stop()
             else:
                 st.success(f"✅ {len(df_merged)} pontos combinados com sucesso!")
@@ -380,7 +407,7 @@ if file_lab and file_geo and file_geojson:
         st.error(f"Erro ao processar arquivos: {e}")
 
 # ==============================================================================
-# 7. RESULTADOS (Mantido igual)
+# 7. RESULTADOS
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
