@@ -32,62 +32,63 @@ renderizar_cabecalho_sidebar()
 
 st.title("🚜 Tríade: Diagnóstico de Fertilidade (App 1)")
 
-# Inicialização de Estado (Memória)
+# Inicialização de Estado
 if 'dados_processados' not in st.session_state:
     st.session_state['dados_processados'] = None
 if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
+if 'grid_shape' not in st.session_state:
+    st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. MOTOR DE CÁLCULO REVISADO (V70 - LEITURA COMPLETA)
+# 3. MOTOR DE CÁLCULO (V71 - RETORNO DE METADADOS DE GRID)
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
-    # 1. Cópia e Normalização
     df = df_input.copy()
     
-    # Metadados
     cols_proibidas = [
         'id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 
         'x', 'y', 'data', 'hora', 'campo', 'fazenda', 
         'profundidade', 'zona', 'talhao', 'geometry'
     ]
     
-    # Identificação de Colunas
     cols_validas = []
     for col in df.columns:
         if col.lower() in cols_proibidas: continue
         
-        # Tratamento de Vírgula para Ponto
+        # Tratamento de Vírgula
         if df[col].dtype == 'object':
             df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
             
         try:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-            # Se tiver pelo menos 3 números válidos, tentamos processar
             if df[col].notna().sum() >= 3: 
                 cols_validas.append(col)
         except: pass 
 
-    # 2. Arredondamento de Coordenadas (Resolve duplicação de pontos)
-    # Importante: Agrupa pontos duplicados pela média para não travar a Krigagem
+    # Agrupamento para remover duplicatas no mesmo local
     df['longitude'] = df['longitude'].round(5)
     df['latitude'] = df['latitude'].round(5)
-    
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # 3. Definição do Grid
+    # Definição do Grid
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
     y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
-    buffer = 0.005 
     
-    grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
-    grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
+    # Buffer de segurança (0.5% da largura)
+    buffer_x = (x_max - x_min) * 0.05
+    buffer_y = (y_max - y_min) * 0.05
+    
+    grid_x = np.linspace(x_min - buffer_x, x_max + buffer_x, resolucao_grid)
+    grid_y = np.linspace(y_min - buffer_y, y_max + buffer_y, resolucao_grid)
     
     xx, yy = np.meshgrid(grid_x, grid_y)
+    
+    # Cria DataFrame base
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
-    # 4. Loop INDEPENDENTE
+    # Loop de Interpolação
     for col in cols_validas:
         try:
             dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
@@ -95,12 +96,12 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             if len(dados_col) < 5:
                 df_result[col] = 0.0
                 continue
-                
+            
+            # Se for constante
             if dados_col[col].nunique() <= 1:
                 df_result[col] = dados_col[col].iloc[0]
                 continue
 
-            # Geoestatística (Krigagem)
             OK = OrdinaryKriging(
                 dados_col['longitude'], dados_col['latitude'], dados_col[col], 
                 variogram_model='linear', verbose=False, enable_plotting=False
@@ -112,22 +113,42 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             print(f"⚠️ Erro ao interpolar {col}: {e}")
             continue
 
-    return df_result
+    # Retorna o DF e o formato do grid (Importante para visualização)
+    return df_result, (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 4. GERAÇÃO DE IMAGEM (V70 - VISUALIZAÇÃO SEGURA)
+# 4. GERAÇÃO DE IMAGEM (V71 - RESHAPE DIRETO E FALLBACK DE ERRO)
 # ==============================================================================
-def gerar_imagem_overlay(df_plot, atributo, geojson_data):
-    # 1. Pivotagem
-    pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
-    Z = pivot.values
-    X_unique = pivot.columns.values 
-    Y_unique = pivot.index.values    
+def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
+    # 1. Recuperação da Matriz (Sem Pivot, usando Reshape direto para garantir integridade)
+    # Ordenamos para garantir que o reshape bata com o meshgrid original
+    df_sorted = df_plot.sort_values(by=['latitude', 'longitude'])
     
+    try:
+        Z = df_sorted[atributo].values.reshape(grid_shape)
+        # O Meshgrid precisa ser reconstruído ou extraído do DF ordenado
+        X_unique = np.sort(df_plot['longitude'].unique())
+        Y_unique = np.sort(df_plot['latitude'].unique())
+        
+        # Se o reshape falhar por incompatibilidade de tamanho, tentamos pivot
+        if Z.size != (len(Y_unique) * len(X_unique)):
+             pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
+             Z = pivot.values
+             X_unique = pivot.columns.values 
+             Y_unique = pivot.index.values   
+             
+    except:
+        # Fallback seguro: Pivot padrão
+        pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
+        Z = pivot.values
+        X_unique = pivot.columns.values 
+        Y_unique = pivot.index.values 
+
     x_min, x_max = X_unique.min(), X_unique.max()
     y_min, y_max = Y_unique.min(), Y_unique.max()
 
-    # 2. Máscara de Recorte
+    # 2. Máscara de Recorte (Cookie Cutter)
+    mask_sucesso = False
     try:
         coords = []
         tipo = geojson_data['features'][0]['geometry']['type']
@@ -145,12 +166,17 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
             mask_flat = poly_path.contains_points(points)
             mask_grid = mask_flat.reshape(Z.shape)
             
-            Z[~mask_grid] = np.nan
+            # Se a máscara apagar TUDO, algo está errado com as coordenadas
+            if np.any(mask_grid): 
+                Z[~mask_grid] = np.nan
+                mask_sucesso = True
+            else:
+                print("Aviso: A máscara de recorte resultou em um mapa vazio. Exibindo quadrado completo.")
             
     except Exception as e:
         print(f"Erro no recorte: {e}")
 
-    # 3. Cálculo de Escala
+    # 3. Cálculo de Escala (Baseado no que sobrou)
     z_min = np.nanmin(Z)
     z_max = np.nanmax(Z)
     
@@ -191,7 +217,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     plt.close(fig)
     img_data.seek(0)
     
-    return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
+    return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max], mask_sucesso
 
 # ==============================================================================
 # 5. INTERFACE
@@ -205,32 +231,26 @@ if not file_csv or not file_geojson:
     if st.session_state.get('dados_processados') is not None:
         st.session_state['dados_processados'] = None
         st.session_state['geojson_data'] = None
+        st.session_state['grid_shape'] = None
         st.cache_data.clear()
         st.rerun()
 
 if file_csv and file_geojson:
     # Leitura Blindada
     try:
-        # Tenta ler com pandas padrão
         df_raw = pd.read_csv(file_csv)
-        
-        # Se só tiver 1 coluna, provavelmente o separador é ponto e vírgula
         if len(df_raw.columns) < 2:
             file_csv.seek(0)
             df_raw = pd.read_csv(file_csv, sep=';')
-            
         df_raw.columns = [c.strip().lower() for c in df_raw.columns]
     except Exception as e:
         st.error(f"Erro ao ler CSV: {e}")
         st.stop()
     
-    # --- PAINEL DE DIAGNÓSTICO (CORRIGIDO: MOSTRA TUDO) ---
-    with st.expander("🕵️ Diagnóstico de Leitura (Verifique seus dados)", expanded=True):
-        st.info(f"O sistema leu **{len(df_raw)} linhas** e **{len(df_raw.columns)} colunas**.")
-        st.write("Abaixo está a planilha completa carregada na memória:")
-        # AQUI ESTAVA O ERRO: ANTES TINHA .head(3). AGORA MOSTRA TUDO.
+    # Painel de Diagnóstico
+    with st.expander("🕵️ Diagnóstico de Leitura", expanded=True):
+        st.info(f"Linhas: {len(df_raw)} | Colunas: {len(df_raw.columns)}")
         st.dataframe(df_raw, use_container_width=True) 
-    # -------------------------------------
 
     try:
         file_geojson.seek(0)
@@ -240,7 +260,6 @@ if file_csv and file_geojson:
         st.error("GeoJSON inválido.")
         st.stop()
 
-    # Seleção de Coordenadas
     c1, c2 = st.columns(2)
     cols = list(df_raw.columns)
     idx_lat = next((i for i, c in enumerate(cols) if 'lat' in c), 0)
@@ -258,29 +277,27 @@ if file_csv and file_geojson:
             
             st.write("Verificando dados...")
             try:
-                # Tratamento de erro comum: vírgula no lugar de ponto nas coordenadas
                 df_raw['latitude'] = pd.to_numeric(df_raw['latitude'].astype(str).str.replace(',', '.'), errors='coerce')
                 df_raw['longitude'] = pd.to_numeric(df_raw['longitude'].astype(str).str.replace(',', '.'), errors='coerce')
-                
-                # Remove linhas sem coordenadas
                 df_raw = df_raw.dropna(subset=['latitude', 'longitude'])
                 
                 if df_raw.empty:
-                    st.error("Erro: Nenhuma linha com Latitude/Longitude válidas encontrada.")
+                    st.error("Erro: Nenhuma coordenada válida.")
                     st.stop()
-                    
             except Exception as e:
-                st.error(f"Erro nas coordenadas: {e}")
+                st.error(f"Erro coordenadas: {e}")
                 st.stop()
 
             st.write(f"Interpolando {len(df_raw)} pontos...")
-            df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
+            # AGORA RETORNA DF E SHAPE
+            df_krig, grid_shape = processar_matrizes_interpolacao(df_raw, geojson_data)
             
             if df_krig.empty:
-                st.error("O processamento retornou uma tabela vazia.")
+                st.error("Tabela vazia pós-processamento.")
                 st.stop()
                 
             st.session_state['dados_processados'] = df_krig
+            st.session_state['grid_shape'] = grid_shape
             status.update(label="Concluído!", state="complete", expanded=False)
         st.rerun()
 
@@ -289,6 +306,7 @@ if file_csv and file_geojson:
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
+    grid_shape = st.session_state['grid_shape']
     
     st.divider()
     
@@ -303,13 +321,18 @@ if st.session_state['dados_processados'] is not None:
         st.subheader("🗺️ Visualização de Diagnóstico")
         atributo = st.selectbox("Selecione o mapa:", cols_ver)
         
+        # NÃO FAZER DROPNA AQUI PARA NÃO QUEBRAR O GRID
         df_plot = df_final[['latitude', 'longitude', atributo]].copy()
 
         if not df_plot.empty:
             try:
-                img_buffer, bounds, min_max = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
+                # Gera Imagem com Fallback
+                img_buffer, bounds, min_max, sucesso_mascara = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'], grid_shape)
                 z_min, z_max = min_max
                 
+                if not sucesso_mascara:
+                    st.warning("⚠️ Atenção: O recorte falhou (as coordenadas do GeoJSON não batem com os pontos do CSV). Exibindo o grid inteiro.")
+
                 centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
                 m = folium.Map(location=centro, zoom_start=14, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satellite')
                 
@@ -339,10 +362,11 @@ if st.session_state['dados_processados'] is not None:
                 
                 st_folium(m, height=500, use_container_width=True)
                 
+                # DIAGNÓSTICO VISUAL
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Mínimo", f"{z_min:.2f}")
-                c2.metric("Média Estimada", f"{df_plot[atributo].mean():.2f}")
-                c3.metric("Máximo", f"{z_max:.2f}")
+                c1.metric("Mínimo (Mapa)", f"{z_min:.2f}")
+                c2.metric("Média (Dados)", f"{df_plot[atributo].mean():.2f}")
+                c3.metric("Máximo (Mapa)", f"{z_max:.2f}")
                 
             except Exception as e:
                 st.error(f"Erro visual: {e}")
