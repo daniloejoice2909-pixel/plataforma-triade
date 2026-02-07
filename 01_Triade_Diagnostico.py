@@ -32,6 +32,7 @@ renderizar_cabecalho_sidebar()
 
 st.title("🚜 Tríade: Diagnóstico de Fertilidade (App 1)")
 
+# Inicialização de Estado (Memória)
 if 'dados_processados' not in st.session_state:
     st.session_state['dados_processados'] = None
 if 'geojson_data' not in st.session_state:
@@ -68,7 +69,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df['latitude'] = df['latitude'].round(6)
     
     # [CORREÇÃO] Agrupa por coordenada. Se houver 2 pontos no mesmo lugar, tira a média.
-    # Isso impede que a Krigagem falhe ou gere mapas planos.
     df = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
     # 3. Criação do Grid
@@ -91,7 +91,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             
             # Validação: Pontos insuficientes ou Variância Zero
             if len(dados) < 5 or dados[col].nunique() <= 1:
-                # Preenche com média simples se não der para interpolar
                 valor = dados[col].mean() if len(dados) > 0 else 0
                 df_result[col] = valor
                 continue 
@@ -108,7 +107,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             print(f"⚠️ Erro em '{col}': {e}")
             continue
 
-    # Limpeza Final: Remove colunas que falharam totalmente
     cols_finais = [c for c in cols_validas if c in df_result.columns]
     return df_result if not cols_finais else df_result
 
@@ -140,22 +138,18 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
             XX, YY = np.meshgrid(X_unique, Y_unique)
             points = np.column_stack((XX.flatten(), YY.flatten()))
             
-            # Verifica pontos dentro do polígono
             mask_flat = poly_path.contains_points(points)
             mask_grid = mask_flat.reshape(Z.shape)
             
-            # Transforma tudo que está FORA em NaN
             Z[~mask_grid] = np.nan
             
     except Exception as e:
         print(f"Erro Máscara: {e}")
 
-    # 3. [CORREÇÃO CRÍTICA] CÁLCULO DE MIN/MAX APÓS A MÁSCARA
-    # Isso garante que valores extremos interpolados fora do talhão não estraguem a escala
+    # 3. CÁLCULO DE MIN/MAX APÓS A MÁSCARA
     z_min = np.nanmin(Z)
     z_max = np.nanmax(Z)
     
-    # Tratamento para mapas planos (sem variação)
     if z_min == z_max or np.isnan(z_min):
         z_min = 0 if np.isnan(z_min) else z_min - 0.1
         z_max = 1 if np.isnan(z_max) else z_max + 0.1
@@ -164,23 +158,22 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
 
     # 4. Configuração Visual
     cmap = plt.get_cmap('jet', 256)
-    cmap.set_bad(alpha=0) # NaNs 100% transparentes
+    cmap.set_bad(alpha=0) 
     norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
 
-    # 5. Desenho da Figura (Sem Margens)
+    # 5. Desenho da Figura
     plt.close('all') 
     aspect_ratio = (x_max - x_min) / (y_max - y_min)
     h_fig = 10
     w_fig = h_fig * aspect_ratio
     
     fig = plt.figure(figsize=(w_fig, h_fig))
-    fig.patch.set_alpha(0.0) # Fundo transparente
+    fig.patch.set_alpha(0.0) 
     
-    ax = plt.axes([0, 0, 1, 1]) # Ocupa 100%
+    ax = plt.axes([0, 0, 1, 1]) 
     ax.set_axis_off()
     ax.patch.set_alpha(0.0)
     
-    # Plota apenas onde não é NaN
     ax.contourf(X_unique, Y_unique, Z, levels=50, cmap=cmap, norm=norm, extend='both', alpha=1.0)
     
     ax.set_xlim(x_min, x_max)
@@ -194,11 +187,20 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
-# 5. INTERFACE E LÓGICA
+# 5. INTERFACE COM LIMPEZA AUTOMÁTICA DE MEMÓRIA
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
 file_csv = st.sidebar.file_uploader("📂 Tabela (.csv)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("🌍 Contorno (.geojson)", type=["geojson", "json"])
+
+# --- LÓGICA NOVA: LIMPEZA DE ESTADO ---
+# Se qualquer um dos arquivos for removido, limpamos a memória e reiniciamos
+if not file_csv or not file_geojson:
+    if st.session_state.get('dados_processados') is not None:
+        st.session_state['dados_processados'] = None
+        st.session_state['geojson_data'] = None
+        st.cache_data.clear() # Limpa também o cache de processamento
+        st.rerun() # Força o recarregamento da página vazia
 
 if file_csv and file_geojson:
     # Carregamento
@@ -227,7 +229,7 @@ if file_csv and file_geojson:
     # Botão de Processamento
     if st.button("🚀 Processar Mapas", type="primary"):
         with st.status("Processando...", expanded=True) as status:
-            st.cache_data.clear() # Limpa memória para garantir novos mapas
+            st.cache_data.clear() 
             
             st.write("Calculando Geoestatística...")
             df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
