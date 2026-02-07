@@ -101,23 +101,34 @@ with st.sidebar.expander("🌽 Meta de Produtividade", expanded=True):
     prod_alvo = st.number_input("Produtividade Alvo (sc/ha)", value=80.0, step=1.0, min_value=0.0, max_value=300.0)
 
 # ==============================================================================
-# 4. KRIGAGEM OTIMIZADA (V58 - LEVE)
+# 4. KRIGAGEM OTIMIZADA (V60 - COM DETECÇÃO DE VARIÂNCIA ZERO)
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df = df_input.copy() 
-    cols_proibidas = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao']
+    
+    # Colunas que não devem ser processadas como mapas
+    cols_proibidas = [
+        'id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 
+        'x', 'y', 'data', 'hora', 'campo', 'fazenda', 
+        'profundidade', 'zona', 'talhao', 'geometry'
+    ]
+    
     cols_validas = []
     
-    # Limpeza Rápida
+    # 1. Limpeza e Validação Inicial
     for col in df.columns:
         if col.lower() in cols_proibidas: continue
+        
         try:
+            # Força numérico e transforma erros em NaN
             df[col] = pd.to_numeric(df[col], errors='coerce')
-            if df[col].notna().sum() > 5: cols_validas.append(col)
+            # Só considera válida se tiver pelo menos 5 números reais
+            if df[col].notna().sum() > 5: 
+                cols_validas.append(col)
         except: pass 
 
-    # Grid Inteligente
+    # 2. Criação do Grid
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
     buffer = 0.003 
@@ -128,19 +139,38 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     xx, yy = np.meshgrid(grid_x, grid_y)
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
-    # Interpolação
+    # 3. Loop Inteligente de Interpolação
     for col in cols_validas:
+        if col not in df.columns: continue
+
         try:
+            # Pega os dados limpos (sem NaNs) para esta coluna
             dados = df[['longitude', 'latitude', col]].dropna()
+            
             if len(dados) < 5: continue
 
+            # --- CORREÇÃO DO ERRO DE VALOR ZERO ---
+            # Se todos os valores forem iguais (ex: tudo 0), a variância é zero.
+            # Krigagem falha nisso. Então detectamos e preenchemos manualmente.
+            if dados[col].nunique() <= 1:
+                valor_constante = dados[col].iloc[0]
+                # Preenche todo o mapa com esse valor único
+                df_result[col] = valor_constante
+                # Pula para o próximo nutriente sem chamar a Krigagem
+                continue 
+            
+            # Se houver variação, executa a Krigagem normal
             OK = OrdinaryKriging(
                 dados['longitude'], dados['latitude'], dados[col], 
                 variogram_model='linear', verbose=False, enable_plotting=False
             )
             z, _ = OK.execute('grid', grid_x, grid_y)
             df_result[col] = z.flatten()
-        except: pass
+            
+        except Exception as e:
+            # Se der erro em um nutriente, apenas avisa e continua os outros
+            print(f"⚠️ Pulo de segurança em '{col}': {e}")
+            continue
 
     return df_result.dropna(subset=cols_validas, how='all')
 
