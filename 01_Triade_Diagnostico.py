@@ -83,7 +83,7 @@ with st.sidebar.expander("4. Potássio (K)", expanded=False):
 with st.sidebar.expander("5. Gessagem", expanded=False):
     fator_gesso = st.number_input("Fator x Argila:", value=50.0, step=5.0)
 
-# F. Micronutrientes (Restaurado)
+# F. Micronutrientes
 with st.sidebar.expander("6. Micronutrientes", expanded=False):
     st.markdown("**Nível Crítico (mg/dm³) / Dose (kg/ha):**")
     crit_b = st.number_input("Boro (Crítico):", value=0.3, step=0.1)
@@ -98,6 +98,27 @@ with st.sidebar.expander("6. Micronutrientes", expanded=False):
 # ==============================================================================
 # 4. FUNÇÕES DE SUPORTE
 # ==============================================================================
+def ler_arquivo_robusto(uploaded_file):
+    """Lê CSV, XLSX ou XLS tentando várias engines"""
+    try:
+        nome = uploaded_file.name.lower()
+        if nome.endswith('.csv'):
+            try: return pd.read_csv(uploaded_file)
+            except: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=';')
+        
+        elif nome.endswith('.xlsx'):
+            try: return pd.read_excel(uploaded_file, engine='openpyxl')
+            except: return pd.read_excel(uploaded_file) # Tenta default
+            
+        elif nome.endswith('.xls'):
+            try: return pd.read_excel(uploaded_file, engine='xlrd')
+            except: st.error("Para arquivos .xls antigos, instale a biblioteca 'xlrd'."); return pd.DataFrame()
+            
+        return pd.read_excel(uploaded_file) # Tentativa final genérica
+    except Exception as e:
+        st.error(f"Erro ao ler arquivo: {e}")
+        return pd.DataFrame()
+
 def processar_arquivo_geografico(uploaded_file):
     points = []
     try:
@@ -132,24 +153,20 @@ def processar_arquivo_geografico(uploaded_file):
     except: return pd.DataFrame()
 
 def limpar_coluna_inteligente(serie):
-    """Lida com símbolos <, > e vírgulas"""
     def clean_val(val):
         if pd.isna(val): return np.nan
         s = str(val).strip().replace(' ', '')
-        # Remove símbolos de menor/maior que travam a conversão
-        for char in ['<', '>', 'ns', 'nan', 'null', 'nd']:
+        # Remove símbolos que não são números
+        for char in ['<', '>', 'ns', 'nan', 'null', 'nd', 'ND']:
             s = s.replace(char, '')
         
         if s == '' or s == '-': return np.nan
         
-        # Ajuste decimal Brasil x EUA
-        if ',' in s and '.' in s: s = s.replace('.', '') # 1.000,00 -> 1000,00
+        if ',' in s and '.' in s: s = s.replace('.', '') 
         s = s.replace(',', '.')
         
-        try:
-            return float(s)
-        except:
-            return np.nan
+        try: return float(s)
+        except: return np.nan
 
     return serie.apply(clean_val)
 
@@ -198,7 +215,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
-    # Escala para metros
     scale_x = 111111 * np.cos(np.radians(df['latitude'].mean()))
     scale_y = 111111
 
@@ -211,11 +227,9 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             Y_m = dados['latitude'] * scale_y
             
             try:
-                # Tenta RBF
                 interp = Rbf(X_m, Y_m, dados[col], function='linear', smooth=0)
                 z = interp(xx * scale_x, yy * scale_y)
             except:
-                # Fallback Nearest
                 interp = NearestNDInterpolator(list(zip(X_m, Y_m)), dados[col])
                 z = interp(xx * scale_x, yy * scale_y)
 
@@ -237,7 +251,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
         Y_unique = np.sort(df_plot['latitude'].unique())
     except: return None, None, [0,1]
 
-    # Máscara
     try:
         coords = extrair_coordenadas_limpas(geojson_data)
         if coords:
@@ -271,17 +284,18 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]], [z_min, z_max]
 
 # ==============================================================================
-# 6. CÁLCULO VRT (MACRO E MICRO)
+# 6. CÁLCULO VRT
 # ==============================================================================
 def calcular_vrt(df):
     df_rec = df.copy()
-    
-    # 1. Mapeamento
     cols = {}
-    for alvo in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem', 'b', 'zn', 'mn', 'cu']:
-        cols[alvo] = next((c for c in df_rec.columns if alvo in c.lower() or alvo == c.lower()), None)
+    # Adicionado 's' para enxofre se precisar, e micros
+    targets = ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem', 'b', 'zn', 'mn', 'cu']
+    for alvo in targets:
+        # Busca exata ou parcial inteligente
+        cols[alvo] = next((c for c in df_rec.columns if alvo == c.lower() or (alvo in c.lower() and len(c) < 15)), None)
 
-    # MACROS
+    # 1. CALAGEM
     if cols['ca'] and cols['mg'] and cols['ctc']:
         def_ca = ((alvo_ca/100) * df_rec[cols['ctc']]) - df_rec[cols['ca']]
         def_mg = ((alvo_mg/100) * df_rec[cols['ctc']]) - df_rec[cols['mg']]
@@ -292,13 +306,16 @@ def calcular_vrt(df):
         dose_final = np.maximum(dose_ca, dose_mg) * (100 / (prnt_calc if prnt_calc > 0 else 1))
         df_rec['Calcario_Ton_ha'] = dose_final.apply(lambda x: x if x > 0 else 0)
 
+    # 2. POTÁSSIO
     if cols['k'] and cols['ctc']:
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
         def_k = ((alvo_k_ctc - k_pct)/100) * df_rec[cols['ctc']]
         k_repo = (def_k * 942) + (meta_prod * export_k_factor)
         df_rec['KCL_Kg_ha'] = (k_repo * (100 / (teor_k2o_adubo if teor_k2o_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
-    if cols['p'] and cols['prem']:
+    # 3. FÓSFORO
+    col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
+    if col_p and cols['prem']:
         conds = [
             df_rec[cols['prem']] <= 4,
             (df_rec[cols['prem']] > 4) & (df_rec[cols['prem']] <= 10),
@@ -307,21 +324,18 @@ def calcular_vrt(df):
             df_rec[cols['prem']] > 30
         ]
         nc_grid = np.select(conds, [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5], default=30)
-        gap = nc_grid - df_rec[cols['p']]
+        gap = nc_grid - df_rec[col_p] # Se negativo = reserva
         dose_p = (gap * fator_tam_p) + (meta_prod * export_p_factor)
         df_rec['MAP_Kg_ha'] = (dose_p * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
+    # 4. GESSO
     if cols['argila']:
         df_rec['Gesso_Ton_ha'] = (df_rec[cols['argila']] * fator_gesso) / 1000
 
-    # MICROS (Simples: Abaixo do nível -> Aplica dose)
-    # Boro
+    # 5. MICROS
     if cols['b']: df_rec['Boro_Kg_ha'] = np.where(df_rec[cols['b']] < crit_b, dose_b, 0)
-    # Zinco
     if cols['zn']: df_rec['Zinco_Kg_ha'] = np.where(df_rec[cols['zn']] < crit_zn, dose_zn, 0)
-    # Manganês
     if cols['mn']: df_rec['Manganes_Kg_ha'] = np.where(df_rec[cols['mn']] < crit_mn, dose_mn, 0)
-    # Cobre
     if cols['cu']: df_rec['Cobre_Kg_ha'] = np.where(df_rec[cols['cu']] < crit_cu, dose_cu, 0)
 
     return df_rec
@@ -346,15 +360,15 @@ with aba1:
     if f_lab and f_geo and f_json:
         if st.button("🚀 Processar", type="primary"):
             try:
-                if f_lab.name.endswith('.csv'): 
-                    try: df_lab = pd.read_csv(f_lab)
-                    except: f_lab.seek(0); df_lab = pd.read_csv(f_lab, sep=';')
-                else: df_lab = pd.read_excel(f_lab)
+                df_lab = ler_arquivo_robusto(f_lab)
                 
                 df_pts = processar_arquivo_geografico(f_geo)
                 f_json.seek(0); geo_data = json.load(f_json)
                 
-                col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra']), df_lab.columns[0])
+                # Tenta achar ID
+                col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra', 'codigo']), None)
+                if not col_id: col_id = df_lab.columns[0]
+
                 df_lab['id_clean'] = df_lab[col_id].astype(str).str.strip().str.replace('.0', '')
                 df_pts['id_clean'] = df_pts['ID_PONTO'].astype(str).str.strip().str.replace('.0', '')
                 
