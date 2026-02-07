@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
 from scipy.interpolate import Rbf
-from scipy.interpolate import NearestNDInterpolator # Fallback de segurança
+from scipy.interpolate import NearestNDInterpolator
 import folium
 from streamlit_folium import st_folium
 
@@ -47,7 +47,7 @@ if 'dados_rec' not in st.session_state: st.session_state['dados_rec'] = None
 # 3. SIDEBAR DE PARÂMETROS
 # ==============================================================================
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ Parâmetros")
+st.sidebar.header("⚙️ Parâmetros de Recomendação")
 
 # A. Produtividade
 with st.sidebar.expander("1. Meta de Produtividade", expanded=True):
@@ -82,6 +82,18 @@ with st.sidebar.expander("4. Potássio (K)", expanded=False):
 # E. Gesso
 with st.sidebar.expander("5. Gessagem", expanded=False):
     fator_gesso = st.number_input("Fator x Argila:", value=50.0, step=5.0)
+
+# F. Micronutrientes (Restaurado)
+with st.sidebar.expander("6. Micronutrientes", expanded=False):
+    st.markdown("**Nível Crítico (mg/dm³) / Dose (kg/ha):**")
+    crit_b = st.number_input("Boro (Crítico):", value=0.3, step=0.1)
+    dose_b = st.number_input("Boro (Dose):", value=2.0, step=0.5)
+    crit_zn = st.number_input("Zinco (Crítico):", value=1.0, step=0.1)
+    dose_zn = st.number_input("Zinco (Dose):", value=4.0, step=0.5)
+    crit_mn = st.number_input("Manganês (Crítico):", value=4.0, step=0.5)
+    dose_mn = st.number_input("Manganês (Dose):", value=5.0, step=1.0)
+    crit_cu = st.number_input("Cobre (Crítico):", value=0.5, step=0.1)
+    dose_cu = st.number_input("Cobre (Dose):", value=2.0, step=0.5)
 
 # ==============================================================================
 # 4. FUNÇÕES DE SUPORTE
@@ -120,15 +132,20 @@ def processar_arquivo_geografico(uploaded_file):
     except: return pd.DataFrame()
 
 def limpar_coluna_inteligente(serie):
-    """Converte números brasileiros (vírgula) para Python (ponto)"""
+    """Lida com símbolos <, > e vírgulas"""
     def clean_val(val):
         if pd.isna(val): return np.nan
         s = str(val).strip().replace(' ', '')
-        if s.lower() in ['ns', 'nan', '', 'null', 'nd', '-']: return np.nan
-        # Troca vírgula por ponto APENAS se for o separador decimal
-        if ',' in s and '.' in s: # Ex: 1.200,50 -> Remove o ponto primeiro
-            s = s.replace('.', '')
+        # Remove símbolos de menor/maior que travam a conversão
+        for char in ['<', '>', 'ns', 'nan', 'null', 'nd']:
+            s = s.replace(char, '')
+        
+        if s == '' or s == '-': return np.nan
+        
+        # Ajuste decimal Brasil x EUA
+        if ',' in s and '.' in s: s = s.replace('.', '') # 1.000,00 -> 1000,00
         s = s.replace(',', '.')
+        
         try:
             return float(s)
         except:
@@ -147,12 +164,11 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 5. MOTOR GRÁFICO E INTERPOLAÇÃO
+# 5. MOTOR DE INTERPOLAÇÃO
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
     
-    # Normaliza Coordenadas
     if 'latitude_y' in df.columns: df.rename(columns={'latitude_y': 'latitude', 'longitude_y': 'longitude'}, inplace=True)
     elif 'latitude_x' in df.columns and 'latitude' not in df.columns: df.rename(columns={'latitude_x': 'latitude', 'longitude_x': 'longitude'}, inplace=True)
     
@@ -160,23 +176,19 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
     df = df.dropna(subset=['latitude', 'longitude'])
 
-    # Limpeza de Dados
     cols_ignorar = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'geometry', 'id_clean']
     cols_validas = []
     
     for col in df.columns:
         if any(x in str(col).lower() for x in cols_ignorar): continue
         df[col] = limpar_coluna_inteligente(df[col])
-        if df[col].notna().sum() >= 3: # Mínimo 3 pontos para criar um plano
+        if df[col].notna().sum() >= 3:
             cols_validas.append(col)
 
     if not cols_validas: return pd.DataFrame(), None
 
-    # Grid
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
-    
-    # Expande um pouco as bordas
     margin_x = (x_max - x_min) * 0.1
     margin_y = (y_max - y_min) * 0.1
     
@@ -186,9 +198,8 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
-    # Fator de conversão aproximado para metros (para o cálculo RBF não distorcer)
-    lat_mean = df['latitude'].mean()
-    scale_x = 111111 * np.cos(np.radians(lat_mean))
+    # Escala para metros
+    scale_x = 111111 * np.cos(np.radians(df['latitude'].mean()))
     scale_y = 111111
 
     progresso = st.progress(0)
@@ -196,20 +207,18 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
         progresso.progress((i + 1) / len(cols_validas))
         try:
             dados = df[['longitude', 'latitude', col]].dropna()
-            
             X_m = dados['longitude'] * scale_x
             Y_m = dados['latitude'] * scale_y
             
-            # Tenta RBF Linear (Visual InCeres)
             try:
+                # Tenta RBF
                 interp = Rbf(X_m, Y_m, dados[col], function='linear', smooth=0)
                 z = interp(xx * scale_x, yy * scale_y)
             except:
-                # Fallback para Vizinho Mais Próximo (Garante mapa)
+                # Fallback Nearest
                 interp = NearestNDInterpolator(list(zip(X_m, Y_m)), dados[col])
                 z = interp(xx * scale_x, yy * scale_y)
 
-            # Limita valores ao range real (evita explosão matemática)
             z = np.clip(z, dados[col].min(), dados[col].max())
             df_result[col] = z.flatten()
         except: continue
@@ -221,45 +230,33 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all'); plt.clf()
     
-    # Prepara matriz
     try:
-        if 'latitude' not in df_plot.columns: return None, None, [0,1]
-        
-        # Ordena para garantir que o reshape funcione
         df_sorted = df_plot.sort_values(by=['latitude', 'longitude'])
-        
-        # Tenta reshape direto (mais rápido)
         Z = df_sorted[atributo].values.reshape(grid_shape)
         X_unique = np.sort(df_plot['longitude'].unique())
         Y_unique = np.sort(df_plot['latitude'].unique())
-    except:
-        return None, None, [0, 1]
+    except: return None, None, [0,1]
 
-    # Máscara do Polígono
+    # Máscara
     try:
         coords = extrair_coordenadas_limpas(geojson_data)
         if coords:
             poly_path = MplPath(coords)
-            # Cria grid de pontos para verificar dentro/fora
             XX, YY = np.meshgrid(X_unique, Y_unique)
             points = np.column_stack((XX.flatten(), YY.flatten()))
             mask = poly_path.contains_points(points).reshape(Z.shape)
             Z[~mask] = np.nan
     except: pass
 
-    # Escala de Cores
     dados_validos = Z[~np.isnan(Z)]
     if len(dados_validos) == 0: return None, None, [0, 1]
     
     z_min, z_max = np.nanmin(dados_validos), np.nanmax(dados_validos)
     if z_min == z_max: z_min -= 0.01; z_max += 0.01
 
-    # Plot
     fig = plt.figure(figsize=(8, 8))
-    ax = plt.axes([0,0,1,1])
-    ax.set_axis_off()
+    ax = plt.axes([0,0,1,1]); ax.set_axis_off()
     
-    # Paleta InCeres
     cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
     cmap = mcolors.ListedColormap(cores)
     bounds = np.linspace(z_min, z_max, 7)
@@ -267,51 +264,41 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     
     ax.contourf(X_unique, Y_unique, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=0.9)
     
-    # Salva
     img_data = BytesIO()
     plt.savefig(img_data, format='png', transparent=True, bbox_inches='tight', pad_inches=0)
-    img_data.seek(0)
-    plt.close(fig)
+    img_data.seek(0); plt.close(fig)
     
     return img_data, [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]], [z_min, z_max]
 
 # ==============================================================================
-# 6. CÁLCULO DE RECOMENDAÇÃO
+# 6. CÁLCULO VRT (MACRO E MICRO)
 # ==============================================================================
 def calcular_vrt(df):
     df_rec = df.copy()
     
-    # Mapeamento Flexível (Aceita 'Ca', 'Ca cmolc', 'Calcio', etc)
+    # 1. Mapeamento
     cols = {}
-    for alvo in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem']:
-        cols[alvo] = next((c for c in df_rec.columns if alvo in c.lower()), None)
+    for alvo in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem', 'b', 'zn', 'mn', 'cu']:
+        cols[alvo] = next((c for c in df_rec.columns if alvo in c.lower() or alvo == c.lower()), None)
 
-    # 1. CALAGEM
+    # MACROS
     if cols['ca'] and cols['mg'] and cols['ctc']:
         def_ca = ((alvo_ca/100) * df_rec[cols['ctc']]) - df_rec[cols['ca']]
         def_mg = ((alvo_mg/100) * df_rec[cols['ctc']]) - df_rec[cols['mg']]
-        
         need_cao = def_ca * 560
         need_mgo = def_mg * 403
-        
         dose_ca = (need_cao / (teor_cao if teor_cao > 0 else 1)) / 10
         dose_mg = (need_mgo / (teor_mgo if teor_mgo > 0 else 1)) / 10
-        
         dose_final = np.maximum(dose_ca, dose_mg) * (100 / (prnt_calc if prnt_calc > 0 else 1))
         df_rec['Calcario_Ton_ha'] = dose_final.apply(lambda x: x if x > 0 else 0)
 
-    # 2. POTÁSSIO
     if cols['k'] and cols['ctc']:
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
         def_k = ((alvo_k_ctc - k_pct)/100) * df_rec[cols['ctc']]
-        
         k_repo = (def_k * 942) + (meta_prod * export_k_factor)
         df_rec['KCL_Kg_ha'] = (k_repo * (100 / (teor_k2o_adubo if teor_k2o_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
-    # 3. FÓSFORO
-    col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
-    if col_p and cols['prem']:
-        # Tabela NC
+    if cols['p'] and cols['prem']:
         conds = [
             df_rec[cols['prem']] <= 4,
             (df_rec[cols['prem']] > 4) & (df_rec[cols['prem']] <= 10),
@@ -319,16 +306,23 @@ def calcular_vrt(df):
             (df_rec[cols['prem']] > 19) & (df_rec[cols['prem']] <= 30),
             df_rec[cols['prem']] > 30
         ]
-        nc_vals = [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5]
-        nc_grid = np.select(conds, nc_vals, default=30)
-        
-        gap = nc_grid - df_rec[col_p]
+        nc_grid = np.select(conds, [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5], default=30)
+        gap = nc_grid - df_rec[cols['p']]
         dose_p = (gap * fator_tam_p) + (meta_prod * export_p_factor)
         df_rec['MAP_Kg_ha'] = (dose_p * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
-    # 4. GESSO
     if cols['argila']:
         df_rec['Gesso_Ton_ha'] = (df_rec[cols['argila']] * fator_gesso) / 1000
+
+    # MICROS (Simples: Abaixo do nível -> Aplica dose)
+    # Boro
+    if cols['b']: df_rec['Boro_Kg_ha'] = np.where(df_rec[cols['b']] < crit_b, dose_b, 0)
+    # Zinco
+    if cols['zn']: df_rec['Zinco_Kg_ha'] = np.where(df_rec[cols['zn']] < crit_zn, dose_zn, 0)
+    # Manganês
+    if cols['mn']: df_rec['Manganes_Kg_ha'] = np.where(df_rec[cols['mn']] < crit_mn, dose_mn, 0)
+    # Cobre
+    if cols['cu']: df_rec['Cobre_Kg_ha'] = np.where(df_rec[cols['cu']] < crit_cu, dose_cu, 0)
 
     return df_rec
 
@@ -339,12 +333,9 @@ aba1, aba2 = st.tabs(["🗺️ Diagnóstico", "🚜 Recomendação VRT"])
 
 # --- ABA 1: DIAGNÓSTICO ---
 with aba1:
-    # DEBUGGER VISUAL
-    with st.sidebar.expander("🔍 Ver Dados Processados"):
+    with st.sidebar.expander("🔍 Ver Dados Brutos"):
         if st.session_state['dados_processados'] is not None:
             st.dataframe(st.session_state['dados_processados'].head())
-        else:
-            st.write("Nenhum dado carregado ainda.")
 
     st.header("Importação")
     c1, c2, c3 = st.columns(3)
@@ -355,7 +346,6 @@ with aba1:
     if f_lab and f_geo and f_json:
         if st.button("🚀 Processar", type="primary"):
             try:
-                # Leitura
                 if f_lab.name.endswith('.csv'): 
                     try: df_lab = pd.read_csv(f_lab)
                     except: f_lab.seek(0); df_lab = pd.read_csv(f_lab, sep=';')
@@ -364,7 +354,6 @@ with aba1:
                 df_pts = processar_arquivo_geografico(f_geo)
                 f_json.seek(0); geo_data = json.load(f_json)
                 
-                # Merge
                 col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra']), df_lab.columns[0])
                 df_lab['id_clean'] = df_lab[col_id].astype(str).str.strip().str.replace('.0', '')
                 df_pts['id_clean'] = df_pts['ID_PONTO'].astype(str).str.strip().str.replace('.0', '')
@@ -373,25 +362,21 @@ with aba1:
                 
                 if not df_m.empty:
                     st.session_state['geojson_data'] = geo_data
-                    # Interpolação
                     df_krig, shape = processar_matrizes_interpolacao(df_m, geo_data, 100)
                     
                     if not df_krig.empty:
                         st.session_state['dados_processados'] = df_krig
                         st.session_state['grid_shape'] = shape
                         st.success(f"Sucesso! {len(df_m)} pontos usados.")
-                    else: st.error("Erro: Dados numéricos insuficientes para interpolar.")
-                else: st.error("Erro: Nenhum ID coincidiu entre Planilha e Mapa.")
-            except Exception as e: st.error(f"Erro no processo: {e}")
+                    else: st.warning("Falha na interpolação.")
+                else: st.error("Erro IDs.")
+            except Exception as e: st.error(f"Erro: {e}")
 
-    # Visualização Aba 1
     if st.session_state['dados_processados'] is not None:
         cols = [c for c in st.session_state['dados_processados'].columns 
-                if c not in ['latitude', 'longitude'] and 'Ton' not in c and 'Kg' not in c]
+                if c not in ['latitude', 'longitude'] and 'Kg_ha' not in c and 'Ton_ha' not in c]
         if cols:
             attr = st.selectbox("Nutriente:", cols)
-            
-            # Exportar Ponte
             csv = st.session_state['dados_processados'].to_csv(index=False).encode('utf-8')
             st.download_button("💾 Baixar Ponte (CSV)", csv, "ponte_vrt.csv", "text/csv")
             
@@ -412,7 +397,7 @@ with aba2:
             st.success("Calculado!")
             
         if st.session_state['dados_rec'] is not None:
-            cols_rec = [c for c in st.session_state['dados_rec'].columns if 'Ton' in c or 'Kg' in c]
+            cols_rec = [c for c in st.session_state['dados_rec'].columns if 'Ton_ha' in c or 'Kg_ha' in c]
             if cols_rec:
                 escolha = st.selectbox("Mapa de Aplicação:", cols_rec)
                 mean_val = st.session_state['dados_rec'][escolha].mean()
