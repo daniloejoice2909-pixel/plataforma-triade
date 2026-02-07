@@ -85,54 +85,91 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_result.dropna(subset=cols_validas, how='all')
 
 # ==============================================================================
-# 4. GERAÇÃO DE IMAGEM (MATPLOTLIB SEGURO)
+# 4. GERAÇÃO DE IMAGEM BLINDADA (V63 - CORREÇÃO DE RECORTE GEOGRÁFICO)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
-    # 1. Prepara Dados
+    # 1. Prepara Dados e Limites Exatos
     pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
     Z = pivot.values
     X = pivot.columns.values 
-    Y = pivot.index.values   
+    Y = pivot.index.values    
     
-    # 2. Configura Cores (InCeres Style)
-    colors = ['#d73027', '#fc8d59', '#fee08b', '#91cf60', '#1a9850'] 
-    cmap = mcolors.ListedColormap(colors)
-    bounds = np.linspace(np.nanmin(Z), np.nanmax(Z), 6)
+    x_min, x_max = X.min(), X.max()
+    y_min, y_max = Y.min(), Y.max()
+
+    # 2. Configura Cores (Escala Jet - Padrão Agronômico)
+    cmap = plt.get_cmap('jet', 8) 
+    
+    # Vacina contra mapa plano (valores constantes)
+    z_min, z_max = np.nanmin(Z), np.nanmax(Z)
+    if z_min == z_max:
+        z_min -= 0.1
+        z_max += 0.1
+    elif (z_max - z_min) < 0.0001:
+        z_max += 0.0001
+        
+    bounds = np.linspace(z_min, z_max, 9)
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
-    # 3. Gera Figura (MODO AGG - SEM GUI)
-    plt.close('all') # Limpa memória anterior
-    fig, ax = plt.subplots(figsize=(6, 6))
+    # 3. Gera Figura com Proporção Exata (CORREÇÃO DO DESALINHAMENTO)
+    plt.close('all') 
+    
+    # Calcula a razão de aspecto para que 1 grau de lat seja igual a 1 grau de lon (aproximado)
+    # ou simplesmente mantém a proporção dos dados para não distorcer
+    aspect_ratio = (x_max - x_min) / (y_max - y_min)
+    fig_height = 6
+    fig_width = fig_height * aspect_ratio
+    
+    # Cria a figura com tamanho proporcional
+    fig = plt.figure(figsize=(fig_width, fig_height))
+    
+    # [IMPORTANTE] Define o eixo para ocupar 100% da figura (0,0,1,1)
+    # Isso elimina bordas brancas sem usar bbox_inches='tight'
+    ax = plt.axes([0, 0, 1, 1])
     ax.set_axis_off()
     
-    # 4. Desenha (Contourf Suave)
-    cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
+    # 4. Desenha (Contourf)
+    cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=1.0)
     
-    # 5. Aplica Recorte (Clipping)
+    # 5. Aplica Recorte (Clipping) pelo GeoJSON
     try:
-        coords = geojson_data['features'][0]['geometry']['coordinates'][0]
-        poly_path = MplPath(coords)
-        patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='black', linewidth=2)
-        ax.add_patch(patch)
-        
-        # Compatibilidade de Versão Matplotlib
-        if hasattr(cf, 'collections'):
-            for col in cf.collections: col.set_clip_path(patch)
+        # Tenta pegar coordenadas (suporte simples para Polygon)
+        # Se for MultiPolygon, precisaria de uma lógica mais complexa, 
+        # mas mantendo sua estrutura original:
+        if geojson_data['features'][0]['geometry']['type'] == 'Polygon':
+            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+        elif geojson_data['features'][0]['geometry']['type'] == 'MultiPolygon':
+            # Pega o maior polígono ou o primeiro (blindagem básica)
+            coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
         else:
-            cf.set_clip_path(patch)
-    except Exception as e:
-        print(f"Aviso de Clipping: {e}")
+            coords = [] # Falha segura
 
-    # 6. Finaliza
-    ax.set_xlim(X.min(), X.max())
-    ax.set_ylim(Y.min(), Y.max())
+        if len(coords) > 0:
+            poly_path = MplPath(coords)
+            patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', edgecolor='black', linewidth=2)
+            ax.add_patch(patch)
+            
+            # Aplica o recorte na coleção de contornos
+            if hasattr(cf, 'collections'):
+                for col in cf.collections: 
+                    col.set_clip_path(patch)
+    except Exception as e:
+        print(f"Erro no recorte (Clipping): {e}")
+
+    # 6. Finaliza com Travamento de Eixos
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(y_min, y_max)
     
     img_data = BytesIO()
-    plt.savefig(img_data, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=100) # DPI 100 é mais leve
-    plt.close(fig) # Fecha figura para liberar RAM
+    
+    # [CRÍTICO] Removemos bbox_inches='tight' e pad_inches=0
+    # Como definimos o eixo em [0,0,1,1], a imagem sairá exata.
+    plt.savefig(img_data, format='png', transparent=True, dpi=100)
+    
+    plt.close(fig)
     img_data.seek(0)
     
-    return img_data, [[Y.min(), X.min()], [Y.max(), X.max()]], bounds
+    return img_data, [[y_min, x_min], [y_max, x_max]], bounds
 
 # ==============================================================================
 # 5. INTERFACE E LÓGICA
