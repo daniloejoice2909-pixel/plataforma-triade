@@ -96,27 +96,48 @@ with st.sidebar.expander("6. Micronutrientes", expanded=False):
     dose_cu = st.number_input("Cobre (Dose):", value=2.0, step=0.5)
 
 # ==============================================================================
-# 4. FUNÇÕES DE SUPORTE
+# 4. FUNÇÕES DE SUPORTE (LEITOR COM REBOBINAMENTO)
 # ==============================================================================
 def ler_arquivo_robusto(uploaded_file):
-    """Lê CSV, XLSX ou XLS tentando várias engines"""
+    """
+    Tenta ler de todas as formas possíveis, rebobinando o arquivo a cada tentativa.
+    """
+    file_name = uploaded_file.name.lower()
+    
+    # 1. Tentar como Excel Universal (Pandas decide)
     try:
-        nome = uploaded_file.name.lower()
-        if nome.endswith('.csv'):
-            try: return pd.read_csv(uploaded_file)
-            except: uploaded_file.seek(0); return pd.read_csv(uploaded_file, sep=';')
-        
-        elif nome.endswith('.xlsx'):
-            try: return pd.read_excel(uploaded_file, engine='openpyxl')
-            except: return pd.read_excel(uploaded_file) # Tenta default
-            
-        elif nome.endswith('.xls'):
-            try: return pd.read_excel(uploaded_file, engine='xlrd')
-            except: st.error("Para arquivos .xls antigos, instale a biblioteca 'xlrd'."); return pd.DataFrame()
-            
-        return pd.read_excel(uploaded_file) # Tentativa final genérica
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file)
+    except:
+        pass
+
+    # 2. Tentar forçando engine 'openpyxl' (XLSX novo)
+    try:
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, engine='openpyxl')
+    except:
+        pass
+
+    # 3. Tentar forçando engine 'xlrd' (XLS antigo)
+    try:
+        uploaded_file.seek(0)
+        return pd.read_excel(uploaded_file, engine='xlrd')
+    except:
+        pass
+
+    # 4. Tentar como CSV (Separador ,)
+    try:
+        uploaded_file.seek(0)
+        return pd.read_csv(uploaded_file, sep=',')
+    except:
+        pass
+
+    # 5. Tentar como CSV (Separador ;)
+    try:
+        uploaded_file.seek(0)
+        return pd.read_csv(uploaded_file, sep=';')
     except Exception as e:
-        st.error(f"Erro ao ler arquivo: {e}")
+        st.error(f"Não foi possível ler o arquivo. Erro final: {e}")
         return pd.DataFrame()
 
 def processar_arquivo_geografico(uploaded_file):
@@ -156,7 +177,7 @@ def limpar_coluna_inteligente(serie):
     def clean_val(val):
         if pd.isna(val): return np.nan
         s = str(val).strip().replace(' ', '')
-        # Remove símbolos que não são números
+        # Remove símbolos matemáticos
         for char in ['<', '>', 'ns', 'nan', 'null', 'nd', 'ND']:
             s = s.replace(char, '')
         
@@ -186,6 +207,7 @@ def extrair_coordenadas_limpas(geojson_data):
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
     
+    # Normalização de Coordenadas
     if 'latitude_y' in df.columns: df.rename(columns={'latitude_y': 'latitude', 'longitude_y': 'longitude'}, inplace=True)
     elif 'latitude_x' in df.columns and 'latitude' not in df.columns: df.rename(columns={'latitude_x': 'latitude', 'longitude_x': 'longitude'}, inplace=True)
     
@@ -196,6 +218,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     cols_ignorar = ['id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'geometry', 'id_clean']
     cols_validas = []
     
+    # Pré-validação
     for col in df.columns:
         if any(x in str(col).lower() for x in cols_ignorar): continue
         df[col] = limpar_coluna_inteligente(df[col])
@@ -289,10 +312,8 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
 def calcular_vrt(df):
     df_rec = df.copy()
     cols = {}
-    # Adicionado 's' para enxofre se precisar, e micros
     targets = ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem', 'b', 'zn', 'mn', 'cu']
     for alvo in targets:
-        # Busca exata ou parcial inteligente
         cols[alvo] = next((c for c in df_rec.columns if alvo == c.lower() or (alvo in c.lower() and len(c) < 15)), None)
 
     # 1. CALAGEM
@@ -324,7 +345,7 @@ def calcular_vrt(df):
             df_rec[cols['prem']] > 30
         ]
         nc_grid = np.select(conds, [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5], default=30)
-        gap = nc_grid - df_rec[col_p] # Se negativo = reserva
+        gap = nc_grid - df_rec[col_p]
         dose_p = (gap * fator_tam_p) + (meta_prod * export_p_factor)
         df_rec['MAP_Kg_ha'] = (dose_p * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
@@ -365,10 +386,7 @@ with aba1:
                 df_pts = processar_arquivo_geografico(f_geo)
                 f_json.seek(0); geo_data = json.load(f_json)
                 
-                # Tenta achar ID
-                col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra', 'codigo']), None)
-                if not col_id: col_id = df_lab.columns[0]
-
+                col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra']), df_lab.columns[0])
                 df_lab['id_clean'] = df_lab[col_id].astype(str).str.strip().str.replace('.0', '')
                 df_pts['id_clean'] = df_pts['ID_PONTO'].astype(str).str.strip().str.replace('.0', '')
                 
