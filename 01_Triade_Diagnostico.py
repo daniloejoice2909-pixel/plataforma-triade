@@ -121,14 +121,13 @@ def limpar_coluna_inteligente(serie):
     def clean_val(val):
         if pd.isna(val): return np.nan
         s = str(val).strip()
-        if s.lower() in ['ns', 'nan', '', 'null']: return np.nan
+        if s.lower() in ['ns', 'nan', '', 'null', 'nd']: return np.nan
         return s
 
     # 1. Converte tudo para string limpa ou NaN
     s_clean = serie.apply(clean_val)
     
     # 2. Verifica se existe vírgula (padrão BR) ignorando NaNs
-    # dropna() garante que só verificamos strings, evitando o erro .str
     tem_virgula = s_clean.dropna().apply(lambda x: ',' in x).any()
     
     if tem_virgula:
@@ -150,22 +149,28 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO
+# 4. MOTOR DE CÁLCULO (OTIMIZADO)
 # ==============================================================================
-@st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
+# Removemos o @st.cache_data daqui para permitir a barra de progresso funcionar
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
     
-    # Adicionado 'id_clean' para não tentar interpolar o ID
-    cols_proibidas = ['id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean']
+    # Lista expandida de colunas ignoradas para ganhar performance
+    cols_proibidas = [
+        'id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 
+        'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 
+        'talhao', 'geometry', 'id_clean', 'unnamed', 'obs'
+    ]
     
     cols_validas = []
     for col in df.columns:
-        if col.lower() in cols_proibidas: continue
+        # Verifica se o nome da coluna contém termos proibidos
+        if any(p in str(col).lower() for p in cols_proibidas): continue
+        
         # Limpeza Forçada
         df[col] = limpar_coluna_inteligente(df[col])
-        # Aceita colunas com pelo menos 5 valores válidos para ter o que interpolar
-        if df[col].notna().sum() >= 5: 
+        # Aceita colunas com pelo menos 5 valores válidos e variância > 0
+        if df[col].notna().sum() >= 5 and df[col].nunique() > 1: 
             cols_validas.append(col)
 
     # Coordenadas ajustadas
@@ -193,16 +198,21 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
     processed_cols = []
-    for col in cols_validas:
+    
+    # --- BARRA DE PROGRESSO ---
+    progresso_texto = st.empty()
+    bar = st.progress(0)
+    total_cols = len(cols_validas)
+    
+    for i, col in enumerate(cols_validas):
+        progresso_texto.text(f"⏳ Processando mapa de: {col} ({i+1}/{total_cols})")
+        bar.progress((i + 1) / total_cols)
+        
         try:
             dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
             
             # Se for constante ou vazio
-            if len(dados_col) == 0: continue
-            if dados_col[col].nunique() <= 1:
-                df_result[col] = dados_col[col].mean()
-                processed_cols.append(col)
-                continue
+            if len(dados_col) < 5: continue
 
             OK = OrdinaryKriging(
                 dados_col['longitude'], dados_col['latitude'], dados_col[col], 
@@ -212,8 +222,12 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             df_result[col] = z.flatten()
             processed_cols.append(col)
         except Exception as e:
-            # st.warning(f"Não foi possível interpolar {col}: {e}")
+            print(f"Erro em {col}: {e}")
             continue
+            
+    # Limpa a barra de progresso
+    progresso_texto.empty()
+    bar.empty()
 
     cols_finais = ['latitude', 'longitude'] + processed_cols
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
@@ -396,18 +410,19 @@ if file_lab and file_geo and file_geojson:
 
                 # 3. BOTÃO DE PROCESSAMENTO
                 if st.button("🚀 Gerar Mapas de Fertilidade", type="primary"):
-                    with st.status("Processando...", expanded=True) as status:
-                        st.cache_data.clear() 
-                        
-                        df_krig, grid_shape = processar_matrizes_interpolacao(df_merged, geojson_data)
-                        
-                        if df_krig.empty: 
-                            st.error("Tabela vazia após processamento.")
-                            st.stop()
-                        
-                        st.session_state['dados_processados'] = df_krig
-                        st.session_state['grid_shape'] = grid_shape
-                        status.update(label="Concluído!", state="complete", expanded=False)
+                    
+                    st.cache_data.clear() 
+                    
+                    # Chama a função otimizada (resolucao_grid=100 para não travar)
+                    df_krig, grid_shape = processar_matrizes_interpolacao(df_merged, geojson_data, resolucao_grid=100)
+                    
+                    if df_krig.empty: 
+                        st.error("Tabela vazia após processamento.")
+                        st.stop()
+                    
+                    st.session_state['dados_processados'] = df_krig
+                    st.session_state['grid_shape'] = grid_shape
+                    st.success("Processamento concluído!")
                     st.rerun()
 
     except Exception as e:
