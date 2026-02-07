@@ -1,10 +1,3 @@
-Aqui está a versão definitiva e corrigida do código, atendendo rigorosamente às novas fórmulas solicitadas (Calagem por elevação de Ca/Mg, Fósforo via P-rem com níveis críticos específicos e Potássio por meta de CTC).
-
-Todos os parâmetros mencionados (Teores do calcário, metas de exportação, níveis críticos) foram colocados na Sidebar e são totalmente editáveis.
-
-Substitua todo o seu código por este:
-
-Python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -25,7 +18,7 @@ from scipy.interpolate import Rbf
 import folium
 from streamlit_folium import st_folium
 
-# Tenta importar funções utilitárias
+# Tenta importar funções utilitárias se existirem, senão define mocks
 try:
     from utils_v43 import (
         configurar_pagina, renderizar_cabecalho_sidebar, 
@@ -50,16 +43,16 @@ if 'geojson_data' not in st.session_state: st.session_state['geojson_data'] = No
 if 'grid_shape' not in st.session_state: st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. SIDEBAR DE PARÂMETROS AGRONÔMICOS (COMPLETA E EDITÁVEL)
+# 3. SIDEBAR DE PARÂMETROS AGRONÔMICOS
 # ==============================================================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Parâmetros de Recomendação")
 
-# A. Produtividade
+# A. Produtividade de Soja
 with st.sidebar.expander("1. Meta de Produtividade", expanded=True):
     meta_prod = st.number_input("Meta Soja (sc/ha):", value=80.0, step=1.0, min_value=0.0)
 
-# B. Calagem (Atualizado: Elevação Ca/Mg)
+# B. Calagem
 with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
     st.markdown("**Metas na CTC (%):**")
     alvo_ca = st.number_input("Alvo Cálcio (%):", value=60.0, step=1.0)
@@ -67,8 +60,8 @@ with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
     
     st.markdown("**Garantias do Corretivo:**")
     prnt_calc = st.number_input("PRNT (%):", value=80.0, step=1.0)
-    teor_cao = st.number_input("Teor CaO (%):", value=60.0, step=1.0) # Padrão solicitado
-    teor_mgo = st.number_input("Teor MgO (%):", value=18.0, step=1.0) # Padrão solicitado
+    teor_cao = st.number_input("Teor CaO (%):", value=36.0, step=1.0) 
+    teor_mgo = st.number_input("Teor MgO (%):", value=9.0, step=1.0) 
 
 # C. Fósforo (Tabela P-rem + Exportação)
 with st.sidebar.expander("3. Fósforo (P)", expanded=False):
@@ -78,23 +71,23 @@ with st.sidebar.expander("3. Fósforo (P)", expanded=False):
     fator_tam_p = st.number_input("Fator Tampão (kg P₂O₅/mg):", value=5.0, step=0.5, help="Qtd de adubo para subir 1 mg no solo")
 
     st.markdown("**Níveis Críticos (P-rem):**")
-    st.caption("P-rem | Nível Crítico (mg/dm³)")
-    nc_p1 = st.number_input("0 - 4:", value=6.0, step=0.5)
-    nc_p2 = st.number_input("4.1 - 10:", value=7.5, step=0.5)
-    nc_p3 = st.number_input("10.1 - 19:", value=11.5, step=0.5)
-    nc_p4 = st.number_input("19.1 - 30:", value=15.0, step=0.5)
-    nc_p5 = st.number_input("> 30:", value=20.0, step=0.5)
+    st.caption("Conforme P-rem do solo:")
+    nc_p1 = st.number_input("0 - 4 mg/dm³:", value=6.0, step=0.5)
+    nc_p2 = st.number_input("4.1 - 10 mg/dm³:", value=7.5, step=0.5)
+    nc_p3 = st.number_input("10.1 - 19 mg/dm³:", value=11.5, step=0.5)
+    nc_p4 = st.number_input("19.1 - 30 mg/dm³:", value=15.0, step=0.5)
+    nc_p5 = st.number_input("> 30 mg/dm³:", value=20.0, step=0.5)
 
 # D. Potássio
 with st.sidebar.expander("4. Potássio (K)", expanded=False):
     st.markdown("**Correção + Exportação:**")
     alvo_k_ctc = st.number_input("Meta K na CTC (%):", value=3.5, step=0.1)
     export_k_factor = st.number_input("Exportação K (kg/sc):", value=1.2, step=0.1)
-    teor_k2o_adubo = st.number_input("Teor K₂O Adubo (%):", value=60.0, step=1.0) 
+    teor_k2o_adubo = st.number_input("Teor K₂O Adubo (%):", value=60.0, step=1.0)
 
 # E. Gesso
 with st.sidebar.expander("5. Gessagem", expanded=False):
-    fator_gesso = st.number_input("Fator x Argila:", value=50.0, step=5.0)
+    fator_gesso = st.number_input("Fator x Argila:", value=15.0, step=5.0)
 
 # ==============================================================================
 # 4. FUNÇÕES AUXILIARES
@@ -107,7 +100,8 @@ def processar_arquivo_geografico(uploaded_file):
                 kml_filename = [f for f in z.namelist() if f.endswith('.kml')][0]
                 with z.open(kml_filename) as f: tree = ET.parse(f)
         else:
-            uploaded_file.seek(0); tree = ET.parse(uploaded_file)
+            uploaded_file.seek(0)
+            tree = ET.parse(uploaded_file)
         
         root = tree.getroot()
         namespace = {'kml': 'http://www.opengis.net/kml/2.2'}
@@ -126,7 +120,8 @@ def processar_arquivo_geografico(uploaded_file):
                     first_coord = coords_text[0].split(',')
                     if len(first_coord) >= 2:
                         try:
-                            lon = float(first_coord[0]); lat = float(first_coord[1])
+                            lon = float(first_coord[0])
+                            lat = float(first_coord[1])
                             points.append({'ID_PONTO': name, 'latitude': lat, 'longitude': lon})
                         except ValueError: pass
         return pd.DataFrame(points)
@@ -155,7 +150,7 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 5. MOTOR DE CÁLCULO (RBF LINEAR - Padrão InCeres)
+# 5. MOTOR DE CÁLCULO (RBF LINEAR)
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
@@ -170,7 +165,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
 
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # Projeção (Graus -> Metros)
     lat_mean = df_grouped['latitude'].mean()
     df_grouped['Y_m'] = df_grouped['latitude'] * 111111
     df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
@@ -204,7 +198,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
             if len(dados_col) < 5: continue
             
-            # RBF Linear (Sem Olho de Boi)
             interpolator = Rbf(dados_col['X_m'], dados_col['Y_m'], dados_col[col], function='linear')
             z = interpolator(grid_x_m, grid_y_m)
             z = np.clip(z, dados_col[col].min(), dados_col[col].max())
@@ -218,7 +211,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 6. GERAÇÃO DE IMAGEM (6 FAIXAS SÓLIDAS)
+# 6. GERAÇÃO DE IMAGEM
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all'); plt.clf()
@@ -253,7 +246,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     fig = plt.figure(figsize=(10, 10 * (x_max-x_min)/(y_max-y_min)))
     fig.patch.set_alpha(0.0); ax = plt.axes([0,0,1,1]); ax.set_axis_off()
     
-    # Paleta InCeres (6 cores)
     cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
     cmap = mcolors.ListedColormap(cores)
     boundaries = np.linspace(z_min, z_max, 7)
@@ -273,70 +265,62 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
 def calcular_recomendacoes(df):
     df_rec = df.copy()
     
-    # Mapeamento de colunas
     cols = {k: next((c for c in df_rec.columns if k in c.lower()), None) 
             for k in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem']}
     
-    # --- A. CALAGEM (ELEVAÇÃO Ca e Mg - MAIOR DOSE) ---
+    # --- A. CALAGEM (ELEVAÇÃO Ca e Mg) ---
     if cols['ca'] and cols['mg'] and cols['ctc']:
-        # 1. Deficit Ca (cmolc/dm3)
-        # Ca_atual_cmolc = Ca (na tabela, assumindo cmolc)
-        # Ca_alvo_cmolc = (Alvo% / 100) * CTC
+        # Deficit Ca (cmolc/dm3)
         ca_atual = df_rec[cols['ca']]
         ca_alvo_val = (alvo_ca / 100) * df_rec[cols['ctc']]
         def_ca = ca_alvo_val - ca_atual
         
-        # 2. Deficit Mg (cmolc/dm3)
+        # Deficit Mg (cmolc/dm3)
         mg_atual = df_rec[cols['mg']]
         mg_alvo_val = (alvo_mg / 100) * df_rec[cols['ctc']]
         def_mg = mg_alvo_val - mg_atual
         
-        # 3. Necessidade de CaO e MgO (kg/ha) para suprir o deficit
-        # Fator Estequiométrico: 
-        # 1 cmolc Ca = 200 mg/dm3 = 400 kg/ha Ca. CaO/Ca = 1.4. Precisa 560 kg CaO puro.
-        # 1 cmolc Mg = 121 mg/dm3 = 242 kg/ha Mg. MgO/Mg = 1.66. Precisa 403 kg MgO puro (aprox 400).
+        # Conversão para kg de Óxidos (Estequiometria)
+        # 1 cmolc Ca = 560 kg CaO (aprox)
+        # 1 cmolc Mg = 403 kg MgO (aprox)
         need_cao_kg = def_ca * 560
-        need_mgo_kg = def_mg * 400
+        need_mgo_kg = def_mg * 403
         
-        # 4. Converter para Toneladas de Calcário Comercial
-        # Dose Ca = (Need_CaO / Teor_CaO_Calcario%) / 10
-        dose_ton_ca = (need_cao_kg / teor_cao) / 10
+        # Conversão para Ton de Produto (Considerando Teor)
+        t_cao = teor_cao if teor_cao > 0 else 1
+        t_mgo = teor_mgo if teor_mgo > 0 else 1
         
-        # Dose Mg = (Need_MgO / Teor_MgO_Calcario%) / 10
-        dose_ton_mg = (need_mgo_kg / teor_mgo) / 10
+        dose_ton_ca = (need_cao_kg / t_cao) / 10
+        dose_ton_mg = (need_mgo_kg / t_mgo) / 10
         
-        # 5. Escolher a Maior Dose e Ajustar PRNT
+        # Maior Dose vence + PRNT
         dose_base = np.maximum(dose_ton_ca, dose_ton_mg)
-        dose_final = dose_base * (100 / prnt_calc)
+        prnt_fator = 100 / prnt_calc if prnt_calc > 0 else 1
         
-        df_rec['Calcario_Ton_ha'] = dose_final.apply(lambda x: x if x > 0 else 0)
+        df_rec['Calcario_Ton_ha'] = (dose_base * prnt_fator).apply(lambda x: x if x > 0 else 0)
 
-    # --- B. POTÁSSIO (Correção + Exportação) ---
+    # --- B. POTÁSSIO (Correção 3.5% + Exportação) ---
     if cols['k'] and cols['ctc']:
-        # K atual em %
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
         
-        # Deficit em cmolc
+        # Correção para 3.5% (ou valor da sidebar)
         def_k_cmolc = ((alvo_k_ctc - k_pct) / 100) * df_rec[cols['ctc']]
         def_k_cmolc = def_k_cmolc.apply(lambda x: x if x > 0 else 0)
         
-        # Correção: 1 cmolc K = 942 kg K2O/ha (aprox)
+        # 1 cmolc K ~ 942 kg K2O
         k2o_corr = def_k_cmolc * 942 
-        
-        # Exportação
         k2o_export = meta_prod * export_k_factor
         
-        # Total K2O
         total_k2o = k2o_corr + k2o_export
+        t_k2o = teor_k2o_adubo if teor_k2o_adubo > 0 else 1
         
-        # Produto Comercial
-        df_rec['Adubo_K_Kg_ha'] = (total_k2o * (100 / teor_k2o_adubo))
+        df_rec['Adubo_K_Kg_ha'] = (total_k2o * (100 / t_k2o)).apply(lambda x: x if x > 0 else 0)
 
-    # --- C. FÓSFORO (Com Reserva e Tabela P-rem) ---
+    # --- C. FÓSFORO (P-rem + Reserva descontada) ---
     col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
     
     if col_p and cols['prem']:
-        # Define Nível Crítico baseado na Tabela P-rem
+        # Níveis Críticos (Sidebar)
         conds = [
             df_rec[cols['prem']] <= 4.0,
             (df_rec[cols['prem']] > 4.0) & (df_rec[cols['prem']] <= 10.0),
@@ -344,25 +328,24 @@ def calcular_recomendacoes(df):
             (df_rec[cols['prem']] > 19.0) & (df_rec[cols['prem']] <= 30.0),
             df_rec[cols['prem']] > 30.0
         ]
-        # Valores vindos da Sidebar
         choices = [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5]
         
         nc_p_grid = np.select(conds, choices, default=30.0)
             
-        # Gap (Déficit positivo ou Superávit negativo)
+        # Gap: Se P_solo > NC, fica negativo (Reserva)
         gap_p = nc_p_grid - df_rec[col_p]
         
-        # Dose Correção (pode ser negativa se houver reserva)
+        # Correção (Pode ser negativa se houver sobra)
         dose_correcao = gap_p * fator_tam_p 
         
-        # Dose Exportação (Fixa)
+        # Exportação (Sempre positiva)
         dose_export = meta_prod * export_p_factor
         
-        # Dose Final = Exportação + Correção (Abate a reserva se existir)
+        # Soma Algébrica: Se dose_correcao for -20 e export for 60, aplica 40.
         dose_total_p2o5 = dose_export + dose_correcao
         
-        # Transforma em produto e corta negativos
-        df_rec['Adubo_P_Kg_ha'] = (dose_total_p2o5 * (100 / teor_p2o5_adubo)).apply(lambda x: x if x > 0 else 0)
+        t_p2o5 = teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1
+        df_rec['Adubo_P_Kg_ha'] = (dose_total_p2o5 * (100 / t_p2o5)).apply(lambda x: x if x > 0 else 0)
 
     # --- D. GESSO ---
     if cols['argila']:
@@ -385,7 +368,6 @@ with aba1:
     if file_lab and file_geo and file_geojson:
         if st.button("🚀 Processar Ponte de Dados", type="primary"):
             try:
-                # 1. Load Data
                 if file_lab.name.lower().endswith('.csv'):
                     try: df_lab = pd.read_csv(file_lab)
                     except: file_lab.seek(0); df_lab = pd.read_csv(file_lab, sep=';')
@@ -394,7 +376,6 @@ with aba1:
                 df_geo_points = processar_arquivo_geografico(file_geo)
                 file_geojson.seek(0); st.session_state['geojson_data'] = json.load(file_geojson)
 
-                # 2. Merge
                 if not df_lab.empty and not df_geo_points.empty:
                     col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra', 'codigo']), df_lab.columns[0])
                     df_lab['id_clean'] = df_lab[col_id].apply(lambda x: str(x).split('.')[0].strip())
@@ -403,7 +384,6 @@ with aba1:
                     df_merged = pd.merge(df_lab, df_geo_points, on='id_clean', how='inner')
                     
                     if not df_merged.empty:
-                        # 3. Interpolate
                         df_krig, shape = processar_matrizes_interpolacao(df_merged, st.session_state['geojson_data'], 100)
                         st.session_state['dados_processados'] = df_krig
                         st.session_state['grid_shape'] = shape
@@ -427,7 +407,6 @@ with aba2:
     if st.session_state['dados_processados'] is None:
         st.warning("Gere o diagnóstico primeiro.")
     else:
-        # Botão para recalcular com os parâmetros da Sidebar
         if st.button("🔄 Calcular/Atualizar Recomendações"):
             df_calc = calcular_recomendacoes(st.session_state['dados_processados'])
             st.session_state['dados_rec'] = df_calc
@@ -438,12 +417,11 @@ with aba2:
             if cols_rec:
                 escolha = st.selectbox("Mapa de Aplicação:", cols_rec)
                 
-                # Stats
                 media_dose = st.session_state['dados_rec'][escolha].mean()
                 
                 c1, c2 = st.columns(2)
-                c1.metric("Dose Média (kg ou ton/ha)", f"{media_dose:.1f}")
-                c2.info(f"Parâmetros: Meta {meta_prod} sc/ha | PRNT {prnt_calc}%")
+                c1.metric("Dose Média", f"{media_dose:.1f}")
+                c2.info(f"Produtividade Alvo: {meta_prod} sc/ha")
 
                 img_rec, bounds_rec, mm_rec = gerar_imagem_overlay(
                     st.session_state['dados_rec'], escolha, 
@@ -454,7 +432,6 @@ with aba2:
                     folium.raster_layers.ImageOverlay(image=f"data:image/png;base64,{base64.b64encode(img_rec.getvalue()).decode()}", bounds=bounds_rec, opacity=0.8).add_to(m2)
                     folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m2)
                     
-                    # Legenda
                     legend_html = f"""<div style="position:fixed;bottom:30px;right:30px;z-index:9999;background:white;padding:10px;border:1px solid black;"><b>{escolha}</b><br>
                     <div style="display:flex;width:150px;height:10px;"><div style="flex:1;background:#d73027;"></div><div style="flex:1;background:#fc8d59;"></div><div style="flex:1;background:#fee08b;"></div><div style="flex:1;background:#d9ef8b;"></div><div style="flex:1;background:#91cf60;"></div><div style="flex:1;background:#4575b4;"></div></div>
                     <div style="display:flex;justify-content:space-between;font-size:10px;"><span>{mm_rec[0]:.1f}</span><span>{mm_rec[1]:.1f}</span></div></div>"""
