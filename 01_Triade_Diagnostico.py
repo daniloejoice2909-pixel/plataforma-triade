@@ -175,7 +175,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_result.dropna(subset=cols_validas, how='all')
 
 # ==============================================================================
-# 5. GERAÇÃO DE IMAGEM (MATPLOTLIB SEGURO - COM JET)
+# 5. GERAÇÃO DE IMAGEM BLINDADA (V61 - CORREÇÃO DE MAPA PLANO)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     # 1. Prepara Dados
@@ -185,9 +185,21 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     Y = pivot.index.values    
     
     # 2. Configura Cores (JET Padrão Agronômico)
-    # Criando 8 níveis discretos baseados na escala Jet
     cmap = plt.get_cmap('jet', 8) 
-    bounds = np.linspace(np.nanmin(Z), np.nanmax(Z), 9) # 9 limites para 8 intervalos
+    
+    # --- VACINA CONTRA ERRO "LEVELS MUST BE INCREASING" ---
+    z_min, z_max = np.nanmin(Z), np.nanmax(Z)
+    
+    # Se o mapa for todo igual (ex: tudo zero), criamos uma variação artificial
+    # apenas para o gráfico conseguir desenhar uma cor sólida sem travar
+    if z_min == z_max:
+        z_min -= 0.1
+        z_max += 0.1
+    # Se a variação for muito pequena (microscópica), expandimos também
+    elif (z_max - z_min) < 0.0001:
+        z_max += 0.0001
+        
+    bounds = np.linspace(z_min, z_max, 9) # Agora garantimos que z_min < z_max
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
     # 3. Gera Figura (MODO AGG)
@@ -196,7 +208,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     ax.set_axis_off()
     
     # 4. Desenha (Contourf Sólido)
-    # alpha=1.0 para opacidade total, cores vivas
     cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=1.0)
     
     # 5. Aplica Recorte (Clipping)
@@ -211,7 +222,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
         else:
             cf.set_clip_path(patch)
     except Exception as e:
-        # Silencioso ou Log
         pass
 
     # 6. Finaliza
