@@ -1,9 +1,3 @@
-Esse erro acontece porque o Pandas é muito "rigoroso" com tipos de dados. Mesmo que a coluna pareça ser texto, se você introduzir um valor NaN (nulo/vazio) nela, ela vira "mista" e o comando .str para de funcionar em algumas versões, causando esse travamento.
-
-Para resolver definitivamente, vamos usar a "Opção Nuclear": substituir os comandos .str por .apply(). O .apply() roda linha por linha usando Python puro, o que ignora completamente as restrições de tipo do Pandas. É a forma mais blindada de limpar dados.
-
-Aqui está o código completo corrigido. Substitua todo o seu arquivo por este:
-
 Python
 import streamlit as st
 import pandas as pd
