@@ -5,9 +5,9 @@ import json
 from io import BytesIO
 import base64
 
-# --- 1. CONFIGURAÇÃO DE BACKEND (A VACINA ANTI-TRAVAMENTO) ---
+# --- 1. CONFIGURAÇÃO DE BACKEND ---
 import matplotlib
-matplotlib.use('Agg') # Força modo não-interativo
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
@@ -38,13 +38,13 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 3. KRIGAGEM OTIMIZADA (V60 - COM DETECÇÃO DE CONSTANTES)
+# 3. KRIGAGEM OTIMIZADA (V66 - ARREDONDAMENTO DE PRECISÃO)
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df = df_input.copy() 
     
-    # Metadados que não devem ser interpolados
+    # Metadados
     cols_proibidas = [
         'id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 
         'x', 'y', 'data', 'hora', 'campo', 'fazenda', 
@@ -53,7 +53,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     
     cols_validas = []
     
-    # 1. Limpeza e Validação Inicial
+    # 1. Limpeza
     for col in df.columns:
         if col.lower() in cols_proibidas: continue
         try:
@@ -62,18 +62,30 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
                 cols_validas.append(col)
         except: pass 
 
-    # 2. Criação do Grid
+    # 2. Criação do Grid (AGORA COM ARREDONDAMENTO)
+    # Arredondar resolve problemas de pivotagem onde 10.00001 != 10.00000
+    df['longitude'] = df['longitude'].round(6)
+    df['latitude'] = df['latitude'].round(6)
+    
     x_min, x_max = df['longitude'].min(), df['longitude'].max()
     y_min, y_max = df['latitude'].min(), df['latitude'].max()
-    buffer = 0.003 
+    
+    # Buffer pequeno
+    buffer = 0.002 
     
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
+    # Arredonda o Grid também!
+    grid_x = np.round(grid_x, 6)
+    grid_y = np.round(grid_y, 6)
+    
     xx, yy = np.meshgrid(grid_x, grid_y)
+    
+    # DataFrame base
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
-    # 3. Loop Inteligente
+    # 3. Loop de Interpolação
     for col in cols_validas:
         if col not in df.columns: continue
 
@@ -81,13 +93,13 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             dados = df[['longitude', 'latitude', col]].dropna()
             if len(dados) < 5: continue
 
-            # Correção para Mapas Planos (ex: Alumínio Zero)
+            # Checagem de variância zero
             if dados[col].nunique() <= 1:
                 valor_constante = dados[col].iloc[0]
                 df_result[col] = valor_constante
                 continue 
             
-            # Geoestatística
+            # Krigagem
             OK = OrdinaryKriging(
                 dados['longitude'], dados['latitude'], dados[col], 
                 variogram_model='linear', verbose=False, enable_plotting=False
@@ -99,100 +111,99 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
             print(f"⚠️ Erro ao processar '{col}': {e}")
             continue
 
-    # Filtra apenas colunas que realmente foram geradas
     cols_finais = [c for c in cols_validas if c in df_result.columns]
-    if not cols_finais: return df_result # Retorna vazio se falhar tudo
+    if not cols_finais: return df_result 
     
     return df_result.dropna(subset=cols_finais, how='all')
 
 # ==============================================================================
-# 4. GERAÇÃO DE IMAGEM (V65 - MÁSCARA DE DADOS "COOKIE CUTTER")
+# 4. GERAÇÃO DE IMAGEM (V66 - MÁSCARA INVERTIDA E TRANSPARÊNCIA)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
-    # 1. Prepara a Matriz de Dados
+    # 1. Pivotagem Segura
     pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
     Z = pivot.values
     
-    # Coordenadas dos eixos
+    # Eixos únicos ordenados
     X_unique = pivot.columns.values 
     Y_unique = pivot.index.values    
     
-    # Cria o Meshgrid 2D completo para verificar os pontos
-    XX, YY = np.meshgrid(X_unique, Y_unique)
-    
-    # Limites físicos
     x_min, x_max = X_unique.min(), X_unique.max()
     y_min, y_max = Y_unique.min(), Y_unique.max()
 
-    # --- 2. APLICAÇÃO DA MÁSCARA (A SOLUÇÃO DO QUADRADO) ---
-    # Em vez de cortar a imagem depois, vamos apagar os dados fora do polígono agora.
-    try:
-        coords = []
-        geom_type = geojson_data['features'][0]['geometry']['type']
-        
-        if geom_type == 'Polygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
-        elif geom_type == 'MultiPolygon':
-            coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
-            
-        if len(coords) > 0:
-            # Cria um caminho vetorial com o contorno
-            poly_path = MplPath(coords)
-            
-            # Transforma os grids em uma lista de pontos (x, y)
-            points = np.column_stack((XX.flatten(), YY.flatten()))
-            
-            # Verifica quais pontos estão DENTRO do polígono
-            mask = poly_path.contains_points(points)
-            
-            # Remonta a máscara para o formato da matriz Z (linhas, colunas)
-            mask = mask.reshape(Z.shape)
-            
-            # Aplica a máscara: Onde for Falso (fora), vira NaN (Transparente)
-            Z[~mask] = np.nan
-            
-    except Exception as e:
-        print(f"Erro ao aplicar máscara de recorte: {e}")
-
-    # --- 3. CONFIGURAÇÃO VISUAL ---
-    # Configura Cores (JET)
+    # 2. Configura Cores
     cmap = plt.get_cmap('jet', 256)
-    cmap.set_bad(alpha=0) # Garante que NaNs sejam 100% transparentes
+    cmap.set_bad(alpha=0) # NaNs ficam invisíveis
     
-    # Tratamento para mapas planos
     z_min, z_max = np.nanmin(Z), np.nanmax(Z)
+    
+    # Correção Mapa Plano
     if z_min == z_max:
         z_min -= 0.1
         z_max += 0.1
+    elif (z_max - z_min) < 0.001:
+        z_max += 0.001
         
-    levels = np.linspace(z_min, z_max, 50)
     norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
 
-    # --- 4. CRIAÇÃO DA FIGURA ---
+    # 3. APLICAÇÃO DA MÁSCARA (RECORTE DO TALHÃO)
+    try:
+        # Prepara coordenadas do GeoJSON
+        coords = []
+        if geojson_data['features'][0]['geometry']['type'] == 'Polygon':
+            coords = geojson_data['features'][0]['geometry']['coordinates'][0]
+        elif geojson_data['features'][0]['geometry']['type'] == 'MultiPolygon':
+            coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
+            
+        if len(coords) > 0:
+            # Cria Polígono do Matplotlib
+            poly_path = MplPath(coords)
+            
+            # Cria matriz de coordenadas (X, Y) para cada pixel do Z
+            XX, YY = np.meshgrid(X_unique, Y_unique)
+            
+            # Achata para vetor de pontos (N, 2)
+            points = np.column_stack((XX.flatten(), YY.flatten()))
+            
+            # Verifica quem está dentro
+            mask_flat = poly_path.contains_points(points)
+            
+            # Transforma de volta na forma da matriz (Linhas, Colunas)
+            mask_grid = mask_flat.reshape(Z.shape)
+            
+            # Onde a máscara é FALSA (fora do talhão), o valor vira NaN
+            Z[~mask_grid] = np.nan
+            
+    except Exception as e:
+        print(f"Erro Máscara: {e}")
+
+    # 4. GERAÇÃO DA FIGURA
     plt.close('all') 
     
-    # Aspect Ratio Matemático
+    # Aspect Ratio para não distorcer
     aspect_ratio = (x_max - x_min) / (y_max - y_min)
     h_fig = 10
     w_fig = h_fig * aspect_ratio
     
     fig = plt.figure(figsize=(w_fig, h_fig))
     
-    # Eixo ocupando 100% da figura (Zero Margem)
+    # [IMPORTANTE] Transparência total no fundo da figura
+    fig.patch.set_alpha(0.0) 
+    
+    # Eixo ocupa 100%
     ax = plt.axes([0, 0, 1, 1])
     ax.set_axis_off()
+    ax.patch.set_alpha(0.0) # Fundo do eixo transparente
     
-    # Desenha o Mapa (Já mascarado)
-    # Como Z tem NaNs fora do polígono, o contourf já desenha recortado!
-    ax.contourf(X_unique, Y_unique, Z, levels=levels, cmap=cmap, norm=norm, extend='both', alpha=1.0)
+    # Desenha
+    ax.contourf(X_unique, Y_unique, Z, levels=50, cmap=cmap, norm=norm, extend='both', alpha=1.0)
     
-    # Trava limites
+    # Limites Estritos
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     
-    # Salva
     img_data = BytesIO()
-    plt.savefig(img_data, format='png', transparent=True, dpi=150)
+    plt.savefig(img_data, format='png', transparent=True, dpi=100)
     plt.close(fig)
     img_data.seek(0)
     
@@ -231,6 +242,9 @@ if file_csv and file_geojson:
 
     if st.button("🚀 Processar Mapas", type="primary"):
         with st.status("Processando...", expanded=True) as status:
+            # Limpa cache anterior para evitar "Mapas Iguais"
+            st.cache_data.clear()
+            
             st.write("Calculando Geoestatística...")
             df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
             st.session_state['dados_processados'] = df_krig
@@ -256,29 +270,35 @@ if st.session_state['dados_processados'] is not None:
     
     if cols_ver:
         atributo = st.selectbox("Selecione o mapa:", cols_ver)
-        df_plot = df_final.dropna(subset=[atributo])
         
+        # Filtra apenas colunas necessárias para evitar confusão de dados
+        df_plot = df_final[['latitude', 'longitude', atributo]].dropna()
+        
+        # Debug Rápido (Pode remover depois): Mostra estatísticas para provar que mudou
+        with st.expander(f"Estatísticas de {atributo} (Debug)", expanded=False):
+            st.write(df_plot[atributo].describe())
+
         if not df_plot.empty:
             try:
-                # Gera Imagem Perfeita (Com Máscara de Dados)
+                # Gera Imagem
                 img_buffer, bounds, min_max = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
                 
                 # Mapa Folium
                 centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
                 m = folium.Map(location=centro, zoom_start=14, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satellite')
                 
-                # Overlay da Imagem (Encaixe Exato)
+                # Overlay
                 img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
                 folium.raster_layers.ImageOverlay(
                     image=f"data:image/png;base64,{img_b64}",
                     bounds=bounds, 
-                    opacity=0.8, 
+                    opacity=0.9, 
                     interactive=True,
                     cross_origin=False,
                     zindex=1
                 ).add_to(m)
                 
-                # Contorno Preto por Cima (Apenas Linha)
+                # Contorno Preto
                 folium.GeoJson(
                     st.session_state['geojson_data'],
                     style_function=lambda x: {'color': 'black', 'weight': 3, 'fillOpacity': 0}
