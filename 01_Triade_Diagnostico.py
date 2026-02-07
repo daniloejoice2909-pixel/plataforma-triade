@@ -13,7 +13,6 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
-# PathPatch não é mais necessário com a nova técnica
 from scipy.interpolate import Rbf
 from scipy.interpolate import NearestNDInterpolator
 import folium
@@ -249,7 +248,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 6. GERAÇÃO DE IMAGEM (CORTE PERFEITO VIA MÁSCARA RASTER)
+# 6. GERAÇÃO DE IMAGEM (CORTE PERFEITO + ZOOM CROP)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all'); plt.clf()
@@ -260,31 +259,29 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
         Y_unique = np.sort(df_plot['latitude'].unique())
     except: return None, None, [0,1]
 
-    # --- MÁSCARA RASTER (O SEGREDO DO RECORTE PERFEITO) ---
+    # --- MÁSCARA RASTER E CÁLCULO DOS LIMITES REAIS ---
+    # Inicializa com os limites do grid (caso não tenha geojson)
     final_bounds = [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]]
+    poly_min_x, poly_max_x = X_unique.min(), X_unique.max()
+    poly_min_y, poly_max_y = Y_unique.min(), Y_unique.max()
+
     try:
         coords = extrair_coordenadas_limpas(geojson_data)
         if coords:
-            # Cria o caminho do polígono
             poly_path = MplPath(coords)
-            
-            # Cria grids de coordenadas para cada pixel da imagem
             XX, YY = np.meshgrid(X_unique, Y_unique)
-            
-            # Verifica ponto a ponto se está dentro do polígono
             grid_points = np.column_stack((XX.flatten(), YY.flatten()))
             mask_flat = poly_path.contains_points(grid_points)
             mask_grid = mask_flat.reshape(Z.shape)
-            
-            # Aplica a máscara: Tudo fora vira NaN (transparente)
             Z[~mask_grid] = np.nan
 
-            # Atualiza os bounds para focar apenas no polígono
+            # Calcula os limites EXATOS do polígono para o zoom
             poly_arr = np.array(coords)
-            final_bounds = [[poly_arr[:,1].min(), poly_arr[:,0].min()], [poly_arr[:,1].max(), poly_arr[:,0].max()]]
-    except Exception as e:
-        # Se falhar a máscara, plota o quadrado (fallback)
-        pass
+            poly_min_x, poly_max_x = poly_arr[:,0].min(), poly_arr[:,0].max()
+            poly_min_y, poly_max_y = poly_arr[:,1].min(), poly_arr[:,1].max()
+            # Atualiza os bounds que o Folium vai usar
+            final_bounds = [[poly_min_y, poly_min_x], [poly_max_y, poly_max_x]]
+    except: pass
     # ----------------------------------------------------
 
     dados_validos = Z[~np.isnan(Z)]
@@ -293,7 +290,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     z_min, z_max = np.nanmin(dados_validos), np.nanmax(dados_validos)
     if z_min == z_max: z_min -= 0.01; z_max += 0.01
 
-    # DPI alto para recorte nítido
+    # DPI alto para nitidez
     fig = plt.figure(figsize=(10, 10), dpi=150)
     ax = plt.axes([0,0,1,1]); ax.set_axis_off()
     
@@ -302,13 +299,20 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     bounds = np.linspace(z_min, z_max, 7)
     norm = mcolors.BoundaryNorm(bounds, cmap.N)
     
-    # O Matplotlib não plota NaNs, gerando o recorte automaticamente
+    # Plota os dados mascarados (NaNs ficam transparentes)
     ax.contourf(X_unique, Y_unique, Z, levels=bounds, cmap=cmap, norm=norm, extend='both', alpha=0.9)
     
+    # --- O PULO DO GATO: FORÇA O ZOOM NOS LIMITES DO POLÍGONO ---
+    # Isso recorta as bordas transparentes extras
+    ax.set_xlim(poly_min_x, poly_max_x)
+    ax.set_ylim(poly_min_y, poly_max_y)
+    # ----------------------------------------------------------
+
     img_data = BytesIO()
     plt.savefig(img_data, format='png', transparent=True, bbox_inches='tight', pad_inches=0)
     img_data.seek(0); plt.close(fig)
     
+    # Retorna a imagem e os bounds corretos para o Folium
     return img_data, final_bounds, [z_min, z_max]
 
 def criar_legenda_html(min_val, max_val, titulo):
