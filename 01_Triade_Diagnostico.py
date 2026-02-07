@@ -28,7 +28,6 @@ try:
         validar_colunas
     )
 except ImportError:
-    # Mock para caso o arquivo utils_v43 não esteja no mesmo diretório
     def configurar_pagina(titulo): st.set_page_config(page_title=titulo, layout="wide")
     def renderizar_cabecalho_sidebar(): st.sidebar.title("Módulo de Diagnóstico")
     def carregar_dados_blindado(): pass
@@ -51,87 +50,60 @@ if 'grid_shape' not in st.session_state:
     st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. FUNÇÕES AUXILIARES (GEOMETRIA E PARSER)
+# 3. FUNÇÕES AUXILIARES
 # ==============================================================================
 def processar_arquivo_geografico(uploaded_file):
-    """
-    Lê arquivos KML ou KMZ e retorna um DataFrame com ID_PONTO, latitude, longitude.
-    """
     points = []
-    
     try:
-        # Verifica se é KMZ (ZIP)
         if uploaded_file.name.lower().endswith('.kmz'):
             with zipfile.ZipFile(uploaded_file, 'r') as z:
-                # Pega o primeiro KML dentro do ZIP
                 kml_filename = [f for f in z.namelist() if f.endswith('.kml')][0]
                 with z.open(kml_filename) as f:
                     tree = ET.parse(f)
-        # Verifica se é KML (XML direto)
         else:
             uploaded_file.seek(0)
             tree = ET.parse(uploaded_file)
             
         root = tree.getroot()
-        
-        # Namespaces comuns do KML
         namespace = {'kml': 'http://www.opengis.net/kml/2.2'}
         
-        # Tenta encontrar Placemarks com ou sem namespace
         placemarks = root.findall('.//kml:Placemark', namespace)
-        if not placemarks:
-            placemarks = root.findall('.//Placemark')
+        if not placemarks: placemarks = root.findall('.//Placemark')
             
         for placemark in placemarks:
-            # Extrair Nome (ID)
             name_elem = placemark.find('kml:name', namespace)
             if name_elem is None: name_elem = placemark.find('name')
             name = name_elem.text.strip() if name_elem is not None and name_elem.text else None
             
-            # Extrair Coordenadas
             coord_elem = placemark.find('.//kml:coordinates', namespace)
             if coord_elem is None: coord_elem = placemark.find('.//coordinates')
             
             if coord_elem is not None and coord_elem.text:
-                # KML padrão: lon,lat,alt (separados por espaço se houver vários)
                 coords_text = coord_elem.text.strip().split()
                 if coords_text:
-                    # Pega a primeira coordenada
                     first_coord = coords_text[0].split(',')
                     if len(first_coord) >= 2:
                         try:
                             lon = float(first_coord[0])
                             lat = float(first_coord[1])
                             points.append({'ID_PONTO': name, 'latitude': lat, 'longitude': lon})
-                        except ValueError:
-                            pass
-                            
+                        except ValueError: pass
         return pd.DataFrame(points)
-
     except Exception as e:
         st.error(f"Erro ao ler arquivo de pontos: {e}")
         return pd.DataFrame()
 
 def limpar_coluna_inteligente(serie):
-    """
-    Detecta numéricos mistos (BR/US), remove 'ns' e limpa.
-    VERSÃO BLINDADA: Usa .apply() para evitar erro de accessor .str em tipos mistos.
-    """
-    # Função interna para limpar valor por valor (evita erro de tipo)
     def clean_val(val):
         if pd.isna(val): return np.nan
         s = str(val).strip()
         if s.lower() in ['ns', 'nan', '', 'null', 'nd']: return np.nan
         return s
 
-    # 1. Converte tudo para string limpa ou NaN
     s_clean = serie.apply(clean_val)
-    
-    # 2. Verifica se existe vírgula (padrão BR) ignorando NaNs
     tem_virgula = s_clean.dropna().apply(lambda x: ',' in x).any()
     
     if tem_virgula:
-        # Troca ponto por nada e vírgula por ponto (Padrão BR -> US)
         s_clean = s_clean.apply(lambda x: x.replace('.', '').replace(',', '.') if isinstance(x, str) else x)
         
     return pd.to_numeric(s_clean, errors='coerce')
@@ -141,7 +113,6 @@ def extrair_coordenadas_limpas(geojson_data):
         if 'features' in geojson_data: geom = geojson_data['features'][0]['geometry']
         elif 'geometry' in geojson_data: geom = geojson_data['geometry']
         else: geom = geojson_data
-            
         tipo = geom['type']
         if tipo == 'Polygon': coords = geom['coordinates'][0]
         elif tipo == 'MultiPolygon': coords = geom['coordinates'][0][0]
@@ -149,17 +120,11 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO (COM PROJEÇÃO MÉTRICA PARA CORRIGIR CORES)
+# 4. MOTOR DE CÁLCULO (COM PROJEÇÃO MÉTRICA)
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
-    
-    # Lista de colunas para ignorar (IDs, Textos, etc)
-    cols_proibidas = [
-        'id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 
-        'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 
-        'talhao', 'geometry', 'id_clean', 'unnamed', 'obs'
-    ]
+    cols_proibidas = ['id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean', 'unnamed', 'obs']
     
     cols_validas = []
     for col in df.columns:
@@ -168,21 +133,17 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
         if df[col].notna().sum() >= 5 and df[col].nunique() > 1: 
             cols_validas.append(col)
 
-    # Agrupa por coordenada para média (caso haja duplicatas)
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # --- CORREÇÃO DE ESCALA (PROJEÇÃO) ---
-    # Converte Graus para Metros (Aprox) para a Krigagem funcionar direito
+    # PROJEÇÃO: Graus -> Metros
     lat_mean = df_grouped['latitude'].mean()
-    # Fatores: 1 grau lat ~ 111km, 1 grau lon ~ 111km * cos(lat)
     df_grouped['Y_m'] = df_grouped['latitude'] * 111111
     df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
 
-    # Define Grid em Graus (Original)
+    # Grid (Metros e Graus)
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
     y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
     
-    # Ajusta Grid pelo GeoJSON se existir
     try:
         coords_geo = extrair_coordenadas_limpas(geojson_data)
         if coords_geo:
@@ -194,48 +155,36 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             y_max = max(y_max, max(lats_g))
     except: pass
 
-    # Cria o Grid Linear em Graus
     grid_x = np.linspace(x_min, x_max, resolucao_grid)
     grid_y = np.linspace(y_min, y_max, resolucao_grid)
     xx, yy = np.meshgrid(grid_x, grid_y)
-
-    # Converte o Grid para Metros (usando a mesma projeção)
-    # Isso permite que a Krigagem trabalhe em metros, mas o resultado caia no mapa certo
+    
+    # Grid projetado para Krigagem
     grid_y_m = grid_y * 111111
     grid_x_m = grid_x * 111111 * np.cos(np.radians(lat_mean))
     
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
     processed_cols = []
-    
-    # Barra de Progresso para não parecer travado
     progresso_texto = st.empty()
     bar = st.progress(0)
     total_cols = len(cols_validas)
     
     for i, col in enumerate(cols_validas):
-        progresso_texto.text(f"⏳ Processando mapa de: {col} ({i+1}/{total_cols})")
+        progresso_texto.text(f"⏳ Processando: {col} ({i+1}/{total_cols})")
         bar.progress((i + 1) / total_cols)
-        
         try:
-            # Pega dados válidos
             dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
-            
             if len(dados_col) < 5: continue
 
-            # Krigagem usando coordenadas em METROS (X_m, Y_m)
             OK = OrdinaryKriging(
                 dados_col['X_m'], dados_col['Y_m'], dados_col[col], 
                 variogram_model='linear', verbose=False, enable_plotting=False
             )
-            # Executa no grid em METROS
             z, _ = OK.execute('grid', grid_x_m, grid_y_m)
-            
             df_result[col] = z.flatten()
             processed_cols.append(col)
-        except Exception as e:
-            print(f"Erro ao processar {col}: {e}")
-            continue
+        except: continue
             
     progresso_texto.empty()
     bar.empty()
@@ -247,6 +196,10 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
 # 5. GERAÇÃO DE IMAGEM
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
+    # Garante limpeza da figura anterior
+    plt.close('all')
+    plt.clf()
+    
     df_sorted = df_plot.sort_values(by=['latitude', 'longitude'])
     try:
         Z = df_sorted[atributo].values.reshape(grid_shape)
@@ -261,7 +214,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     x_min, x_max = X_unique.min(), X_unique.max()
     y_min, y_max = Y_unique.min(), Y_unique.max()
 
-    mask_sucesso = False
     try:
         coords_limpas = extrair_coordenadas_limpas(geojson_data)
         if len(coords_limpas) > 0:
@@ -270,26 +222,19 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
             points = np.column_stack((XX.flatten(), YY.flatten()))
             mask_flat = poly_path.contains_points(points)
             mask_grid = mask_flat.reshape(Z.shape)
-            if np.any(mask_grid): 
-                Z[~mask_grid] = np.nan
-                mask_sucesso = True
+            if np.any(mask_grid): Z[~mask_grid] = np.nan
     except: pass
 
-    # Escala Robusta (Evita mapa de uma cor só)
     dados_validos = Z[~np.isnan(Z)]
     if len(dados_validos) > 0:
         z_min = np.percentile(dados_validos, 2)
         z_max = np.percentile(dados_validos, 98)
-        
-        # Se a variação for muito pequena (ex: 1.06 a 1.07), força uma escala visual
         if (z_max - z_min) < 0.1: 
             media = (z_max + z_min) / 2
             z_min = media - 0.5
             z_max = media + 0.5
-    else: 
-        z_min, z_max = 0, 1
+    else: z_min, z_max = 0, 1
 
-    plt.close('all') 
     aspect_ratio = (x_max - x_min) / (y_max - y_min)
     h_fig = 10
     w_fig = h_fig * aspect_ratio
@@ -314,143 +259,83 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close(fig)
     img_data.seek(0)
     
-    return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max], mask_sucesso
+    return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
-# 6. INTERFACE DE UPLOAD E FUSÃO (Atualizado e Blindado)
+# 6. INTERFACE
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
-
-# Uploads separados
 file_lab = st.sidebar.file_uploader("📂 Dados Laboratório (Excel/CSV)", type=["csv", "xlsx", "xls"])
 file_geo = st.sidebar.file_uploader("📍 Coordenadas dos Pontos (.KMZ/.KML)", type=["kmz", "kml"])
 file_geojson = st.sidebar.file_uploader("🌍 Contorno do Talhão (.geojson)", type=["geojson", "json"])
 
-# --- AJUSTE FINO (PERSISTENTE) ---
 st.sidebar.markdown("---")
 with st.sidebar.expander("🛠️ Ajuste Fino de Coordenadas", expanded=False):
     shift_lat = st.number_input("Deslocar Lat", value=0.00000, step=0.00010, format="%.5f")
     shift_lon = st.number_input("Deslocar Lon", value=0.00000, step=0.00010, format="%.5f")
 
-# Reset se mudar arquivos
 if not file_lab or not file_geo or not file_geojson:
     if st.session_state.get('dados_processados') is not None:
-        st.info("Aguardando upload de todos os arquivos (Lab, Pontos e Contorno)...")
+        st.info("Aguardando upload...")
 
 if file_lab and file_geo and file_geojson:
-    # 1. PROCESSAR DADOS
     try:
-        # A) Ler Planilha Lab
         if file_lab.name.lower().endswith('.csv'):
-            try:
-                df_lab = pd.read_csv(file_lab)
-                if len(df_lab.columns) < 2:
-                    file_lab.seek(0)
-                    df_lab = pd.read_csv(file_lab, sep=';')
-            except Exception as e:
-                st.error(f"Erro ao ler CSV: {e}")
-                st.stop()
+            try: df_lab = pd.read_csv(file_lab)
+            except: file_lab.seek(0); df_lab = pd.read_csv(file_lab, sep=';')
         else:
-            try:
-                df_lab = pd.read_excel(file_lab)
-            except ImportError as e:
-                if 'xlrd' in str(e):
-                    st.error("🛑 O arquivo enviado é .xls antigo. Instale 'xlrd' ou salve como .xlsx.")
-                    st.stop()
-                else:
-                    st.error(f"Erro ao ler Excel: {e}")
-                    st.stop()
+            try: df_lab = pd.read_excel(file_lab)
+            except: st.error("Instale 'xlrd' ou salve como .xlsx"); st.stop()
         
-        # B) Ler Pontos KML/KMZ
         df_geo_points = processar_arquivo_geografico(file_geo)
-        
-        # C) Ler Contorno GeoJSON
-        file_geojson.seek(0)
-        geojson_data = json.load(file_geojson)
+        file_geojson.seek(0); geojson_data = json.load(file_geojson)
         st.session_state['geojson_data'] = geojson_data
 
-        # 2. LÓGICA DE FUSÃO (MERGE) BLINDADA
         if not df_lab.empty and not df_geo_points.empty:
-            
-            # Identificação de Coluna ID no Lab
             col_id_lab = None
-            possiveis = ['id', 'ponto', 'amostra', 'name', 'codigo', 'sample']
             for col in df_lab.columns:
-                if str(col).lower().strip() in possiveis:
-                    col_id_lab = col
-                    break
+                if str(col).lower().strip() in ['id', 'ponto', 'amostra', 'name', 'codigo']:
+                    col_id_lab = col; break
+            if not col_id_lab: col_id_lab = st.selectbox("Coluna ID Planilha:", df_lab.columns)
             
-            if not col_id_lab:
-                st.warning("Não encontrei coluna 'ID' ou 'Ponto' na planilha. Selecione abaixo:")
-                col_id_lab = st.selectbox("Coluna de ID na Planilha:", df_lab.columns)
-            
-            # Limpeza de IDs
             df_lab['id_clean'] = df_lab[col_id_lab].apply(lambda x: str(x).split('.')[0].strip())
             df_geo_points['id_clean'] = df_geo_points['ID_PONTO'].apply(lambda x: str(x).split('.')[0].strip())
             
-            # Merge
             df_merged = pd.merge(df_lab, df_geo_points, on='id_clean', how='inner')
             
             if df_merged.empty:
-                st.error("❌ Erro na fusão: Nenhum ID da planilha coincidiu com o arquivo de pontos.")
-                st.markdown("**Diagnóstico de Falha:**")
-                c1, c2 = st.columns(2)
-                with c1: st.write(f"IDs Planilha:", df_lab['id_clean'].head().tolist())
-                with c2: st.write("IDs Mapa:", df_geo_points['id_clean'].head().tolist())
+                st.error("Erro na fusão dos IDs.")
                 st.stop()
             else:
-                st.success(f"✅ {len(df_merged)} pontos combinados com sucesso!")
+                st.success(f"✅ {len(df_merged)} pontos.")
+                df_merged['latitude'] += shift_lat
+                df_merged['longitude'] += shift_lon
                 
-                # Aplica Ajuste Fino
-                df_merged['latitude'] = df_merged['latitude'] + shift_lat
-                df_merged['longitude'] = df_merged['longitude'] + shift_lon
-
-                # Visualização Prévia
-                st.subheader("📍 Conferência dos Pontos")
-                col1, col2 = st.columns([3, 1])
-                with col1: st.map(df_merged[['latitude', 'longitude']])
-                with col2: st.dataframe(df_merged[[col_id_lab, 'latitude', 'longitude']].head())
-
-                # 3. BOTÃO DE PROCESSAMENTO
-                if st.button("🚀 Gerar Mapas de Fertilidade", type="primary"):
-                    
-                    st.cache_data.clear() 
-                    
-                    # Chama função OTIMIZADA com projeção métrica
+                if st.button("🚀 Gerar Mapas", type="primary"):
+                    st.cache_data.clear()
                     df_krig, grid_shape = processar_matrizes_interpolacao(df_merged, geojson_data, resolucao_grid=100)
-                    
-                    if df_krig.empty: 
-                        st.error("Tabela vazia após processamento.")
-                        st.stop()
-                    
                     st.session_state['dados_processados'] = df_krig
                     st.session_state['grid_shape'] = grid_shape
-                    st.success("Processamento concluído!")
                     st.rerun()
 
-    except Exception as e:
-        st.error(f"Erro ao processar arquivos: {e}")
+    except Exception as e: st.error(f"Erro: {e}")
 
 # ==============================================================================
-# 7. RESULTADOS
+# 7. VISUALIZAÇÃO (COM CHAVE ÚNICA PARA NÃO TRAVAR)
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
     grid_shape = st.session_state['grid_shape']
-    
     cols_mapas = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
     
     st.divider()
-    st.markdown(f"### 🗺️ Mapas Disponíveis ({len(cols_mapas)})")
-    
     if cols_mapas:
-        atributo = st.selectbox("Selecione o nutriente:", cols_mapas)
-        
+        atributo = st.selectbox("Selecione o mapa:", cols_mapas)
         df_plot = df_final[['latitude', 'longitude', atributo]].copy()
 
         if not df_plot.empty:
             try:
-                img_buffer, bounds, min_max, sucesso = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'], grid_shape)
+                img_buffer, bounds, min_max = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'], grid_shape)
                 z_min, z_max = min_max
                 
                 centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
@@ -464,20 +349,17 @@ if st.session_state['dados_processados'] is not None:
                 
                 folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}).add_to(m)
                 
-                # Legenda
                 legend_html = f"""
-                <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; 
-                            background: white; padding: 10px; border: 2px solid black; border-radius: 5px; font-family: sans-serif;">
+                <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px; font-family: sans-serif;">
                 <b>{atributo}</b><br>
                 <div style="background: linear-gradient(to right, #000080, #0000ff, #00ffff, #ffff00, #ff0000, #800000); height: 10px; width: 150px;"></div>
-                <div style="display: flex; justify-content: space-between; width: 150px; font-size: 12px;">
-                    <span>{z_min:.2f}</span>
-                    <span>{z_max:.2f}</span>
-                </div>
+                <div style="display: flex; justify-content: space-between; width: 150px; font-size: 12px;"><span>{z_min:.2f}</span><span>{z_max:.2f}</span></div>
                 </div>
                 """
                 m.get_root().html.add_child(folium.Element(legend_html))
-                st_folium(m, height=500, use_container_width=True)
                 
-            except Exception as e:
-                st.error(f"Erro visual: {e}")
+                # --- AQUI ESTÁ A CORREÇÃO: key=atributo ---
+                # Isso força o Streamlit a criar um mapa NOVO para cada nutriente
+                st_folium(m, height=500, use_container_width=True, key=f"mapa_{atributo}")
+                
+            except Exception as e: st.error(f"Erro visual: {e}")
