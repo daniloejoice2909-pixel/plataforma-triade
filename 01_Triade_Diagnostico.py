@@ -120,7 +120,7 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO (COM PROJEÇÃO MÉTRICA)
+# 4. MOTOR DE CÁLCULO (Krigagem)
 # ==============================================================================
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df = df_input.copy()
@@ -140,7 +140,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     df_grouped['Y_m'] = df_grouped['latitude'] * 111111
     df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
 
-    # Grid (Metros e Graus)
+    # Grid
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
     y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
     
@@ -159,7 +159,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     grid_y = np.linspace(y_min, y_max, resolucao_grid)
     xx, yy = np.meshgrid(grid_x, grid_y)
     
-    # Grid projetado para Krigagem
     grid_y_m = grid_y * 111111
     grid_x_m = grid_x * 111111 * np.cos(np.radians(lat_mean))
     
@@ -177,9 +176,10 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
             if len(dados_col) < 5: continue
 
+            # Krigagem Esférica tende a ser melhor para variabilidade de solo que Linear
             OK = OrdinaryKriging(
                 dados_col['X_m'], dados_col['Y_m'], dados_col[col], 
-                variogram_model='linear', verbose=False, enable_plotting=False
+                variogram_model='spherical', verbose=False, enable_plotting=False
             )
             z, _ = OK.execute('grid', grid_x_m, grid_y_m)
             df_result[col] = z.flatten()
@@ -193,10 +193,9 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 5. GERAÇÃO DE IMAGEM
+# 5. GERAÇÃO DE IMAGEM (CORRIGIDA: ESCALA ABSOLUTA)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
-    # Garante limpeza da figura anterior
     plt.close('all')
     plt.clf()
     
@@ -214,6 +213,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     x_min, x_max = X_unique.min(), X_unique.max()
     y_min, y_max = Y_unique.min(), Y_unique.max()
 
+    # Máscara do Polígono
     try:
         coords_limpas = extrair_coordenadas_limpas(geojson_data)
         if len(coords_limpas) > 0:
@@ -225,15 +225,20 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
             if np.any(mask_grid): Z[~mask_grid] = np.nan
     except: pass
 
+    # --- CORREÇÃO DA ESCALA ---
     dados_validos = Z[~np.isnan(Z)]
+    
     if len(dados_validos) > 0:
-        z_min = np.percentile(dados_validos, 2)
-        z_max = np.percentile(dados_validos, 98)
-        if (z_max - z_min) < 0.1: 
-            media = (z_max + z_min) / 2
-            z_min = media - 0.5
-            z_max = media + 0.5
-    else: z_min, z_max = 0, 1
+        # Pega o Mínimo e Máximo REAIS (sem cortes estatísticos)
+        z_min = np.nanmin(dados_validos)
+        z_max = np.nanmax(dados_validos)
+        
+        # Se os valores forem iguais (ex: tudo 0), cria uma folga artificial para não quebrar
+        if z_min == z_max:
+            z_min -= 0.1
+            z_max += 0.1
+    else: 
+        z_min, z_max = 0, 1
 
     aspect_ratio = (x_max - x_min) / (y_max - y_min)
     h_fig = 10
@@ -245,6 +250,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     ax.set_axis_off()
     ax.patch.set_alpha(0.0)
     
+    # Usa a escala exata dos dados (vmin e vmax)
     cmap = plt.get_cmap('jet', 256)
     cmap.set_bad(alpha=0) 
     levels = np.linspace(z_min, z_max, 50)
@@ -321,7 +327,7 @@ if file_lab and file_geo and file_geojson:
     except Exception as e: st.error(f"Erro: {e}")
 
 # ==============================================================================
-# 7. VISUALIZAÇÃO (COM CHAVE ÚNICA PARA NÃO TRAVAR)
+# 7. VISUALIZAÇÃO
 # ==============================================================================
 if st.session_state['dados_processados'] is not None:
     df_final = st.session_state['dados_processados'].copy()
@@ -358,8 +364,6 @@ if st.session_state['dados_processados'] is not None:
                 """
                 m.get_root().html.add_child(folium.Element(legend_html))
                 
-                # --- AQUI ESTÁ A CORREÇÃO: key=atributo ---
-                # Isso força o Streamlit a criar um mapa NOVO para cada nutriente
                 st_folium(m, height=500, use_container_width=True, key=f"mapa_{atributo}")
                 
             except Exception as e: st.error(f"Erro visual: {e}")
