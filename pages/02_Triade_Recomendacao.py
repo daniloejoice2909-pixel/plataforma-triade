@@ -460,4 +460,4 @@ with aba2:
                     <div style="display:flex;justify-content:space-between;font-size:10px;"><span>{mm_rec[0]:.1f}</span><span>{mm_rec[1]:.1f}</span></div></div>"""
                     m2.get_root().html.add_child(folium.Element(legend_html))
                     
-                    st_folium(m2, height=500, use_container_width=True, key=f"mapa_re
+                    st_folium(m2, height=500, use_container_width=True, key=f"mapa_rec_{escolha}")
