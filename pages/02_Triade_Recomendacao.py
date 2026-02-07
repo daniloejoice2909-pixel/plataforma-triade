@@ -5,324 +5,384 @@ import json
 from io import BytesIO
 import base64
 import zipfile
-import tempfile
-import os
+import xml.etree.ElementTree as ET
 
-# --- IMPORTS GRÁFICOS E GEO ---
+# --- 1. CONFIGURAÇÃO DE BACKEND ---
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.patches import PathPatch
 from matplotlib.path import Path as MplPath
+from matplotlib.patches import Polygon as MplPolygon
+
+# Scipy RBF para interpolação suave (Padrão InCeres)
+from scipy.interpolate import Rbf
 import folium
 from streamlit_folium import st_folium
 
-# Tenta importar geopandas (Para Shapefile)
+# Tenta importar funções utilitárias
 try:
-    import geopandas as gpd
-    from shapely.geometry import Point
-    HAS_GEOPANDAS = True
+    from utils_v43 import (
+        configurar_pagina, renderizar_cabecalho_sidebar, 
+        carregar_dados_blindado, validar_colunas
+    )
 except ImportError:
-    HAS_GEOPANDAS = False
-
-st.set_page_config(page_title="Triade VRT", layout="wide")
-st.title("🚜 Triade VRT - Motor de Recomendacao")
-
-# ==============================================================================
-# 1. FUNÇÕES DE DADOS (BLINDADAS)
-# ==============================================================================
-def clean_data(df):
-    df = df.copy()
-    # Força conversão para string antes de limpar para evitar erro em dados mistos
-    df.columns = [str(c).lower().strip() for c in df.columns]
-    
-    # Dicionário de padronização (Chave = Nome Final no Código)
-    mapa = {
-        'lat': ['latitude','lat','y','lat_wgs84'], 
-        'lon': ['longitude','long','lon','x','lon_wgs84'],
-        'Ca': ['ca','calcio','cálcio','ca_cmolc'], 
-        'Mg': ['mg','magnesio','magnésio','mg_cmolc'], 
-        'K': ['k','potassio','potássio','k_mg','k_cmolc'],
-        'P': ['p','fosforo','fósforo','p_mehl','pmehlich','p_mg'], 
-        'Prem': ['prem','p_rem','p-rem','fosforo_remanescente','prem_mg'],
-        'Argila': ['argila','clay','argila_total','argila_%'], 
-        'CTC': ['ctc','t','ctc_ph7','ctc_total']
-    }
-    
-    renomear = {}
-    for col in df.columns:
-        for k, v in mapa.items():
-            if any(x == col or x in col.split('_') for x in v): 
-                renomear[col] = k
-                break
-    
-    if renomear: df = df.rename(columns=renomear)
-    
-    cols = ['Ca','Mg','K','P','Prem','Argila','CTC','lat','lon']
-    for c in cols:
-        if c in df.columns:
-            if df[c].dtype == 'object': 
-                df[c] = df[c].astype(str).str.replace(',', '.', regex=False)
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-    return df
-
-@st.cache_data(show_spinner=False)
-def calc_vrt(df, prod, ca_alvo, mg_alvo, cao, mgo, prnt, p_exp, p_teor, k_alvo, k_exp, k_teor, g_fat, g_min, g_max, nc_vals):
-    # AQUI ESTAVA O ERRO: A variável oficial é 'd'
-    d = df.copy()
-    
-    # --- CALAGEM ---
-    if all(x in d.columns for x in ['Ca','Mg','CTC']):
-        nc_ca, nc_mg = d['CTC']*(ca_alvo/100), d['CTC']*(mg_alvo/100)
-        fat_ca = max((cao*10/560)*(prnt/100),0.001)
-        fat_mg = max((mgo*10/403)*(prnt/100),0.001)
-        d['Dose_Calcario'] = np.maximum((nc_ca - d['Ca'])/fat_ca, (nc_mg - d['Mg'])/fat_mg).clip(0).round(2)
-    else: 
-        d['Dose_Calcario'] = 0.0
-    
-    # --- FOSFORO (Corrigido para usar 'd' e 'Prem') ---
-    if 'Prem' in d.columns and 'P' in d.columns:
-        c = [
-            (d['Prem'] <= 4.0),
-            (d['Prem'] > 4.0) & (d['Prem'] <= 10.0),
-            (d['Prem'] > 10.0) & (d['Prem'] <= 19.0),
-            (d['Prem'] > 19.0) & (d['Prem'] <= 30.0),
-            (d['Prem'] > 30.0)
-        ]
-        v = [nc_vals['n1'], nc_vals['n2'], nc_vals['n3'], nc_vals['n4'], nc_vals['n5']]
-        
-        nc = np.select(c, v, default=nc_vals['n5'])
-        fct = (56.5 * d['Prem']**-0.52).clip(4,40)
-        
-        d['NC_Tabular'] = nc
-        
-        # Dose = (NC - P_Atual) * Fator + Manutenção
-        dose_correcao = np.where(nc > d['P'], (nc - d['P']) * fct, 0)
-        d['Dose_P2O5_Kg'] = ((dose_correcao + (prod*p_exp)) / (p_teor/100)).round(0)
-    else: 
-        d['Dose_P2O5_Kg'] = 0.0
-        d['NC_Tabular'] = 0.0
-
-    # --- POTASSIO ---
-    if 'K' in d.columns and 'CTC' in d.columns:
-        kval = d['K']/391 if d['K'].mean() > 10 else d['K']
-        dk = ((d['CTC']*(k_alvo/100) - kval).clip(0)*940) + (prod*k_exp)
-        d['Dose_K2O_Kg'] = (dk / (k_teor/100)).round(0)
-    else: 
-        d['Dose_K2O_Kg'] = 0.0
-
-    # --- GESSO ---
-    if 'Argila' in d.columns:
-        d['Dose_Gesso_Kg'] = (d['Argila']*g_fat).clip(g_min, g_max)
-    else: 
-        d['Dose_Gesso_Kg'] = 0.0
-        
-    return d
+    def configurar_pagina(titulo): st.set_page_config(page_title=titulo, layout="wide")
+    def renderizar_cabecalho_sidebar(): st.sidebar.title("Módulo de Diagnóstico")
+    def carregar_dados_blindado(): pass
+    def validar_colunas(): pass
 
 # ==============================================================================
-# 2. FUNÇÃO DE EXPORTAÇÃO (SHAPEFILE)
+# 2. CONFIGURAÇÃO DA PÁGINA
 # ==============================================================================
-def gerar_pacote_shapes(df):
-    if not HAS_GEOPANDAS: return None
-    geometry = [Point(xy) for xy in zip(df.lon, df.lat)]
-    gdf = gpd.GeoDataFrame(df, geometry=geometry, crs="EPSG:4326")
-    rename_map = {'Dose_Calcario': 'RATE_CALC', 'Dose_P2O5_Kg': 'RATE_P2O5', 
-                  'Dose_K2O_Kg': 'RATE_K2O', 'Dose_Gesso_Kg': 'RATE_GESSO'}
-    cols_exist = [c for c in rename_map.keys() if c in df.columns]
-    gdf_export = gdf[cols_exist + ['geometry']].rename(columns=rename_map)
-    
-    mem_zip = BytesIO()
-    with zipfile.ZipFile(mem_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            filename = "RECOMENDACAO_VRT"
-            filepath = os.path.join(tmpdir, filename)
-            gdf_export.to_file(f"{filepath}.shp", driver='ESRI Shapefile')
-            for ext in ['.shp', '.shx', '.dbf', '.prj']:
-                if os.path.exists(f"{filepath}{ext}"):
-                    zf.write(f"{filepath}{ext}", arcname=f"{filename}{ext}")
-    mem_zip.seek(0)
-    return mem_zip
+configurar_pagina("Diagnóstico de Solo")
+renderizar_cabecalho_sidebar()
+
+st.title("🚜 Tríade: Diagnóstico & VRT (Micros)")
+
+if 'dados_processados' not in st.session_state: st.session_state['dados_processados'] = None
+if 'geojson_data' not in st.session_state: st.session_state['geojson_data'] = None
+if 'grid_shape' not in st.session_state: st.session_state['grid_shape'] = None
 
 # ==============================================================================
-# 3. MOTOR GRÁFICO (RECORTE CORRIGIDO)
+# 3. FUNÇÕES AUXILIARES
 # ==============================================================================
-@st.cache_data(show_spinner=False)
-def gerar_imagem_base64(df, col, geojson_str):
-    geojson_data = json.loads(geojson_str) if geojson_str else None
-    
-    try: pivot = df.pivot_table(index='lat', columns='lon', values=col)
-    except: return None, None, None
-    
-    Z, X, Y = pivot.values, pivot.columns.values, pivot.index.values
-    
-    # Paleta Vermelho -> Azul
-    colors = ['#D7191C', '#FDAE61', '#FFFFBF', '#A6D96A', '#1A9641', '#2C7BB6']
-    cmap = mcolors.ListedColormap(colors)
-    zmin, zmax = np.nanmin(Z), np.nanmax(Z)
-    if zmin == zmax: zmax += 0.01
-    bounds = np.linspace(zmin, zmax, 7)
-    norm = mcolors.BoundaryNorm(bounds, cmap.N)
-
-    plt.close('all')
-    fig, ax = plt.subplots(figsize=(5, 5))
-    ax.set_axis_off()
-    
-    # Desenha o mapa
-    cf = ax.contourf(X, Y, Z, levels=bounds, cmap=cmap, norm=norm, extend='both')
-    
-    # --- RECORTE EXATO (CLIPPING) ---
-    if geojson_data:
-        try:
-            geom = geojson_data['features'][0]['geometry']
-            coords = []
-            
-            # Lógica Robusta para Polygon vs MultiPolygon
-            if geom['type'] == 'Polygon':
-                coords = geom['coordinates'][0]
-            elif geom['type'] == 'MultiPolygon':
-                # Pega o maior anel
-                coords = max(geom['coordinates'], key=lambda x: len(x[0]))[0]
-            
-            if len(coords) > 0:
-                poly_path = MplPath(coords)
-                patch = PathPatch(poly_path, transform=ax.transData, facecolor='none', linewidth=0)
-                ax.add_patch(patch)
-                for c in cf.collections: c.set_clip_path(patch)
-        except Exception as e:
-            pass # Falha silenciosa no recorte, desenha quadrado
-    
-    ax.set_xlim(X.min(), X.max()); ax.set_ylim(Y.min(), Y.max())
-    buf = BytesIO()
-    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0, transparent=True, dpi=100)
-    plt.close(fig)
-    buf.seek(0)
-    return base64.b64encode(buf.getvalue()).decode(), bounds, [Y.min(), X.min(), Y.max(), X.max()]
-
-def renderizar_mapa(b64, bounds_vals, limits, titulo, geojson_data):
-    if not b64: return None
-    colors = ['#D7191C', '#FDAE61', '#FFFFBF', '#A6D96A', '#1A9641', '#2C7BB6']
-    ymin, xmin, ymax, xmax = limits
-    
-    m = folium.Map([(ymin+ymax)/2, (xmin+xmax)/2], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', attr='Google')
-    folium.raster_layers.ImageOverlay(image=f"data:image/png;base64,{b64}", bounds=[[ymin, xmin], [ymax, xmax]], opacity=0.85).add_to(m)
-    if geojson_data: folium.GeoJson(geojson_data, style_function=lambda x:{'color':'black','weight':2,'fillOpacity':0}).add_to(m)
-    
-    leg = f"""<div style="position:fixed; bottom:30px; right:30px; z-index:9999; background:white; padding:10px; border:2px solid black;">
-    <b>{titulo}</b><br>
-    <span style='color:{colors[5]}'>■</span> > {bounds_vals[5]:.0f}<br>
-    <span style='color:{colors[4]}'>■</span> {bounds_vals[4]:.0f} - {bounds_vals[5]:.0f}<br>
-    <span style='color:{colors[3]}'>■</span> {bounds_vals[3]:.0f} - {bounds_vals[4]:.0f}<br>
-    <span style='color:{colors[2]}'>■</span> {bounds_vals[2]:.0f} - {bounds_vals[3]:.0f}<br>
-    <span style='color:{colors[1]}'>■</span> {bounds_vals[1]:.0f} - {bounds_vals[2]:.0f}<br>
-    <span style='color:{colors[0]}'>■</span> < {bounds_vals[1]:.0f}
-    </div>"""
-    m.get_root().html.add_child(folium.Element(leg))
-    return m
-
-# ==============================================================================
-# 4. INTERFACE
-# ==============================================================================
-with st.sidebar:
-    st.header("📂 Arquivos")
-    f_csv = st.file_uploader("1. CSV Interpolado", type=["csv"])
-    f_geo = st.file_uploader("2. GeoJSON", type=["geojson","json"])
-    df_in, geo_data = None, None
-    
-    if f_csv:
-        try: df_in = clean_data(pd.read_csv(f_csv))
-        except: 
-            try: df_in = clean_data(pd.read_csv(f_csv, sep=';'))
-            except: st.error("Erro no CSV")
-    
-    if f_geo:
-        try: geo_data = json.load(f_geo)
-        except: st.error("Erro no GeoJSON")
-
-    if df_in is not None:
-        st.success(f"CSV OK: {len(df_in)} linhas")
-
-    st.markdown("---")
-    with st.expander("🌱 1. Produtividade Soja", True): prod = st.number_input("Meta (sc/ha)", value=80.0)
-    with st.expander("⚪ 2. Calagem"):
-        ca_alvo = st.number_input("Alvo Ca%", value=60.0)
-        mg_alvo = st.number_input("Alvo Mg%", value=18.0)
-        cao = st.number_input("CaO%", value=36.0)
-        mgo = st.number_input("MgO%", value=9.0)
-        prnt = st.number_input("PRNT%", value=80.0)
-    
-    with st.expander("🔴 3. Fósforo", True):
-        p_exp = st.number_input("Exp P (kg/sc)", value=0.8)
-        p_teor = st.number_input("Teor P2O5%", value=21.0)
-        st.write("Níveis Críticos (mg/dm³)")
-        c1, c2 = st.columns(2)
-        n1 = c1.number_input("0-4 (M. Arg)", value=5.5)
-        n2 = c1.number_input("4-10 (Arg)", value=7.5)
-        n3 = c1.number_input("10-19 (Med)", value=11.5)
-        n4 = c2.number_input("19-30 (Are)", value=15.0)
-        n5 = c2.number_input(">30 (Total)", value=20.0)
-        nc_vals = {'n1':n1, 'n2':n2, 'n3':n3, 'n4':n4, 'n5':n5}
-    
-    with st.expander("🟣 4. Potássio"):
-        k_alvo = st.number_input("K Alvo CTC%", value=3.5)
-        k_exp = st.number_input("Exp K (kg/sc)", value=1.2)
-        k_teor = st.number_input("Teor K2O%", value=60.0)
-    with st.expander("⚪ 5. Gesso"):
-        g_fat = st.number_input("Fator x Arg", value=15.0)
-        g_min = st.number_input("Min kg/ha", value=400.0)
-        g_max = st.number_input("Max kg/ha", value=1000.0)
-
-if st.button("🚀 Gerar Mapas", type="primary"):
-    if df_in is not None and geo_data is not None:
-        st.session_state['res'] = calc_vrt(df_in, prod, ca_alvo, mg_alvo, cao, mgo, prnt, p_exp, p_teor, k_alvo, k_exp, k_teor, g_fat, g_min, g_max, nc_vals)
-        st.rerun()
-    else: st.warning("Arquivos incompletos")
-
-if 'res' in st.session_state:
-    df = st.session_state['res']
-    st.markdown("---")
-    geo_str = json.dumps(geo_data) if geo_data else ""
-    t1, t2, t3, t4 = st.tabs(["⚪ Calcario", "🔴 Fosforo", "🟣 Potassio", "🔵 Gesso"])
-    
-    with t1:
-        st.metric("Media", f"{df['Dose_Calcario'].mean():.2f} ton")
-        b64, bnds, lims = gerar_imagem_base64(df, 'Dose_Calcario', geo_str)
-        m = renderizar_mapa(b64, bnds, lims, 'Calcario (ton)', geo_data)
-        if m: st_folium(m, height=500, use_container_width=True)
-    with t2:
-        st.metric("Media", f"{df['Dose_P2O5_Kg'].mean():.0f} kg")
-        
-        # Auditoria de Fosforo
-        cols_audit = ['Prem','P','NC_Tabular','Dose_P2O5_Kg']
-        cols_ok = [c for c in cols_audit if c in df.columns]
-        if cols_ok: st.dataframe(df[cols_ok].head(50), height=150)
-        else: st.warning("Dados de Fosforo não calculados")
-            
-        b64, bnds, lims = gerar_imagem_base64(df, 'Dose_P2O5_Kg', geo_str)
-        m = renderizar_mapa(b64, bnds, lims, 'Fosforo (kg)', geo_data)
-        if m: st_folium(m, height=500, use_container_width=True)
-    with t3:
-        st.metric("Media", f"{df['Dose_K2O_Kg'].mean():.0f} kg")
-        b64, bnds, lims = gerar_imagem_base64(df, 'Dose_K2O_Kg', geo_str)
-        m = renderizar_mapa(b64, bnds, lims, 'Potassio (kg)', geo_data)
-        if m: st_folium(m, height=500, use_container_width=True)
-    with t4:
-        st.metric("Media", f"{df['Dose_Gesso_Kg'].mean():.0f} kg")
-        b64, bnds, lims = gerar_imagem_base64(df, 'Dose_Gesso_Kg', geo_str)
-        m = renderizar_mapa(b64, bnds, lims, 'Gesso (kg)', geo_data)
-        if m: st_folium(m, height=500, use_container_width=True)
-    
-    st.markdown("---")
-    st.subheader("📦 Exportação")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button("💾 Baixar Excel/CSV", csv, "vrt_final.csv", "text/csv")
-    with c2:
-        if HAS_GEOPANDAS:
-            zip_data = gerar_pacote_shapes(df)
-            if zip_data:
-                st.download_button("🚜 Baixar Shapes (JD/Trimble)", zip_data, "SHAPES_VRT.zip", "application/zip", type='primary')
+def processar_arquivo_geografico(uploaded_file):
+    points = []
+    try:
+        if uploaded_file.name.lower().endswith('.kmz'):
+            with zipfile.ZipFile(uploaded_file, 'r') as z:
+                kml_filename = [f for f in z.namelist() if f.endswith('.kml')][0]
+                with z.open(kml_filename) as f: tree = ET.parse(f)
         else:
-            st.warning("Biblioteca GeoPandas não detectada.")
+            uploaded_file.seek(0); tree = ET.parse(uploaded_file)
+            
+        root = tree.getroot()
+        namespace = {'kml': 'http://www.opengis.net/kml/2.2'}
+        placemarks = root.findall('.//kml:Placemark', namespace)
+        if not placemarks: placemarks = root.findall('.//Placemark')
+            
+        for placemark in placemarks:
+            name_elem = placemark.find('kml:name', namespace)
+            if name_elem is None: name_elem = placemark.find('name')
+            name = name_elem.text.strip() if name_elem is not None and name_elem.text else None
+            coord_elem = placemark.find('.//kml:coordinates', namespace)
+            if coord_elem is None: coord_elem = placemark.find('.//coordinates')
+            if coord_elem is not None and coord_elem.text:
+                coords_text = coord_elem.text.strip().split()
+                if coords_text:
+                    first_coord = coords_text[0].split(',')
+                    if len(first_coord) >= 2:
+                        try:
+                            lon = float(first_coord[0]); lat = float(first_coord[1])
+                            points.append({'ID_PONTO': name, 'latitude': lat, 'longitude': lon})
+                        except ValueError: pass
+        return pd.DataFrame(points)
+    except Exception as e:
+        st.error(f"Erro KML: {e}"); return pd.DataFrame()
+
+def limpar_coluna_inteligente(serie):
+    def clean_val(val):
+        if pd.isna(val): return np.nan
+        s = str(val).strip()
+        if s.lower() in ['ns', 'nan', '', 'null', 'nd']: return np.nan
+        return s
+    s_clean = serie.apply(clean_val)
+    if s_clean.dropna().apply(lambda x: ',' in x).any():
+        s_clean = s_clean.apply(lambda x: x.replace('.', '').replace(',', '.') if isinstance(x, str) else x)
+    return pd.to_numeric(s_clean, errors='coerce')
+
+def extrair_coordenadas_limpas(geojson_data):
+    try:
+        if 'features' in geojson_data: geom = geojson_data['features'][0]['geometry']
+        elif 'geometry' in geojson_data: geom = geojson_data['geometry']
+        else: geom = geojson_data
+        tipo = geom['type']
+        if tipo == 'Polygon': coords = geom['coordinates'][0]
+        elif tipo == 'MultiPolygon': coords = geom['coordinates'][0][0]
+        return [p[:2] for p in coords]
+    except: return []
+
+# ==============================================================================
+# 4. MOTOR DE CÁLCULO (RBF LINEAR - SEM OLHO DE BOI)
+# ==============================================================================
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
+    df = df_input.copy()
+    cols_proibidas = ['id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean', 'unnamed', 'obs']
+    
+    cols_validas = []
+    for col in df.columns:
+        if any(p in str(col).lower() for p in cols_proibidas): continue
+        df[col] = limpar_coluna_inteligente(df[col])
+        if df[col].notna().sum() >= 5 and df[col].nunique() > 1: 
+            cols_validas.append(col)
+
+    df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
+
+    # Projeção Aproximada (Graus -> Metros)
+    lat_mean = df_grouped['latitude'].mean()
+    df_grouped['Y_m'] = df_grouped['latitude'] * 111111
+    df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
+
+    x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
+    y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
+    
+    try:
+        coords_geo = extrair_coordenadas_limpas(geojson_data)
+        if coords_geo:
+            lons_g = [p[0] for p in coords_geo]; lats_g = [p[1] for p in coords_geo]
+            x_min = min(x_min, min(lons_g)); x_max = max(x_max, max(lons_g))
+            y_min = min(y_min, min(lats_g)); y_max = max(y_max, max(lats_g))
+    except: pass
+
+    grid_x = np.linspace(x_min, x_max, resolucao_grid)
+    grid_y = np.linspace(y_min, y_max, resolucao_grid)
+    xx, yy = np.meshgrid(grid_x, grid_y)
+    
+    df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
+
+    processed_cols = []
+    progresso = st.progress(0)
+    
+    for i, col in enumerate(cols_validas):
+        progresso.progress((i + 1) / len(cols_validas))
+        try:
+            dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
+            if len(dados_col) < 5: continue
+            
+            # RBF Linear para continuidade visual
+            interpolator = Rbf(dados_col['longitude'], dados_col['latitude'], dados_col[col], function='linear')
+            z = interpolator(xx, yy)
+            z = np.clip(z, dados_col[col].min(), dados_col[col].max())
+            
+            df_result[col] = z.flatten()
+            processed_cols.append(col)
+        except: continue
+    
+    progresso.empty()
+    cols_finais = ['latitude', 'longitude'] + processed_cols
+    return df_result[cols_finais], (resolucao_grid, resolucao_grid)
+
+# ==============================================================================
+# 5. GERAÇÃO DE IMAGEM (PALETA 6 FAIXAS - INCERES STYLE)
+# ==============================================================================
+def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
+    plt.close('all'); plt.clf()
+    
+    df_sorted = df_plot.sort_values(by=['latitude', 'longitude'])
+    try:
+        Z = df_sorted[atributo].values.reshape(grid_shape)
+        X_unique = np.sort(df_plot['longitude'].unique())
+        Y_unique = np.sort(df_plot['latitude'].unique())
+    except: return None, None, [0, 1]
+
+    x_min, x_max = X_unique.min(), X_unique.max()
+    y_min, y_max = Y_unique.min(), Y_unique.max()
+
+    try:
+        coords_limpas = extrair_coordenadas_limpas(geojson_data)
+        if len(coords_limpas) > 0:
+            poly_path = MplPath(coords_limpas)
+            XX, YY = np.meshgrid(X_unique, Y_unique)
+            points = np.column_stack((XX.flatten(), YY.flatten()))
+            mask_flat = poly_path.contains_points(points)
+            mask_grid = mask_flat.reshape(Z.shape)
+            if np.any(mask_grid): Z[~mask_grid] = np.nan
+    except: pass
+
+    dados_validos = Z[~np.isnan(Z)]
+    if len(dados_validos) > 0:
+        z_min, z_max = np.nanmin(dados_validos), np.nanmax(dados_validos)
+        if z_min == z_max: z_min -= 0.1; z_max += 0.1
+    else: z_min, z_max = 0, 1
+
+    fig = plt.figure(figsize=(10, 10 * (x_max-x_min)/(y_max-y_min)))
+    fig.patch.set_alpha(0.0); ax = plt.axes([0,0,1,1]); ax.set_axis_off()
+    
+    # Paleta Vermelho -> Azul (6 cores)
+    cores = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
+    cmap = mcolors.ListedColormap(cores)
+    boundaries = np.linspace(z_min, z_max, 7)
+    norm = mcolors.BoundaryNorm(boundaries, cmap.N, clip=True)
+    
+    ax.contourf(X_unique, Y_unique, Z, levels=boundaries, cmap=cmap, norm=norm, extend='both', alpha=0.9)
+    ax.set_xlim(x_min, x_max); ax.set_ylim(y_min, y_max)
+    
+    img_data = BytesIO()
+    plt.savefig(img_data, format='png', transparent=True, dpi=100)
+    plt.close(fig); img_data.seek(0)
+    return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
+
+# ==============================================================================
+# 6. INTERFACE PRINCIPAL
+# ==============================================================================
+aba1, aba2 = st.tabs(["🗺️ Diagnóstico Visual", "🚜 Recomendação (VRT)"])
+
+# --- ABA 1: DIAGNÓSTICO ---
+with aba1:
+    st.header("1. Importação de Dados")
+    c1, c2, c3 = st.columns(3)
+    file_lab = c1.file_uploader("Dados Lab (Excel/CSV)", type=["csv", "xlsx"])
+    file_geo = c2.file_uploader("Pontos (.KMZ/.KML)", type=["kmz", "kml"])
+    file_geojson = c3.file_uploader("Contorno (.geojson)", type=["geojson", "json"])
+
+    if file_lab and file_geo and file_geojson:
+        if st.button("🚀 Processar Ponte de Dados", type="primary"):
+            try:
+                # 1. Ler Lab
+                if file_lab.name.lower().endswith('.csv'):
+                    try: df_lab = pd.read_csv(file_lab)
+                    except: file_lab.seek(0); df_lab = pd.read_csv(file_lab, sep=';')
+                else: df_lab = pd.read_excel(file_lab)
+                
+                # 2. Ler Geo
+                df_geo_points = processar_arquivo_geografico(file_geo)
+                
+                # 3. Ler Contorno
+                file_geojson.seek(0); st.session_state['geojson_data'] = json.load(file_geojson)
+
+                # 4. Fazer a Ponte (Merge)
+                if not df_lab.empty and not df_geo_points.empty:
+                    col_id = next((c for c in df_lab.columns if str(c).lower().strip() in ['id', 'ponto', 'amostra', 'codigo']), df_lab.columns[0])
+                    df_lab['id_clean'] = df_lab[col_id].apply(lambda x: str(x).split('.')[0].strip())
+                    df_geo_points['id_clean'] = df_geo_points['ID_PONTO'].apply(lambda x: str(x).split('.')[0].strip())
+                    
+                    df_merged = pd.merge(df_lab, df_geo_points, on='id_clean', how='inner')
+                    
+                    if not df_merged.empty:
+                        df_krig, shape = processar_matrizes_interpolacao(df_merged, st.session_state['geojson_data'], 100)
+                        st.session_state['dados_processados'] = df_krig
+                        st.session_state['grid_shape'] = shape
+                        st.success(f"Sucesso! {len(df_merged)} pontos processados.")
+                    else: st.error("Erro: IDs não batem entre Planilha e Mapa.")
+            except Exception as e: st.error(f"Erro crítico: {e}")
+
+    # Visualização Diagnóstico
+    if st.session_state['dados_processados'] is not None:
+        st.divider()
+        cols_mapas = [c for c in st.session_state['dados_processados'].columns if c not in ['latitude', 'longitude']]
+        atributo = st.selectbox("Selecione o Nutriente:", cols_mapas)
+        
+        img, bounds, minmax = gerar_imagem_overlay(
+            st.session_state['dados_processados'], atributo, 
+            st.session_state['geojson_data'], st.session_state['grid_shape']
+        )
+        
+        if img:
+            m = folium.Map(location=[bounds[0][0], bounds[0][1]], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
+            img_b64 = base64.b64encode(img.getvalue()).decode()
+            folium.raster_layers.ImageOverlay(
+                image=f"data:image/png;base64,{img_b64}", bounds=bounds, opacity=0.8
+            ).add_to(m)
+            folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m)
+            
+            legend = f"""<div style="position:fixed; bottom:30px; right:30px; z-index:9999; background:white; padding:10px; border:1px solid black;">
+            <b>{atributo}</b><br>
+            <div style="display:flex; width:150px; height:10px;">
+                <div style="flex:1; background:#d73027;"></div><div style="flex:1; background:#fc8d59;"></div>
+                <div style="flex:1; background:#fee08b;"></div><div style="flex:1; background:#d9ef8b;"></div>
+                <div style="flex:1; background:#91cf60;"></div><div style="flex:1; background:#4575b4;"></div>
+            </div>
+            <div style="display:flex; justify-content:space-between; font-size:10px;"><span>{minmax[0]:.2f}</span><span>{minmax[1]:.2f}</span></div>
+            </div>"""
+            m.get_root().html.add_child(folium.Element(legend))
+            st_folium(m, height=500, use_container_width=True, key=f"mapa_diag_{atributo}")
+
+# --- ABA 2: RECOMENDAÇÃO VRT ---
+with aba2:
+    st.header("🚜 Mapas de Recomendação")
+    
+    if st.session_state['dados_processados'] is None:
+        st.warning("⚠️ Processe os dados na aba 'Diagnóstico' primeiro.")
+    else:
+        df_vrt = st.session_state['dados_processados'].copy()
+        
+        # --- 1. CORRETIVOS ---
+        st.subheader("1. Corretivos (Calcário/Gesso)")
+        c1, c2 = st.columns(2)
+        with c1.expander("🟣 Calagem", expanded=False):
+            v_alvo = st.number_input("V% Alvo:", value=60.0)
+            prnt = st.number_input("PRNT:", value=85.0)
+            col_v = next((c for c in df_vrt.columns if 'v%' in c.lower()), None)
+            col_ctc = next((c for c in df_vrt.columns if 'ctc' in c.lower()), None)
+            if col_v and col_ctc:
+                df_vrt['Calcario_Ton'] = ((v_alvo - df_vrt[col_v]) * df_vrt[col_ctc] / 100) * (100 / prnt)
+                df_vrt['Calcario_Ton'] = df_vrt['Calcario_Ton'].apply(lambda x: x if x > 0 else 0)
+
+        with c2.expander("⚪ Gessagem", expanded=False):
+            col_argila = next((c for c in df_vrt.columns if 'argila' in c.lower()), None)
+            if col_argila:
+                df_vrt['Gesso_Ton'] = (df_vrt[col_argila] * 50) / 1000
+
+        # --- 2. MICRONUTRIENTES (NOVO) ---
+        st.subheader("2. Micronutrientes (Padrão Cerrado)")
+        
+        # Dicionário de Configuração Padrão (Base Embrapa)
+        # Nutriente: [Nível Crítico (Baixo), Dose Recomendada (kg/ha)]
+        micros_config = {
+            'Boro (B)':   {'col': 'b',  'critico': 0.3, 'dose': 2.0},
+            'Zinco (Zn)': {'col': 'zn', 'critico': 1.2, 'dose': 4.0},
+            'Cobre (Cu)': {'col': 'cu', 'critico': 0.5, 'dose': 2.0},
+            'Mang. (Mn)': {'col': 'mn', 'critico': 4.0, 'dose': 5.0}
+        }
+        
+        cm1, cm2 = st.columns(2)
+        count = 0
+        for nome, cfg in micros_config.items():
+            # Tenta achar a coluna na planilha (ex: 'B', 'Boro', 'Zn', 'Zinco')
+            col_real = next((c for c in df_vrt.columns if cfg['col'] == c.lower() or cfg['col'] == c.lower().split(' ')[0]), None)
+            
+            if col_real:
+                with (cm1 if count % 2 == 0 else cm2).expander(f"💊 {nome}", expanded=True):
+                    critico = st.number_input(f"Nível Crítico {nome} (mg/dm³):", value=cfg['critico'], key=f"crit_{nome}")
+                    dose_rec = st.number_input(f"Dose a aplicar (kg/ha):", value=cfg['dose'], key=f"dose_{nome}")
+                    
+                    # Lógica de Recomendação (Simples):
+                    # Se Valor < Crítico -> Aplica Dose. Se Maior -> Aplica 0.
+                    nome_mapa = f"Rec_{nome.split()[0]}_kg_ha"
+                    
+                    # np.where é mais rápido que apply
+                    df_vrt[nome_mapa] = np.where(df_vrt[col_real] < critico, dose_rec, 0.0)
+                count += 1
+        
+        st.divider()
+        
+        # --- VISUALIZAÇÃO VRT ---
+        mapas_vrt = [c for c in df_vrt.columns if 'ton' in c.lower() or 'kg_ha' in c.lower()]
+        
+        if mapas_vrt:
+            escolha_vrt = st.selectbox("Selecione o Mapa de Aplicação:", mapas_vrt)
+            
+            # Filtra apenas onde tem dose > 0 para estatística
+            dose_media = df_vrt[df_vrt[escolha_vrt] > 0][escolha_vrt].mean()
+            if pd.isna(dose_media): dose_media = 0
+            
+            c_info1, c_info2 = st.columns(2)
+            c_info1.info(f"Dose Média (nas áreas de aplicação): {dose_media:.2f}")
+            c_info2.info(f"Área com Deficiência: {(len(df_vrt[df_vrt[escolha_vrt]>0])/len(df_vrt))*100:.1f}% do talhão")
+            
+            img_vrt, bounds_vrt, minmax_vrt = gerar_imagem_overlay(
+                df_vrt, escolha_vrt, 
+                st.session_state['geojson_data'], st.session_state['grid_shape']
+            )
+            
+            if img_vrt:
+                m_vrt = folium.Map(location=[bounds_vrt[0][0], bounds_vrt[0][1]], zoom_start=13, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google')
+                img_b64_vrt = base64.b64encode(img_vrt.getvalue()).decode()
+                folium.raster_layers.ImageOverlay(
+                    image=f"data:image/png;base64,{img_b64_vrt}", bounds=bounds_vrt, opacity=0.8
+                ).add_to(m_vrt)
+                folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color':'black','fillOpacity':0}).add_to(m_vrt)
+                
+                legend_vrt = f"""<div style="position:fixed; bottom:30px; right:30px; z-index:9999; background:white; padding:10px; border:1px solid black;">
+                <b>{escolha_vrt}</b><br>
+                <div style="display:flex; width:150px; height:10px;">
+                    <div style="flex:1; background:#d73027;"></div><div style="flex:1; background:#fc8d59;"></div>
+                    <div style="flex:1; background:#fee08b;"></div><div style="flex:1; background:#d9ef8b;"></div>
+                    <div style="flex:1; background:#91cf60;"></div><div style="flex:1; background:#4575b4;"></div>
+                </div>
+                <div style="display:flex; justify-content:space-between; font-size:10px;"><span>{minmax_vrt[0]:.2f}</span><span>{minmax_vrt[1]:.2f}</span></div>
+                </div>"""
+                m_vrt.get_root().html.add_child(folium.Element(legend_vrt))
+                
+                st_folium(m_vrt, height=500, use_container_width=True, key=f"mapa_vrt_{escolha_vrt}")
