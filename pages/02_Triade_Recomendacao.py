@@ -1,3 +1,10 @@
+Aqui está a versão definitiva e corrigida do código, atendendo rigorosamente às novas fórmulas solicitadas (Calagem por elevação de Ca/Mg, Fósforo via P-rem com níveis críticos específicos e Potássio por meta de CTC).
+
+Todos os parâmetros mencionados (Teores do calcário, metas de exportação, níveis críticos) foram colocados na Sidebar e são totalmente editáveis.
+
+Substitua todo o seu código por este:
+
+Python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -50,33 +57,40 @@ st.sidebar.header("⚙️ Parâmetros de Recomendação")
 
 # A. Produtividade
 with st.sidebar.expander("1. Meta de Produtividade", expanded=True):
-    meta_prod = st.number_input("Meta Soja (sc/ha):", value=80.0, step=1.0, min_value=0.0, help="Base para cálculo de exportação")
+    meta_prod = st.number_input("Meta Soja (sc/ha):", value=80.0, step=1.0, min_value=0.0)
 
-# B. Calagem
-with st.sidebar.expander("2. Calagem (Corretivos)", expanded=False):
-    st.markdown("**Metas de Solo:**")
-    alvo_ca = st.number_input("Alvo Cálcio (% CTC):", value=60.0, step=1.0)
-    alvo_mg = st.number_input("Alvo Magnésio (% CTC):", value=15.0, step=1.0)
-    alvo_v  = st.number_input("Alvo V% (Saturação):", value=70.0, step=1.0)
-    st.markdown("**Dados do Calcário:**")
+# B. Calagem (Atualizado: Elevação Ca/Mg)
+with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
+    st.markdown("**Metas na CTC (%):**")
+    alvo_ca = st.number_input("Alvo Cálcio (%):", value=60.0, step=1.0)
+    alvo_mg = st.number_input("Alvo Magnésio (%):", value=18.0, step=1.0)
+    
+    st.markdown("**Garantias do Corretivo:**")
     prnt_calc = st.number_input("PRNT (%):", value=80.0, step=1.0)
-    teor_cao = st.number_input("Teor CaO (%):", value=36.0, step=1.0)
-    teor_mgo = st.number_input("Teor MgO (%):", value=9.0, step=1.0)
+    teor_cao = st.number_input("Teor CaO (%):", value=60.0, step=1.0) # Padrão solicitado
+    teor_mgo = st.number_input("Teor MgO (%):", value=18.0, step=1.0) # Padrão solicitado
 
-# C. Fósforo (Lógica de Reserva)
-with st.sidebar.expander("3. Fósforo (P) - Com Reserva", expanded=False):
-    st.markdown("**Exportação:**")
-    export_p_factor = st.number_input("Exportação (kg P₂O₅/sc):", value=0.9, step=0.1, help="Quanto a planta extrai por saca")
-    st.markdown("**Correção (Tampão):**")
-    fator_tam_p = st.number_input("Fator Tampão (kg P₂O₅/mg):", value=4.0, step=0.5, help="Quanto de P2O5 precisa aplicar para subir 1 mg/dm3 no solo")
-    teor_p2o5_adubo = st.number_input("Teor P₂O₅ Adubo (%):", value=52.0, step=1.0) # MAP padrão
+# C. Fósforo (Tabela P-rem + Exportação)
+with st.sidebar.expander("3. Fósforo (P)", expanded=False):
+    st.markdown("**Parâmetros:**")
+    export_p_factor = st.number_input("Exportação P (kg/sc):", value=0.8, step=0.1)
+    teor_p2o5_adubo = st.number_input("Teor P₂O₅ Adubo (%):", value=21.0, step=1.0)
+    fator_tam_p = st.number_input("Fator Tampão (kg P₂O₅/mg):", value=5.0, step=0.5, help="Qtd de adubo para subir 1 mg no solo")
+
+    st.markdown("**Níveis Críticos (P-rem):**")
+    st.caption("P-rem | Nível Crítico (mg/dm³)")
+    nc_p1 = st.number_input("0 - 4:", value=6.0, step=0.5)
+    nc_p2 = st.number_input("4.1 - 10:", value=7.5, step=0.5)
+    nc_p3 = st.number_input("10.1 - 19:", value=11.5, step=0.5)
+    nc_p4 = st.number_input("19.1 - 30:", value=15.0, step=0.5)
+    nc_p5 = st.number_input("> 30:", value=20.0, step=0.5)
 
 # D. Potássio
 with st.sidebar.expander("4. Potássio (K)", expanded=False):
     st.markdown("**Correção + Exportação:**")
     alvo_k_ctc = st.number_input("Meta K na CTC (%):", value=3.5, step=0.1)
-    export_k_factor = st.number_input("Exportação (kg K₂O/sc):", value=2.2, step=0.1)
-    teor_k2o_adubo = st.number_input("Teor K₂O Adubo (%):", value=60.0, step=1.0) # KCl padrão
+    export_k_factor = st.number_input("Exportação K (kg/sc):", value=1.2, step=0.1)
+    teor_k2o_adubo = st.number_input("Teor K₂O Adubo (%):", value=60.0, step=1.0) 
 
 # E. Gesso
 with st.sidebar.expander("5. Gessagem", expanded=False):
@@ -254,83 +268,101 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
-# 7. LÓGICA DE RECOMENDAÇÃO (ATUALIZADA: P COM RESERVA)
+# 7. LÓGICA DE RECOMENDAÇÃO (FÓRMULAS CORRIGIDAS)
 # ==============================================================================
 def calcular_recomendacoes(df):
     df_rec = df.copy()
     
-    # Mapeamento
+    # Mapeamento de colunas
     cols = {k: next((c for c in df_rec.columns if k in c.lower()), None) 
             for k in ['ca', 'mg', 'k', 'p', 'v%', 'ctc', 'argila', 'prem']}
     
-    # --- A. CALAGEM (Lei do Mínimo/Maior Necessidade) ---
-    if cols['ca'] and cols['mg'] and cols['v%'] and cols['ctc']:
-        # Converte para % CTC (assumindo que lab vem em cmolc)
-        ca_pct = (df_rec[cols['ca']] / df_rec[cols['ctc']]) * 100
-        mg_pct = (df_rec[cols['mg']] / df_rec[cols['ctc']]) * 100
-        v_atual = df_rec[cols['v%']]
+    # --- A. CALAGEM (ELEVAÇÃO Ca e Mg - MAIOR DOSE) ---
+    if cols['ca'] and cols['mg'] and cols['ctc']:
+        # 1. Deficit Ca (cmolc/dm3)
+        # Ca_atual_cmolc = Ca (na tabela, assumindo cmolc)
+        # Ca_alvo_cmolc = (Alvo% / 100) * CTC
+        ca_atual = df_rec[cols['ca']]
+        ca_alvo_val = (alvo_ca / 100) * df_rec[cols['ctc']]
+        def_ca = ca_alvo_val - ca_atual
         
-        # NC = (Alvo - Atual) * CTC / 100
-        nc_ca = (alvo_ca - ca_pct) * df_rec[cols['ctc']] / 100
-        nc_mg = (alvo_mg - mg_pct) * df_rec[cols['ctc']] / 100
-        nc_v  = (alvo_v - v_atual) * df_rec[cols['ctc']] / 100
+        # 2. Deficit Mg (cmolc/dm3)
+        mg_atual = df_rec[cols['mg']]
+        mg_alvo_val = (alvo_mg / 100) * df_rec[cols['ctc']]
+        def_mg = mg_alvo_val - mg_atual
         
-        # Maior dose vence
-        nc_max = np.maximum.reduce([nc_ca, nc_mg, nc_v])
+        # 3. Necessidade de CaO e MgO (kg/ha) para suprir o deficit
+        # Fator Estequiométrico: 
+        # 1 cmolc Ca = 200 mg/dm3 = 400 kg/ha Ca. CaO/Ca = 1.4. Precisa 560 kg CaO puro.
+        # 1 cmolc Mg = 121 mg/dm3 = 242 kg/ha Mg. MgO/Mg = 1.66. Precisa 403 kg MgO puro (aprox 400).
+        need_cao_kg = def_ca * 560
+        need_mgo_kg = def_mg * 400
         
-        df_rec['Calcario_Ton_ha'] = (nc_max * (100 / prnt_calc))
-        df_rec['Calcario_Ton_ha'] = df_rec['Calcario_Ton_ha'].apply(lambda x: x if x > 0 else 0)
+        # 4. Converter para Toneladas de Calcário Comercial
+        # Dose Ca = (Need_CaO / Teor_CaO_Calcario%) / 10
+        dose_ton_ca = (need_cao_kg / teor_cao) / 10
+        
+        # Dose Mg = (Need_MgO / Teor_MgO_Calcario%) / 10
+        dose_ton_mg = (need_mgo_kg / teor_mgo) / 10
+        
+        # 5. Escolher a Maior Dose e Ajustar PRNT
+        dose_base = np.maximum(dose_ton_ca, dose_ton_mg)
+        dose_final = dose_base * (100 / prnt_calc)
+        
+        df_rec['Calcario_Ton_ha'] = dose_final.apply(lambda x: x if x > 0 else 0)
 
     # --- B. POTÁSSIO (Correção + Exportação) ---
     if cols['k'] and cols['ctc']:
+        # K atual em %
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
         
         # Deficit em cmolc
         def_k_cmolc = ((alvo_k_ctc - k_pct) / 100) * df_rec[cols['ctc']]
+        def_k_cmolc = def_k_cmolc.apply(lambda x: x if x > 0 else 0)
         
-        # Correção: cmolc -> kg K2O (x 942)
-        # Se deficit for negativo (sobra), desconta
+        # Correção: 1 cmolc K = 942 kg K2O/ha (aprox)
         k2o_corr = def_k_cmolc * 942 
         
-        # Exportação (Manutenção)
+        # Exportação
         k2o_export = meta_prod * export_k_factor
         
-        # Total
+        # Total K2O
         total_k2o = k2o_corr + k2o_export
-        df_rec['KCL_Kg_ha'] = (total_k2o * (100 / teor_k2o_adubo)).apply(lambda x: x if x > 0 else 0)
+        
+        # Produto Comercial
+        df_rec['Adubo_K_Kg_ha'] = (total_k2o * (100 / teor_k2o_adubo))
 
-    # --- C. FÓSFORO (Com Reserva que Desconta) ---
+    # --- C. FÓSFORO (Com Reserva e Tabela P-rem) ---
     col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
     
-    if col_p:
-        # Nível Crítico (mg/dm3) via P-rem
-        if cols['prem'] is not None:
-            conds = [
-                df_rec[cols['prem']] < 10,
-                (df_rec[cols['prem']] >= 10) & (df_rec[cols['prem']] < 19),
-                (df_rec[cols['prem']] >= 19) & (df_rec[cols['prem']] < 30),
-                df_rec[cols['prem']] >= 30
-            ]
-            choices = [20, 25, 30, 35] # Níveis de referência
-            nc_p = np.select(conds, choices, default=30)
-        else: nc_p = 30 
-            
-        # Gap (Déficit ou Superávit)
-        # Se P_solo > NC, gap_p será negativo (Reserva)
-        gap_p = nc_p - df_rec[col_p]
+    if col_p and cols['prem']:
+        # Define Nível Crítico baseado na Tabela P-rem
+        conds = [
+            df_rec[cols['prem']] <= 4.0,
+            (df_rec[cols['prem']] > 4.0) & (df_rec[cols['prem']] <= 10.0),
+            (df_rec[cols['prem']] > 10.0) & (df_rec[cols['prem']] <= 19.0),
+            (df_rec[cols['prem']] > 19.0) & (df_rec[cols['prem']] <= 30.0),
+            df_rec[cols['prem']] > 30.0
+        ]
+        # Valores vindos da Sidebar
+        choices = [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5]
         
-        # Dose Correção = Gap * Fator Tampão
-        # Se gap_p for -5 (reserva), e fator for 4, temos -20 kg de "crédito"
+        nc_p_grid = np.select(conds, choices, default=30.0)
+            
+        # Gap (Déficit positivo ou Superávit negativo)
+        gap_p = nc_p_grid - df_rec[col_p]
+        
+        # Dose Correção (pode ser negativa se houver reserva)
         dose_correcao = gap_p * fator_tam_p 
         
         # Dose Exportação (Fixa)
         dose_export = meta_prod * export_p_factor
         
-        # Dose Final = Exportação + Correção (que pode ser negativa)
+        # Dose Final = Exportação + Correção (Abate a reserva se existir)
         dose_total_p2o5 = dose_export + dose_correcao
         
         # Transforma em produto e corta negativos
-        df_rec['Fosforo_Kg_ha'] = (dose_total_p2o5 * (100 / teor_p2o5_adubo)).apply(lambda x: x if x > 0 else 0)
+        df_rec['Adubo_P_Kg_ha'] = (dose_total_p2o5 * (100 / teor_p2o5_adubo)).apply(lambda x: x if x > 0 else 0)
 
     # --- D. GESSO ---
     if cols['argila']:
@@ -408,11 +440,10 @@ with aba2:
                 
                 # Stats
                 media_dose = st.session_state['dados_rec'][escolha].mean()
-                total_produto = st.session_state['dados_rec'][escolha].sum() * (0.01) # Estimativa
                 
                 c1, c2 = st.columns(2)
                 c1.metric("Dose Média (kg ou ton/ha)", f"{media_dose:.1f}")
-                c2.info(f"Parâmetros usados: Meta {meta_prod} sc/ha, PRNT {prnt_calc}%, K {alvo_k_ctc}% CTC")
+                c2.info(f"Parâmetros: Meta {meta_prod} sc/ha | PRNT {prnt_calc}%")
 
                 img_rec, bounds_rec, mm_rec = gerar_imagem_overlay(
                     st.session_state['dados_rec'], escolha, 
@@ -429,4 +460,4 @@ with aba2:
                     <div style="display:flex;justify-content:space-between;font-size:10px;"><span>{mm_rec[0]:.1f}</span><span>{mm_rec[1]:.1f}</span></div></div>"""
                     m2.get_root().html.add_child(folium.Element(legend_html))
                     
-                    st_folium(m2, height=500, use_container_width=True, key=f"mapa_rec_{escolha}")
+                    st_folium(m2, height=500, use_container_width=True, key=f"mapa_re
