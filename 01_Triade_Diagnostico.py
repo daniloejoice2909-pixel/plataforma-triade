@@ -39,82 +39,93 @@ if 'geojson_data' not in st.session_state:
     st.session_state['geojson_data'] = None
 
 # ==============================================================================
-# 3. KRIGAGEM BLINDADA (V67 - COM REMOÇÃO DE DUPLICATAS)
+# 3. MOTOR DE CÁLCULO REVISADO (V69 - PROCESSAMENTO INDEPENDENTE)
 # ==============================================================================
 @st.cache_data(show_spinner="⚙️ Calculando Geoestatística...")
 def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
-    # 1. Cópia e Limpeza Inicial
+    # 1. Cópia e Normalização de Decimais (Brasil vs EUA)
     df = df_input.copy()
     
-    # Metadados que nunca devem ser interpolados
+    # Metadados
     cols_proibidas = [
         'id', 'ponto', 'lat', 'lon', 'latitude', 'longitude', 
         'x', 'y', 'data', 'hora', 'campo', 'fazenda', 
         'profundidade', 'zona', 'talhao', 'geometry'
     ]
     
-    # Identifica colunas numéricas válidas
+    # Identificação de Colunas
     cols_validas = []
     for col in df.columns:
         if col.lower() in cols_proibidas: continue
+        
+        # [CORREÇÃO CRÍTICA] Tratamento de Vírgula para Ponto
+        if df[col].dtype == 'object':
+            df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
+            
         try:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-            if df[col].notna().sum() > 3: # Mínimo de pontos para tentar algo
+            # Se tiver pelo menos 3 números válidos, tentamos processar
+            if df[col].notna().sum() >= 3: 
                 cols_validas.append(col)
         except: pass 
 
-    # 2. TRATAMENTO DE COORDENADAS (CRÍTICO PARA EVITAR ERRO DE MEMÓRIA)
-    # Arredonda para evitar micro-diferenças
-    df['longitude'] = df['longitude'].round(6)
-    df['latitude'] = df['latitude'].round(6)
+    # 2. Arredondamento de Coordenadas (Resolve duplicação de pontos)
+    df['longitude'] = df['longitude'].round(5)
+    df['latitude'] = df['latitude'].round(5)
     
-    # [CORREÇÃO] Agrupa por coordenada. Se houver 2 pontos no mesmo lugar, tira a média.
-    df = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
+    # Agrupa pela média (Se houver 2 pontos no mesmo lugar, tira média)
+    df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
 
-    # 3. Criação do Grid
-    x_min, x_max = df['longitude'].min(), df['longitude'].max()
-    y_min, y_max = df['latitude'].min(), df['latitude'].max()
-    buffer = 0.002
+    # 3. Definição do Grid (Buffer Aumentado para cobrir bordas)
+    x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
+    y_min, y_max = df_grouped['latitude'].min(), df_grouped['latitude'].max()
+    buffer = 0.005 # Aumentei o buffer para garantir que cubra o GeoJSON
     
     grid_x = np.linspace(x_min - buffer, x_max + buffer, resolucao_grid)
     grid_y = np.linspace(y_min - buffer, y_max + buffer, resolucao_grid)
     
     xx, yy = np.meshgrid(grid_x, grid_y)
-    
-    # DataFrame que receberá os resultados
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
-    # 4. Loop de Krigagem
+    # 4. Loop INDEPENDENTE (Um erro não trava o outro)
+    # Antes, se uma coluna falhava, travava tudo. Agora é isolado.
     for col in cols_validas:
         try:
-            dados = df[['longitude', 'latitude', col]].dropna()
+            # Pega dados específicos desta coluna
+            dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
             
-            # Validação: Pontos insuficientes ou Variância Zero
-            if len(dados) < 5 or dados[col].nunique() <= 1:
-                valor = dados[col].mean() if len(dados) > 0 else 0
-                df_result[col] = valor
-                continue 
-            
-            # Executa Krigagem
+            # Validação Rigorosa
+            if len(dados_col) < 5:
+                # Se tiver poucos dados, preenche com zero ou média para não dar erro visual
+                df_result[col] = 0.0
+                continue
+                
+            if dados_col[col].nunique() <= 1:
+                # Mapa constante (ex: tudo zero)
+                df_result[col] = dados_col[col].iloc[0]
+                continue
+
+            # Geoestatística (Krigagem)
             OK = OrdinaryKriging(
-                dados['longitude'], dados['latitude'], dados[col], 
+                dados_col['longitude'], dados_col['latitude'], dados_col[col], 
                 variogram_model='linear', verbose=False, enable_plotting=False
             )
             z, _ = OK.execute('grid', grid_x, grid_y)
             df_result[col] = z.flatten()
             
         except Exception as e:
-            print(f"⚠️ Erro em '{col}': {e}")
+            print(f"⚠️ Erro ao interpolar {col}: {e}")
+            # Não aborta, apenas pula esta coluna
             continue
 
-    cols_finais = [c for c in cols_validas if c in df_result.columns]
-    return df_result if not cols_finais else df_result
+    # Retorna o grid completo
+    return df_result
 
 # ==============================================================================
-# 4. GERAÇÃO DE IMAGEM (V67 - RECÁLCULO DE MIN/MAX PÓS-MÁSCARA)
+# 4. GERAÇÃO DE IMAGEM (V69 - VISUALIZAÇÃO SEGURA)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data):
-    # 1. Pivotagem
+    # 1. Pivotagem dos Dados Interpolados
     pivot = df_plot.pivot(index='latitude', columns='longitude', values=atributo)
     Z = pivot.values
     X_unique = pivot.columns.values 
@@ -123,14 +134,14 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     x_min, x_max = X_unique.min(), X_unique.max()
     y_min, y_max = Y_unique.min(), Y_unique.max()
 
-    # 2. APLICAÇÃO DA MÁSCARA (RECORTA O DADO BRUTO)
+    # 2. Máscara de Recorte (Cookie Cutter)
     try:
         coords = []
-        tipo_geom = geojson_data['features'][0]['geometry']['type']
+        tipo = geojson_data['features'][0]['geometry']['type']
         
-        if tipo_geom == 'Polygon':
+        if tipo == 'Polygon':
             coords = geojson_data['features'][0]['geometry']['coordinates'][0]
-        elif tipo_geom == 'MultiPolygon':
+        elif tipo == 'MultiPolygon':
             coords = geojson_data['features'][0]['geometry']['coordinates'][0][0]
             
         if len(coords) > 0:
@@ -138,31 +149,33 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
             XX, YY = np.meshgrid(X_unique, Y_unique)
             points = np.column_stack((XX.flatten(), YY.flatten()))
             
+            # Verifica pontos dentro
             mask_flat = poly_path.contains_points(points)
             mask_grid = mask_flat.reshape(Z.shape)
             
+            # O que estiver FORA vira NaN
             Z[~mask_grid] = np.nan
             
     except Exception as e:
-        print(f"Erro Máscara: {e}")
+        print(f"Erro no recorte: {e}")
 
-    # 3. CÁLCULO DE MIN/MAX APÓS A MÁSCARA
+    # 3. Cálculo de Escala (Baseado APENAS no que sobrou dentro do mapa)
     z_min = np.nanmin(Z)
     z_max = np.nanmax(Z)
     
-    if z_min == z_max or np.isnan(z_min):
-        z_min = 0 if np.isnan(z_min) else z_min - 0.1
-        z_max = 1 if np.isnan(z_max) else z_max + 0.1
+    # Proteção contra mapas vazios ou planos
+    if np.isnan(z_min): z_min = 0
+    if np.isnan(z_max): z_max = 1
+    
+    if z_min == z_max:
+        z_min -= 0.1
+        z_max += 0.1
     elif (z_max - z_min) < 0.001:
         z_max += 0.001
 
-    # 4. Configuração Visual
-    cmap = plt.get_cmap('jet', 256)
-    cmap.set_bad(alpha=0) 
-    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
-
-    # 5. Desenho da Figura
+    # 4. Renderização
     plt.close('all') 
+    
     aspect_ratio = (x_max - x_min) / (y_max - y_min)
     h_fig = 10
     w_fig = h_fig * aspect_ratio
@@ -173,6 +186,11 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     ax = plt.axes([0, 0, 1, 1]) 
     ax.set_axis_off()
     ax.patch.set_alpha(0.0)
+    
+    # Escala de Cores Jet
+    cmap = plt.get_cmap('jet', 256)
+    cmap.set_bad(alpha=0) 
+    norm = mcolors.Normalize(vmin=z_min, vmax=z_max)
     
     ax.contourf(X_unique, Y_unique, Z, levels=50, cmap=cmap, norm=norm, extend='both', alpha=1.0)
     
@@ -187,26 +205,33 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data):
     return img_data, [[y_min, x_min], [y_max, x_max]], [z_min, z_max]
 
 # ==============================================================================
-# 5. INTERFACE COM LIMPEZA AUTOMÁTICA DE MEMÓRIA
+# 5. INTERFACE
 # ==============================================================================
 st.sidebar.header("1. Arquivos de Entrada")
 file_csv = st.sidebar.file_uploader("📂 Tabela (.csv)", type=["csv"])
 file_geojson = st.sidebar.file_uploader("🌍 Contorno (.geojson)", type=["geojson", "json"])
 
-# --- LÓGICA NOVA: LIMPEZA DE ESTADO ---
-# Se qualquer um dos arquivos for removido, limpamos a memória e reiniciamos
+# RESET DE MEMÓRIA AUTOMÁTICO
 if not file_csv or not file_geojson:
     if st.session_state.get('dados_processados') is not None:
         st.session_state['dados_processados'] = None
         st.session_state['geojson_data'] = None
-        st.cache_data.clear() # Limpa também o cache de processamento
-        st.rerun() # Força o recarregamento da página vazia
+        st.cache_data.clear()
+        st.rerun()
 
 if file_csv and file_geojson:
-    # Carregamento
+    # Leitura
     df_raw = carregar_dados_blindado(file_csv)
     df_raw.columns = [c.strip().lower() for c in df_raw.columns]
     
+    # --- PAINEL DE DIAGNÓSTICO (NOVO) ---
+    with st.expander("🕵️ Diagnóstico de Leitura (Debug)", expanded=False):
+        st.write(f"**Total de Linhas no CSV:** {len(df_raw)}")
+        st.write(f"**Colunas Detectadas:** {list(df_raw.columns)}")
+        st.write("**Amostra dos Dados:**")
+        st.dataframe(df_raw.head(3))
+    # -------------------------------------
+
     try:
         file_geojson.seek(0)
         geojson_data = json.load(file_geojson)
@@ -215,24 +240,39 @@ if file_csv and file_geojson:
         st.error("GeoJSON inválido.")
         st.stop()
 
-    # Validação Colunas
+    # Seleção de Coordenadas
     c1, c2 = st.columns(2)
     cols = list(df_raw.columns)
-    idx_lat = cols.index('latitude') if 'latitude' in cols else 0
-    idx_lon = cols.index('longitude') if 'longitude' in cols else 1
+    # Tenta achar latitude/longitude automaticamente
+    idx_lat = next((i for i, c in enumerate(cols) if 'lat' in c), 0)
+    idx_lon = next((i for i, c in enumerate(cols) if 'lon' in c or 'lng' in c), 1)
     
     with c1: lat_col = st.selectbox("Latitude:", cols, index=idx_lat)
     with c2: lon_col = st.selectbox("Longitude:", cols, index=idx_lon)
     
     df_raw = df_raw.rename(columns={lat_col: 'latitude', lon_col: 'longitude'})
 
-    # Botão de Processamento
+    # Botão de Processar
     if st.button("🚀 Processar Mapas", type="primary"):
         with st.status("Processando...", expanded=True) as status:
-            st.cache_data.clear() 
+            st.cache_data.clear() # Limpa cache
             
-            st.write("Calculando Geoestatística...")
+            st.write("Verificando dados...")
+            # Verifica se as colunas de lat/lon são numéricas mesmo
+            try:
+                df_raw['latitude'] = pd.to_numeric(df_raw['latitude'].astype(str).str.replace(',', '.'), errors='coerce')
+                df_raw['longitude'] = pd.to_numeric(df_raw['longitude'].astype(str).str.replace(',', '.'), errors='coerce')
+            except Exception as e:
+                st.error(f"Erro ao converter coordenadas: {e}")
+                st.stop()
+
+            st.write("Interpolando dados...")
             df_krig = processar_matrizes_interpolacao(df_raw, geojson_data)
+            
+            if df_krig.empty:
+                st.error("O processamento retornou uma tabela vazia. Verifique se os nomes das colunas e os dados estão corretos.")
+                st.stop()
+                
             st.session_state['dados_processados'] = df_krig
             status.update(label="Concluído!", state="complete", expanded=False)
         st.rerun()
@@ -251,33 +291,35 @@ if st.session_state['dados_processados'] is not None:
     
     st.divider()
     
-    # Seletor de Mapa
+    # Seletor
     cols_ver = [c for c in df_final.columns if c not in ['latitude', 'longitude']]
     
     if cols_ver:
         st.subheader("🗺️ Visualização de Diagnóstico")
         atributo = st.selectbox("Selecione o mapa:", cols_ver)
         
-        # Filtra dados específicos para este mapa
-        df_plot = df_final[['latitude', 'longitude', atributo]].dropna()
+        # Filtra dados para o gráfico
+        df_plot = df_final[['latitude', 'longitude', atributo]].copy() # .copy() evita warnings
 
         if not df_plot.empty:
             try:
-                # Gera Imagem (Com min/max corrigidos)
+                # Gera Imagem
                 img_buffer, bounds, min_max = gerar_imagem_overlay(df_plot, atributo, st.session_state['geojson_data'])
+                z_min, z_max = min_max
                 
-                # Renderiza Folium
+                # Se z_min ainda for 0 e z_max 0, avisa
+                if z_min == 0 and z_max == 0 and df_plot[atributo].sum() == 0:
+                     st.warning("Este mapa parece estar vazio (todos os valores zerados dentro do contorno).")
+
+                # Mapa Folium
                 centro = [df_plot['latitude'].mean(), df_plot['longitude'].mean()]
                 m = folium.Map(location=centro, zoom_start=14, tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', attr='Google Satellite')
                 
+                # Overlay
                 img_b64 = base64.b64encode(img_buffer.getvalue()).decode()
                 folium.raster_layers.ImageOverlay(
                     image=f"data:image/png;base64,{img_b64}",
-                    bounds=bounds, 
-                    opacity=0.9, 
-                    interactive=True,
-                    cross_origin=False,
-                    zindex=1
+                    bounds=bounds, opacity=0.9, interactive=True, cross_origin=False, zindex=1
                 ).add_to(m)
                 
                 folium.GeoJson(
@@ -285,8 +327,7 @@ if st.session_state['dados_processados'] is not None:
                     style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}
                 ).add_to(m)
                 
-                # Legenda Dinâmica
-                z_min, z_max = min_max
+                # Legenda
                 legend_html = f"""
                 <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; 
                             background: white; padding: 10px; border: 2px solid black; border-radius: 5px; font-family: sans-serif;">
@@ -302,13 +343,13 @@ if st.session_state['dados_processados'] is not None:
                 
                 st_folium(m, height=500, use_container_width=True)
                 
-                # Estatísticas
+                # Métricas
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Mínimo", f"{z_min:.2f}")
-                c2.metric("Média", f"{df_plot[atributo].mean():.2f}")
+                c2.metric("Média Estimada", f"{df_plot[atributo].mean():.2f}")
                 c3.metric("Máximo", f"{z_max:.2f}")
                 
             except Exception as e:
                 st.error(f"Erro visual: {e}")
         else:
-            st.warning("Mapa vazio ou constante.")
+            st.warning("Dados insuficientes para este atributo.")
