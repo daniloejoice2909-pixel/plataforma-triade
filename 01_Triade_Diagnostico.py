@@ -15,11 +15,12 @@ import matplotlib.colors as mcolors
 from matplotlib.path import Path as MplPath
 from matplotlib.patches import Polygon as MplPolygon
 
-from pykrige.ok import OrdinaryKriging
+# MUDANÇA: Usando Scipy RBF para eliminar "Olho de Boi"
+from scipy.interpolate import Rbf
 import folium
 from streamlit_folium import st_folium
 
-# Tenta importar funções utilitárias se existirem, senão define mocks para não quebrar
+# Tenta importar funções utilitárias se existirem, senão define mocks
 try:
     from utils_v43 import (
         configurar_pagina, 
@@ -41,7 +42,6 @@ renderizar_cabecalho_sidebar()
 
 st.title("🚜 Tríade: Diagnóstico de Fertilidade (App 1)")
 
-# Inicialização de Estado
 if 'dados_processados' not in st.session_state:
     st.session_state['dados_processados'] = None
 if 'geojson_data' not in st.session_state:
@@ -120,9 +120,9 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 4. MOTOR DE CÁLCULO (Krigagem Linear para evitar Olho de Boi)
+# 4. MOTOR DE CÁLCULO (NOVO: RBF - Interpolador Linear)
 # ==============================================================================
-def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
+def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=150):
     df = df_input.copy()
     cols_proibidas = ['id', 'ponto', 'amostra', 'lab', 'lat', 'lon', 'latitude', 'longitude', 'x', 'y', 'data', 'hora', 'campo', 'fazenda', 'profundidade', 'zona', 'talhao', 'geometry', 'id_clean', 'unnamed', 'obs']
     
@@ -134,11 +134,6 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             cols_validas.append(col)
 
     df_grouped = df.groupby(['latitude', 'longitude'], as_index=False)[cols_validas].mean()
-
-    # PROJEÇÃO: Graus -> Metros
-    lat_mean = df_grouped['latitude'].mean()
-    df_grouped['Y_m'] = df_grouped['latitude'] * 111111
-    df_grouped['X_m'] = df_grouped['longitude'] * 111111 * np.cos(np.radians(lat_mean))
 
     # Grid
     x_min, x_max = df_grouped['longitude'].min(), df_grouped['longitude'].max()
@@ -155,12 +150,10 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
             y_max = max(y_max, max(lats_g))
     except: pass
 
+    # Aumenta resolução para suavidade
     grid_x = np.linspace(x_min, x_max, resolucao_grid)
     grid_y = np.linspace(y_min, y_max, resolucao_grid)
     xx, yy = np.meshgrid(grid_x, grid_y)
-    
-    grid_y_m = grid_y * 111111
-    grid_x_m = grid_x * 111111 * np.cos(np.radians(lat_mean))
     
     df_result = pd.DataFrame({'latitude': yy.flatten(), 'longitude': xx.flatten()})
 
@@ -173,15 +166,19 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
         progresso_texto.text(f"⏳ Processando: {col} ({i+1}/{total_cols})")
         bar.progress((i + 1) / total_cols)
         try:
-            dados_col = df_grouped[['X_m', 'Y_m', col]].dropna()
+            dados_col = df_grouped[['longitude', 'latitude', col]].dropna()
             if len(dados_col) < 5: continue
 
-            # ALTERAÇÃO: 'linear' reduz o efeito olho de boi comparado ao 'spherical'
-            OK = OrdinaryKriging(
-                dados_col['X_m'], dados_col['Y_m'], dados_col[col], 
-                variogram_model='linear', verbose=False, enable_plotting=False
-            )
-            z, _ = OK.execute('grid', grid_x_m, grid_y_m)
+            # --- MUDANÇA MASTER: RBF (Linear) ---
+            # Isso força o mapa a conectar os pontos, eliminando as bolhas
+            interpolator = Rbf(dados_col['longitude'], dados_col['latitude'], dados_col[col], function='linear')
+            z = interpolator(xx, yy)
+            
+            # Limita os valores extrapolados para não criar manchas absurdas fora da faixa real
+            z_min_real = dados_col[col].min()
+            z_max_real = dados_col[col].max()
+            z = np.clip(z, z_min_real, z_max_real)
+            
             df_result[col] = z.flatten()
             processed_cols.append(col)
         except: continue
@@ -193,7 +190,7 @@ def processar_matrizes_interpolacao(df_input, geojson_data, resolucao_grid=100):
     return df_result[cols_finais], (resolucao_grid, resolucao_grid)
 
 # ==============================================================================
-# 5. GERAÇÃO DE IMAGEM (ESTILO INCERES)
+# 5. GERAÇÃO DE IMAGEM (PALETA TIPO INCERES)
 # ==============================================================================
 def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.close('all')
@@ -230,8 +227,8 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     if len(dados_validos) > 0:
         z_min = np.nanmin(dados_validos)
         z_max = np.nanmax(dados_validos)
-        if z_min == z_max:
-            z_min -= 0.1; z_max += 0.1
+        # Margem de segurança para o BoundaryNorm não quebrar
+        if z_min == z_max: z_min -= 0.1; z_max += 0.1
     else: 
         z_min, z_max = 0, 1
 
@@ -245,18 +242,19 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     ax.set_axis_off()
     ax.patch.set_alpha(0.0)
     
-    # --- CONFIGURAÇÃO VISUAL TIPO INCERES ---
-    # 1. Paleta de Cores: Vermelho -> Laranja -> Amarelo -> Verde Claro -> Verde Escuro -> Azul
-    cores_personalizadas = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
-    cmap_custom = mcolors.ListedColormap(cores_personalizadas)
+    # --- PADRÃO INCERES ---
+    # Vermelho, Laranja, Amarelo, Verde Claro, Verde, Azul
+    cores_inc = ['#d73027', '#fc8d59', '#fee08b', '#d9ef8b', '#91cf60', '#4575b4']
     
-    # 2. Níveis Discretos (6 Faixas definidas)
-    num_classes = 6
-    levels = np.linspace(z_min, z_max, num_classes + 1)
-    norm = mcolors.BoundaryNorm(levels, len(cores_personalizadas))
+    # Cria a paleta discretizada
+    cmap_custom = mcolors.ListedColormap(cores_inc)
     
-    # 3. Plotagem Sólida (contourf com poucas camadas cria o efeito de zonas)
-    ax.contourf(X_unique, Y_unique, Z, levels=levels, cmap=cmap_custom, norm=norm, extend='both', alpha=0.9)
+    # Define os limites das 6 faixas
+    boundaries = np.linspace(z_min, z_max, 7) # 7 limites criam 6 faixas
+    norm = mcolors.BoundaryNorm(boundaries, cmap_custom.N, clip=True)
+    
+    # Plotagem
+    ax.contourf(X_unique, Y_unique, Z, levels=boundaries, cmap=cmap_custom, norm=norm, extend='both', alpha=0.9)
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     
@@ -319,7 +317,7 @@ if file_lab and file_geo and file_geojson:
                 
                 if st.button("🚀 Gerar Mapas", type="primary"):
                     st.cache_data.clear()
-                    df_krig, grid_shape = processar_matrizes_interpolacao(df_merged, geojson_data, resolucao_grid=100)
+                    df_krig, grid_shape = processar_matrizes_interpolacao(df_merged, geojson_data, resolucao_grid=150)
                     st.session_state['dados_processados'] = df_krig
                     st.session_state['grid_shape'] = grid_shape
                     st.rerun()
@@ -355,12 +353,22 @@ if st.session_state['dados_processados'] is not None:
                 
                 folium.GeoJson(st.session_state['geojson_data'], style_function=lambda x: {'color': 'black', 'weight': 2, 'fillOpacity': 0}).add_to(m)
                 
-                # Legenda Personalizada (Gradiente de 6 cores)
+                # Legenda Sólida (6 faixas)
                 legend_html = f"""
                 <div style="position: fixed; bottom: 30px; right: 30px; z-index:9999; background: white; padding: 10px; border: 2px solid black; border-radius: 5px; font-family: sans-serif;">
                 <b>{atributo}</b><br>
-                <div style="background: linear-gradient(to right, #d73027, #fc8d59, #fee08b, #d9ef8b, #91cf60, #4575b4); height: 10px; width: 150px;"></div>
-                <div style="display: flex; justify-content: space-between; width: 150px; font-size: 12px;"><span>{z_min:.2f}</span><span>{z_max:.2f}</span></div>
+                <div style="display: flex; height: 15px; width: 180px;">
+                    <div style="flex:1; background:#d73027;"></div>
+                    <div style="flex:1; background:#fc8d59;"></div>
+                    <div style="flex:1; background:#fee08b;"></div>
+                    <div style="flex:1; background:#d9ef8b;"></div>
+                    <div style="flex:1; background:#91cf60;"></div>
+                    <div style="flex:1; background:#4575b4;"></div>
+                </div>
+                <div style="display: flex; justify-content: space-between; width: 180px; font-size: 12px; margin-top: 5px;">
+                    <span>{z_min:.2f}</span>
+                    <span>{z_max:.2f}</span>
+                </div>
                 </div>
                 """
                 m.get_root().html.add_child(folium.Element(legend_html))
