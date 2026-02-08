@@ -1,3 +1,8 @@
+Aqui está o código completo. Peguei a versão exata que você me mandou (com a exportação de Shapefile, recorte perfeito e fórmulas ajustadas) e reintegrei o Simulador de Relação Ca/Mg na barra lateral.
+
+Agora, ao ajustar os teores de CaO e MgO do calcário na Sidebar, você verá instantaneamente como a relação Ca/Mg do solo vai ficar após a aplicação.
+
+Python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -63,12 +68,78 @@ st.sidebar.header("⚙️ Parâmetros de Recomendação")
 with st.sidebar.expander("1. Meta de Produtividade", expanded=True):
     meta_prod = st.number_input("Meta Soja (sc/ha):", value=80.0, step=1.0)
 
-with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
+# --- B. CALAGEM COM SIMULADOR DE RELAÇÃO CA/MG (RESTAURADO) ---
+with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=True):
+    st.markdown("### Metas de Solo")
     alvo_ca = st.number_input("Alvo Cálcio (%):", value=60.0, step=1.0)
     alvo_mg = st.number_input("Alvo Magnésio (%):", value=18.0, step=1.0)
+    
+    st.markdown("### Corretivo")
     prnt_calc = st.number_input("PRNT (%):", value=82.0, step=1.0)
     teor_cao = st.number_input("Teor CaO (%):", value=42.0, step=1.0) 
     teor_mgo = st.number_input("Teor MgO (%):", value=9.0, step=1.0) 
+
+    # --- SIMULADOR DE RELAÇÃO CA/MG ---
+    if st.session_state['dados_processados'] is not None:
+        df_sim = st.session_state['dados_processados']
+        # Mapeamento inteligente de colunas para o simulador
+        cols_sim = {}
+        for nut in ['ca', 'mg', 'ctc']:
+             # Busca robusta por colunas
+             match = next((c for c in df_sim.columns if nut == c.lower() or (nut in c.lower() and len(c)<15)), None)
+             cols_sim[nut] = match
+
+        if cols_sim['ca'] and cols_sim['mg'] and cols_sim['ctc']:
+            st.markdown("---")
+            st.caption("📊 **Simulador (Média do Talhão)**")
+            
+            # Médias Atuais do Grid Processado
+            avg_ca = df_sim[cols_sim['ca']].mean()
+            avg_mg = df_sim[cols_sim['mg']].mean()
+            avg_ctc = df_sim[cols_sim['ctc']].mean()
+            
+            # Relação Atual
+            rel_atual = avg_ca / avg_mg if avg_mg > 0 else 0
+            
+            # Cálculo da Dose Média Teórica para atingir o Alvo
+            def_ca = ((alvo_ca/100) * avg_ctc) - avg_ca
+            def_mg = ((alvo_mg/100) * avg_ctc) - avg_mg
+            
+            # Fatores: 1 cmolc Ca precisa de 560 kg CaO | 1 cmolc Mg precisa de 403 kg MgO
+            need_cao_kg = def_ca * 560
+            need_mgo_kg = def_mg * 403
+            
+            # Evita divisão por zero se o usuário zerar o teor
+            t_cao = teor_cao if teor_cao > 0 else 1
+            t_mgo = teor_mgo if teor_mgo > 0 else 1
+            
+            # Dose em Ton/ha baseada no teor do calcário
+            dose_ton_ca = (need_cao_kg / t_cao) / 10
+            dose_ton_mg = (need_mgo_kg / t_mgo) / 10
+            
+            # Dose Base (Maior necessidade entre Ca e Mg)
+            dose_base_ton = max(dose_ton_ca, dose_ton_mg)
+            # Ajuste pelo PRNT
+            dose_final_ton = dose_base_ton * (100 / (prnt_calc if prnt_calc > 0 else 1))
+            
+            # Projeção dos novos teores
+            # Calcula quanto de Ca e Mg essa dose final adiciona ao solo
+            kg_cao_add = dose_final_ton * 10 * teor_cao
+            kg_mgo_add = dose_final_ton * 10 * teor_mgo
+
+            cmolc_ca_add = kg_cao_add / 560
+            cmolc_mg_add = kg_mgo_add / 403
+            
+            final_ca = avg_ca + cmolc_ca_add
+            final_mg = avg_mg + cmolc_mg_add
+            
+            rel_proj = final_ca / final_mg if final_mg > 0 else 0
+            
+            # Exibição das Métricas
+            c1, c2 = st.columns(2)
+            c1.metric("Rel. Atual", f"{rel_atual:.2f}", help="Relação Ca/Mg média atual do solo")
+            c2.metric("Rel. Projetada", f"{rel_proj:.2f}", delta=f"{rel_proj - rel_atual:.2f}", help="Relação Ca/Mg esperada após aplicação")
+            st.caption(f"Dose Média Estimada: **{dose_final_ton:.1f} ton/ha**")
 
 with st.sidebar.expander("3. Fósforo (P)", expanded=False):
     export_p_factor = st.number_input("Exportação P (kg/sc):", value=0.8, step=0.1)
@@ -185,7 +256,7 @@ def extrair_coordenadas_limpas(geojson_data):
     except: return []
 
 # ==============================================================================
-# 5. MOTOR DE EXPORTAÇÃO (SHAPEFILE PARA MONITORES) - NOVO!
+# 5. MOTOR DE EXPORTAÇÃO (SHAPEFILE PARA MONITORES)
 # ==============================================================================
 def gerar_pacote_shapefile(df_grid, coluna_dose, nome_arquivo="RX_VRT"):
     """
@@ -196,7 +267,6 @@ def gerar_pacote_shapefile(df_grid, coluna_dose, nome_arquivo="RX_VRT"):
         return None
 
     # 1. Converter Grid de Pontos para Polígonos (Pixelização)
-    # Descobre o tamanho do pixel (resolução)
     lats = df_grid['latitude'].unique()
     lons = df_grid['longitude'].unique()
     
@@ -224,12 +294,11 @@ def gerar_pacote_shapefile(df_grid, coluna_dose, nome_arquivo="RX_VRT"):
     # Seleciona apenas a geometria e a dose alvo
     gdf_export = gdf[['geometry', coluna_dose]].copy()
     
-    # Renomeia para algo curto e padrão (Ex: DOSE, RATE, TGT)
-    # Para garantir compatibilidade, criamos colunas com nomes comuns
+    # Renomeia para algo curto e padrão (Ex: DOSE)
     col_short = "DOSE"
-    gdf_export[col_short] = gdf_export[coluna_dose].round(2) # Arredonda para 2 casas
+    gdf_export[col_short] = gdf_export[coluna_dose].round(2)
     
-    # Remove a coluna original de nome longo e mantém a curta
+    # Remove a coluna original de nome longo
     gdf_export = gdf_export[['geometry', col_short]]
 
     # 3. Criação do ZIP em Memória
@@ -238,18 +307,10 @@ def gerar_pacote_shapefile(df_grid, coluna_dose, nome_arquivo="RX_VRT"):
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
         # Função auxiliar para gravar os 4 arquivos do shapefile
         def salvar_no_zip(gdf_obj, folder_path):
-            # Cria temp dir
-            temp_name = f"{folder_path}/{nome_arquivo}"
-            
-            # Como geopandas escreve em arquivo, usamos BytesIO simulado não suportado diretamente
-            # Workaround: Escrevemos os arquivos binários manualmente ou usamos estrutura temp
-            # Mais robusto para Streamlit: Gravar arquivos virtuais
-            
-            # Gera os dados binários do shapefile
-            # Nota: GeoPandas precisa de um path real ou similar. 
-            # Vamos usar um truque: gravar em /tmp/ e ler de volta
             import tempfile
             import os
+            
+            temp_name = f"{folder_path}/{nome_arquivo}"
             
             with tempfile.TemporaryDirectory() as tmpdirname:
                 fullpath = os.path.join(tmpdirname, "prescription.shp")
@@ -260,22 +321,15 @@ def gerar_pacote_shapefile(df_grid, coluna_dose, nome_arquivo="RX_VRT"):
                     try:
                         with open(fullpath.replace('.shp', ext), 'rb') as f:
                             zip_file.writestr(f"{temp_name}{ext}", f.read())
-                    except: pass # .prj as vezes falha, vamos garantir manual
+                    except: pass 
 
                 # Garante o PRJ WGS84 se falhar
                 wgs84_prj = 'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["Degree",0.017453292519943295]]'
                 zip_file.writestr(f"{temp_name}.prj", wgs84_prj)
 
-        # --- ESTRUTURA JOHN DEERE ---
-        # JD gosta de pasta Rx
+        # --- ESTRUTURAS ---
         salvar_no_zip(gdf_export, "JohnDeere/Rx")
-        
-        # --- ESTRUTURA TRIMBLE ---
-        # Trimble lê na raiz ou pasta AgGPS
         salvar_no_zip(gdf_export, "Trimble/AgGPS/Prescriptions")
-        
-        # --- ESTRUTURA STARA/CASE ---
-        # Genérico na raiz
         salvar_no_zip(gdf_export, "Outros_Monitores")
 
     zip_buffer.seek(0)
@@ -355,7 +409,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
         Y_unique = np.sort(df_plot['latitude'].unique())
     except: return None, None, [0,1]
 
-    # MÁSCARA
+    # MÁSCARA RASTER
     final_bounds = [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]]
     poly_min_x, poly_max_x = X_unique.min(), X_unique.max()
     poly_min_y, poly_max_y = Y_unique.min(), Y_unique.max()
@@ -398,9 +452,6 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.savefig(img_data, format='png', transparent=True, bbox_inches='tight', pad_inches=0)
     img_data.seek(0); plt.close(fig)
     
-    # Se a função de exportação for chamada, precisamos filtrar os dados do dataframe para apenas os dentro da máscara
-    # Para isso, retornamos a máscara se necessário (hack para a função de exportação)
-    # Mas como o dataframe original tem tudo, vamos filtrar na hora de exportar usando o mesmo path.
     return img_data, final_bounds, [z_min, z_max]
 
 def criar_legenda_html(min_val, max_val, titulo):
@@ -526,6 +577,9 @@ with aba1:
                 if c not in ['latitude', 'longitude'] and 'Kg_ha' not in c and 'Ton_ha' not in c]
         if cols:
             attr = st.selectbox("Nutriente:", cols)
+            csv = st.session_state['dados_processados'].to_csv(index=False).encode('utf-8')
+            st.download_button("💾 Baixar Ponte (CSV)", csv, "ponte_vrt.csv", "text/csv")
+            
             s_val = st.session_state['dados_processados'][attr]
             st.info(f"📊 **{attr}** | Mín: {s_val.min():.2f} | Máx: {s_val.max():.2f} | Média: {s_val.mean():.2f}")
 
@@ -554,16 +608,10 @@ with aba2:
                 r_mean = s_rec[s_rec > 0].mean() if not s_rec[s_rec > 0].empty else 0
                 st.info(f"🚜 **{escolha}** | Dose Média (Aplicada): {r_mean:.1f} | Máx: {s_rec.max():.1f}")
                 
-                # BOTÃO DE EXPORTAÇÃO SHAPEFILE (ZIP)
                 if GEO_ENABLED:
                     zip_file = gerar_pacote_shapefile(st.session_state['dados_rec'], escolha, nome_arquivo=f"Rx_{escolha}")
                     if zip_file:
-                        st.download_button(
-                            label=f"💾 Baixar ZIP Shapefile ({escolha})",
-                            data=zip_file,
-                            file_name=f"Rx_{escolha}.zip",
-                            mime="application/zip"
-                        )
+                        st.download_button(f"💾 Baixar ZIP Shapefile ({escolha})", zip_file, f"Rx_{escolha}.zip", "application/zip")
                 
                 img, bounds, mm = gerar_imagem_overlay(st.session_state['dados_rec'], escolha, st.session_state['geojson_data'], st.session_state['grid_shape'])
                 if img:
