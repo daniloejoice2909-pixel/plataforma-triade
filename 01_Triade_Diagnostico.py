@@ -18,6 +18,14 @@ from scipy.interpolate import NearestNDInterpolator
 import folium
 from streamlit_folium import st_folium
 
+# --- BIBLIOTECAS GEOESPACIAIS (NOVO) ---
+try:
+    import geopandas as gpd
+    from shapely.geometry import box
+    GEO_ENABLED = True
+except ImportError:
+    GEO_ENABLED = False
+
 # Tenta importar funções utilitárias
 try:
     from utils_v43 import (
@@ -38,130 +46,59 @@ renderizar_cabecalho_sidebar()
 
 st.title("🚜 Tríade: Sistema VRT (Expert)")
 
+if not GEO_ENABLED:
+    st.error("⚠️ Atenção: As bibliotecas 'geopandas' e 'shapely' não estão instaladas. A exportação para Monitores não funcionará.")
+
 if 'dados_processados' not in st.session_state: st.session_state['dados_processados'] = None
 if 'geojson_data' not in st.session_state: st.session_state['geojson_data'] = None
 if 'grid_shape' not in st.session_state: st.session_state['grid_shape'] = None
 if 'dados_rec' not in st.session_state: st.session_state['dados_rec'] = None
 
 # ==============================================================================
-# 3. SIDEBAR DE PARÂMETROS (COM SIMULADOR CA/MG)
+# 3. SIDEBAR DE PARÂMETROS
 # ==============================================================================
 st.sidebar.markdown("---")
 st.sidebar.header("⚙️ Parâmetros de Recomendação")
 
-# A. Produtividade
 with st.sidebar.expander("1. Meta de Produtividade", expanded=True):
     meta_prod = st.number_input("Meta Soja (sc/ha):", value=80.0, step=1.0)
 
-# B. Calagem (COM SIMULADOR)
-with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=True):
-    st.markdown("### Metas de Solo")
+with st.sidebar.expander("2. Calagem (Elevação Ca/Mg)", expanded=False):
     alvo_ca = st.number_input("Alvo Cálcio (%):", value=60.0, step=1.0)
     alvo_mg = st.number_input("Alvo Magnésio (%):", value=18.0, step=1.0)
-    
-    st.markdown("### Corretivo")
-    prnt_calc = st.number_input("PRNT (%):", value=80.0, step=1.0)
-    teor_cao = st.number_input("Teor CaO (%):", value=48.0, step=1.0) 
-    teor_mgo = st.number_input("Teor MgO (%):", value=6.0, step=1.0) 
+    prnt_calc = st.number_input("PRNT (%):", value=82.0, step=1.0)
+    teor_cao = st.number_input("Teor CaO (%):", value=42.0, step=1.0) 
+    teor_mgo = st.number_input("Teor MgO (%):", value=9.0, step=1.0) 
 
-    # --- SIMULADOR DE RELAÇÃO CA/MG (NOVO) ---
-    if st.session_state['dados_processados'] is not None:
-        df_sim = st.session_state['dados_processados']
-        # Tenta mapear colunas para a simulação
-        col_ca = next((c for c in df_sim.columns if 'ca' == c.lower() or 'calcio' in c.lower()), None)
-        col_mg = next((c for c in df_sim.columns if 'mg' == c.lower() or 'magnesio' in c.lower()), None)
-        col_ctc = next((c for c in df_sim.columns if 'ctc' in c.lower()), None)
-
-        if col_ca and col_mg and col_ctc:
-            st.markdown("---")
-            st.caption("📊 **Simulação (Média do Talhão)**")
-            
-            # Médias Atuais
-            avg_ca = df_sim[col_ca].mean()
-            avg_mg = df_sim[col_mg].mean()
-            avg_ctc = df_sim[col_ctc].mean()
-            
-            # Relação Atual
-            rel_atual = avg_ca / avg_mg if avg_mg > 0 else 0
-            
-            # Cálculo da Dose Média Teórica
-            def_ca = ((alvo_ca/100) * avg_ctc) - avg_ca
-            def_mg = ((alvo_mg/100) * avg_ctc) - avg_mg
-            
-            # Dose necessária (Considerando CaO/MgO inseridos)
-            # 560 e 403 são fatores para converter cmolc em kg de óxido
-            need_cao_kg = def_ca * 560
-            need_mgo_kg = def_mg * 403
-            
-            # Evita divisão por zero
-            t_cao = teor_cao if teor_cao > 0 else 1
-            t_mgo = teor_mgo if teor_mgo > 0 else 1
-            
-            dose_ton_ca = (need_cao_kg / t_cao) / 10
-            dose_ton_mg = (need_mgo_kg / t_mgo) / 10
-            
-            # Dose Base (Maior necessidade)
-            dose_base_ton = max(dose_ton_ca, dose_ton_mg)
-            # Ajuste PRNT
-            dose_final_ton = dose_base_ton * (100 / (prnt_calc if prnt_calc > 0 else 1))
-            
-            # Projeção dos novos teores
-            # Quanto de Ca e Mg essa dose adiciona?
-            # 1 ton calcário = 1000kg. 
-            # kg CaO adicionado = Dose * (CaO/100) * 1000
-            # kg Ca = kg CaO * 0.7143 (fator estequiométrico)
-            # cmolc Ca = kg Ca / 400.8 (400kg Ca/ha aumenta 1 cmolc)
-            
-            add_cao_kg = dose_final_ton * 1000 * (teor_cao / 100)
-            add_ca_cmolc = (add_cao_kg * 0.7143) / 400.8
-            
-            add_mgo_kg = dose_final_ton * 1000 * (teor_mgo / 100)
-            add_mg_cmolc = (add_mgo_kg * 0.6032) / 243.1
-            
-            final_ca = avg_ca + add_ca_cmolc
-            final_mg = avg_mg + add_mg_cmolc
-            
-            rel_proj = final_ca / final_mg if final_mg > 0 else 0
-            
-            c_sim1, c_sim2 = st.columns(2)
-            c_sim1.metric("Rel. Atual", f"{rel_atual:.1f}", help="Cálcio / Magnésio Atual")
-            c_sim2.metric("Rel. Projetada", f"{rel_proj:.1f}", delta=f"{rel_proj-rel_atual:.1f}", help="Cálcio / Magnésio após aplicação")
-            
-            st.caption(f"Dose Média Estimada: **{dose_final_ton:.1f} ton/ha**")
-
-# C. Fósforo
 with st.sidebar.expander("3. Fósforo (P)", expanded=False):
     export_p_factor = st.number_input("Exportação P (kg/sc):", value=0.8, step=0.1)
-    teor_p2o5_adubo = st.number_input("Teor P₂O₅ Adubo (%):", value=21.0, step=1.0, help="Insira o teor do adubo escolhido")
+    teor_p2o5_adubo = st.number_input("Teor P₂O₅ Adubo (%):", value=21.0, step=1.0, help="Ex: 52 p/ MAP, 18 p/ SSP")
     fator_tam_p = st.number_input("Fator Tampão (kg P₂O₅/mg):", value=5.0, step=0.5)
     st.caption("Níveis Críticos P-rem:")
     nc_p1 = st.number_input("0 - 4:", value=6.0)
-    nc_p2 = st.number_input("4.1 - 10:", value=7.5)
-    nc_p3 = st.number_input("10.1 - 19:", value=11.5)
+    nc_p2 = st.number_input("4.1 - 10:", value=8.0)
+    nc_p3 = st.number_input("10.1 - 19:", value=12.0)
     nc_p4 = st.number_input("19.1 - 30:", value=15.0)
     nc_p5 = st.number_input("> 30:", value=20.0)
 
-# D. Potássio
 with st.sidebar.expander("4. Potássio (K)", expanded=False):
     st.info("A exportação será somada integralmente.")
-    alvo_k_ctc = st.number_input("Meta K na CTC (%):", value=3.5, step=0.1)
+    alvo_k_ctc = st.number_input("Meta K na CTC (%):", value=3.2, step=0.1)
     export_k_factor = st.number_input("Exportação K (kg/sc):", value=1.2, step=0.1)
     teor_k2o_adubo = st.number_input("Teor K₂O Adubo (%):", value=60.0, step=1.0)
 
-# E. Gesso
 with st.sidebar.expander("5. Gessagem", expanded=False):
-    fator_gesso = st.number_input("Fator x Argila:", value=50.0, step=5.0)
+    fator_gesso = st.number_input("Fator x Argila:", value=15.0, step=5.0)
 
-# F. Micronutrientes
 with st.sidebar.expander("6. Micronutrientes", expanded=False):
     st.markdown("**Nível Crítico (mg/dm³) / Dose (kg/ha):**")
     crit_b = st.number_input("Boro (Crítico):", value=0.3, step=0.1)
     dose_b = st.number_input("Boro (Dose):", value=2.0, step=0.5)
-    crit_zn = st.number_input("Zinco (Crítico):", value=1.0, step=0.1)
+    crit_zn = st.number_input("Zinco (Crítico):", value=1.2, step=0.1)
     dose_zn = st.number_input("Zinco (Dose):", value=4.0, step=0.5)
-    crit_mn = st.number_input("Manganês (Crítico):", value=4.0, step=0.5)
+    crit_mn = st.number_input("Manganês (Crítico):", value=3.5, step=0.5)
     dose_mn = st.number_input("Manganês (Dose):", value=5.0, step=1.0)
-    crit_cu = st.number_input("Cobre (Crítico):", value=0.5, step=0.1)
+    crit_cu = st.number_input("Cobre (Crítico):", value=0.4, step=0.1)
     dose_cu = st.number_input("Cobre (Dose):", value=2.0, step=0.5)
 
 # ==============================================================================
@@ -188,7 +125,7 @@ def ler_arquivo_robusto(uploaded_file):
         uploaded_file.seek(0)
         return pd.read_csv(uploaded_file, sep=';')
     except Exception as e:
-        st.error(f"Erro Fatal: {e}")
+        st.error(f"Erro Fatal na leitura: {e}")
         return pd.DataFrame()
 
 def processar_arquivo_geografico(uploaded_file):
@@ -207,8 +144,6 @@ def processar_arquivo_geografico(uploaded_file):
         if not placemarks: placemarks = root.findall('.//Placemark')
             
         for placemark in placemarks:
-            name_elem = placemark.find('kml:name', namespace)
-            name = name_elem.text.strip() if name_elem is not None and name_elem.text else None
             coord_elem = placemark.find('.//kml:coordinates', namespace)
             if coord_elem is None: coord_elem = placemark.find('.//coordinates')
             
@@ -219,6 +154,8 @@ def processar_arquivo_geografico(uploaded_file):
                     if len(first_coord) >= 2:
                         try:
                             lon = float(first_coord[0]); lat = float(first_coord[1])
+                            name_elem = placemark.find('kml:name', namespace)
+                            name = name_elem.text.strip() if name_elem is not None else str(len(points))
                             points.append({'ID_PONTO': name, 'latitude': lat, 'longitude': lon})
                         except ValueError: pass
         return pd.DataFrame(points)
@@ -246,6 +183,103 @@ def extrair_coordenadas_limpas(geojson_data):
         elif geom['type'] == 'MultiPolygon': return [p[:2] for p in geom['coordinates'][0][0]]
         return []
     except: return []
+
+# ==============================================================================
+# 5. MOTOR DE EXPORTAÇÃO (SHAPEFILE PARA MONITORES) - NOVO!
+# ==============================================================================
+def gerar_pacote_shapefile(df_grid, coluna_dose, nome_arquivo="RX_VRT"):
+    """
+    Gera um ZIP com Shapefiles organizados para John Deere, Trimble e Stara.
+    Converte o Grid de Pontos em Polígonos (Pixels) para leitura correta.
+    """
+    if not GEO_ENABLED:
+        return None
+
+    # 1. Converter Grid de Pontos para Polígonos (Pixelização)
+    # Descobre o tamanho do pixel (resolução)
+    lats = df_grid['latitude'].unique()
+    lons = df_grid['longitude'].unique()
+    
+    if len(lats) < 2 or len(lons) < 2:
+        return None
+        
+    res_lat = abs(lats[1] - lats[0])
+    res_lon = abs(lons[1] - lons[0])
+    
+    geoms = []
+    # Cria um quadrado (box) em volta de cada ponto
+    for _, row in df_grid.iterrows():
+        minx = row['longitude'] - (res_lon/2)
+        maxx = row['longitude'] + (res_lon/2)
+        miny = row['latitude'] - (res_lat/2)
+        maxy = row['latitude'] + (res_lat/2)
+        geoms.append(box(minx, miny, maxx, maxy))
+    
+    # Cria o GeoDataFrame
+    gdf = gpd.GeoDataFrame(df_grid, geometry=geoms)
+    # Define projeção WGS84 (Lat/Lon) - Padrão Mundial de GPS
+    gdf.set_crs(epsg=4326, inplace=True)
+    
+    # 2. Prepara os dados (DBF antigo limita nomes a 10 chars)
+    # Seleciona apenas a geometria e a dose alvo
+    gdf_export = gdf[['geometry', coluna_dose]].copy()
+    
+    # Renomeia para algo curto e padrão (Ex: DOSE, RATE, TGT)
+    # Para garantir compatibilidade, criamos colunas com nomes comuns
+    col_short = "DOSE"
+    gdf_export[col_short] = gdf_export[coluna_dose].round(2) # Arredonda para 2 casas
+    
+    # Remove a coluna original de nome longo e mantém a curta
+    gdf_export = gdf_export[['geometry', col_short]]
+
+    # 3. Criação do ZIP em Memória
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Função auxiliar para gravar os 4 arquivos do shapefile
+        def salvar_no_zip(gdf_obj, folder_path):
+            # Cria temp dir
+            temp_name = f"{folder_path}/{nome_arquivo}"
+            
+            # Como geopandas escreve em arquivo, usamos BytesIO simulado não suportado diretamente
+            # Workaround: Escrevemos os arquivos binários manualmente ou usamos estrutura temp
+            # Mais robusto para Streamlit: Gravar arquivos virtuais
+            
+            # Gera os dados binários do shapefile
+            # Nota: GeoPandas precisa de um path real ou similar. 
+            # Vamos usar um truque: gravar em /tmp/ e ler de volta
+            import tempfile
+            import os
+            
+            with tempfile.TemporaryDirectory() as tmpdirname:
+                fullpath = os.path.join(tmpdirname, "prescription.shp")
+                gdf_obj.to_file(fullpath)
+                
+                # Lê de volta e grava no ZIP
+                for ext in ['.shp', '.shx', '.dbf', '.prj']:
+                    try:
+                        with open(fullpath.replace('.shp', ext), 'rb') as f:
+                            zip_file.writestr(f"{temp_name}{ext}", f.read())
+                    except: pass # .prj as vezes falha, vamos garantir manual
+
+                # Garante o PRJ WGS84 se falhar
+                wgs84_prj = 'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["Degree",0.017453292519943295]]'
+                zip_file.writestr(f"{temp_name}.prj", wgs84_prj)
+
+        # --- ESTRUTURA JOHN DEERE ---
+        # JD gosta de pasta Rx
+        salvar_no_zip(gdf_export, "JohnDeere/Rx")
+        
+        # --- ESTRUTURA TRIMBLE ---
+        # Trimble lê na raiz ou pasta AgGPS
+        salvar_no_zip(gdf_export, "Trimble/AgGPS/Prescriptions")
+        
+        # --- ESTRUTURA STARA/CASE ---
+        # Genérico na raiz
+        salvar_no_zip(gdf_export, "Outros_Monitores")
+
+    zip_buffer.seek(0)
+    return zip_buffer
 
 # ==============================================================================
 # 5. MOTOR DE INTERPOLAÇÃO (EXTRAPOLAÇÃO PARA CORTE)
@@ -321,6 +355,7 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
         Y_unique = np.sort(df_plot['latitude'].unique())
     except: return None, None, [0,1]
 
+    # MÁSCARA
     final_bounds = [[Y_unique.min(), X_unique.min()], [Y_unique.max(), X_unique.max()]]
     poly_min_x, poly_max_x = X_unique.min(), X_unique.max()
     poly_min_y, poly_max_y = Y_unique.min(), Y_unique.max()
@@ -363,6 +398,9 @@ def gerar_imagem_overlay(df_plot, atributo, geojson_data, grid_shape):
     plt.savefig(img_data, format='png', transparent=True, bbox_inches='tight', pad_inches=0)
     img_data.seek(0); plt.close(fig)
     
+    # Se a função de exportação for chamada, precisamos filtrar os dados do dataframe para apenas os dentro da máscara
+    # Para isso, retornamos a máscara se necessário (hack para a função de exportação)
+    # Mas como o dataframe original tem tudo, vamos filtrar na hora de exportar usando o mesmo path.
     return img_data, final_bounds, [z_min, z_max]
 
 def criar_legenda_html(min_val, max_val, titulo):
@@ -388,7 +426,6 @@ def calcular_vrt(df):
     for alvo in targets:
         cols[alvo] = next((c for c in df_rec.columns if alvo == c.lower() or (alvo in c.lower() and len(c) < 15)), None)
 
-    # 1. CALAGEM
     if cols['ca'] and cols['mg'] and cols['ctc']:
         def_ca = ((alvo_ca/100) * df_rec[cols['ctc']]) - df_rec[cols['ca']]
         def_mg = ((alvo_mg/100) * df_rec[cols['ctc']]) - df_rec[cols['mg']]
@@ -399,7 +436,6 @@ def calcular_vrt(df):
         dose_final = np.maximum(dose_ca, dose_mg) * (100 / (prnt_calc if prnt_calc > 0 else 1))
         df_rec['Calcario_Ton_ha'] = dose_final.apply(lambda x: x if x > 0 else 0)
 
-    # 2. POTÁSSIO
     if cols['k'] and cols['ctc']:
         k_pct = (df_rec[cols['k']] / df_rec[cols['ctc']]) * 100
         def_k = ((alvo_k_ctc - k_pct)/100) * df_rec[cols['ctc']]
@@ -408,26 +444,23 @@ def calcular_vrt(df):
         k_total = k_correcao + k_export
         df_rec['KCL_Kg_ha'] = (k_total * (100 / (teor_k2o_adubo if teor_k2o_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
-    # 3. FÓSFORO
-    col_p = next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p'])
-    if col_p and cols['prem']:
-        conds = [
-            df_rec[cols['prem']] <= 4,
-            (df_rec[cols['prem']] > 4) & (df_rec[cols['prem']] <= 10),
-            (df_rec[cols['prem']] > 10) & (df_rec[cols['prem']] <= 19),
-            (df_rec[cols['prem']] > 19) & (df_rec[cols['prem']] <= 30),
-            df_rec[cols['prem']] > 30
-        ]
-        nc_grid = np.select(conds, [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5], default=30)
-        gap = nc_grid - df_rec[col_p]
-        dose_p_total = (gap * fator_tam_p) + (meta_prod * export_p_factor)
-        df_rec['Adubo_Fosfatado_Kg_ha'] = (dose_p_total * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
+    if col_p := next((c for c in df_rec.columns if 'p mehl' in c.lower() or 'p_mehl' in c.lower()), cols['p']):
+        if cols['prem']:
+            conds = [
+                df_rec[cols['prem']] <= 4,
+                (df_rec[cols['prem']] > 4) & (df_rec[cols['prem']] <= 10),
+                (df_rec[cols['prem']] > 10) & (df_rec[cols['prem']] <= 19),
+                (df_rec[cols['prem']] > 19) & (df_rec[cols['prem']] <= 30),
+                df_rec[cols['prem']] > 30
+            ]
+            nc_grid = np.select(conds, [nc_p1, nc_p2, nc_p3, nc_p4, nc_p5], default=30)
+            gap = nc_grid - df_rec[col_p]
+            dose_p_total = (gap * fator_tam_p) + (meta_prod * export_p_factor)
+            df_rec['Adubo_Fosfatado_Kg_ha'] = (dose_p_total * (100 / (teor_p2o5_adubo if teor_p2o5_adubo > 0 else 1))).apply(lambda x: x if x > 0 else 0)
 
-    # 4. GESSO
     if cols['argila']:
         df_rec['Gesso_Ton_ha'] = (df_rec[cols['argila']] * fator_gesso) / 1000
 
-    # 5. MICROS
     if cols['b']: df_rec['Boro_Kg_ha'] = np.where(df_rec[cols['b']] < crit_b, dose_b, 0)
     if cols['zn']: df_rec['Zinco_Kg_ha'] = np.where(df_rec[cols['zn']] < crit_zn, dose_zn, 0)
     if cols['mn']: df_rec['Manganes_Kg_ha'] = np.where(df_rec[cols['mn']] < crit_mn, dose_mn, 0)
@@ -440,6 +473,7 @@ def calcular_vrt(df):
 # ==============================================================================
 aba1, aba2 = st.tabs(["🗺️ Diagnóstico", "🚜 Recomendação VRT"])
 
+# --- ABA 1: DIAGNÓSTICO ---
 with aba1:
     with st.sidebar.expander("🔍 Ver Dados Brutos"):
         if st.session_state['dados_processados'] is not None:
@@ -455,8 +489,7 @@ with aba1:
         if f_lab.name.endswith(('.xlsx', '.xls')):
             try:
                 xl = pd.ExcelFile(f_lab)
-                sheet_names = xl.sheet_names
-                selected_sheet = st.selectbox("Selecione a Aba:", sheet_names)
+                selected_sheet = st.selectbox("Selecione a Aba:", xl.sheet_names)
             except: selected_sheet = 0
         else: selected_sheet = 0
         header_row = st.number_input("Linha do Cabeçalho:", value=0, min_value=0)
@@ -483,8 +516,8 @@ with aba1:
                     if not df_krig.empty:
                         st.session_state['dados_processados'] = df_krig
                         st.session_state['grid_shape'] = shape
-                        st.success(f"Sucesso! {len(df_m)} pontos.")
-                    else: st.warning("Erro na interpolação.")
+                        st.success(f"Sucesso! {len(df_m)} pontos usados.")
+                    else: st.warning("Falha na interpolação.")
                 else: st.error("Erro IDs.")
             except Exception as e: st.error(f"Erro: {e}")
 
@@ -493,9 +526,6 @@ with aba1:
                 if c not in ['latitude', 'longitude'] and 'Kg_ha' not in c and 'Ton_ha' not in c]
         if cols:
             attr = st.selectbox("Nutriente:", cols)
-            csv = st.session_state['dados_processados'].to_csv(index=False).encode('utf-8')
-            st.download_button("💾 Baixar Ponte", csv, "ponte_vrt.csv")
-            
             s_val = st.session_state['dados_processados'][attr]
             st.info(f"📊 **{attr}** | Mín: {s_val.min():.2f} | Máx: {s_val.max():.2f} | Média: {s_val.mean():.2f}")
 
@@ -507,6 +537,7 @@ with aba1:
                 m.get_root().html.add_child(folium.Element(criar_legenda_html(mm[0], mm[1], attr)))
                 st_folium(m, height=500, use_container_width=True, key="mapa_diag")
 
+# --- ABA 2: VRT ---
 with aba2:
     if st.session_state['dados_processados'] is None:
         st.warning("Gere o diagnóstico na Aba 1 primeiro.")
@@ -522,6 +553,17 @@ with aba2:
                 s_rec = st.session_state['dados_rec'][escolha]
                 r_mean = s_rec[s_rec > 0].mean() if not s_rec[s_rec > 0].empty else 0
                 st.info(f"🚜 **{escolha}** | Dose Média (Aplicada): {r_mean:.1f} | Máx: {s_rec.max():.1f}")
+                
+                # BOTÃO DE EXPORTAÇÃO SHAPEFILE (ZIP)
+                if GEO_ENABLED:
+                    zip_file = gerar_pacote_shapefile(st.session_state['dados_rec'], escolha, nome_arquivo=f"Rx_{escolha}")
+                    if zip_file:
+                        st.download_button(
+                            label=f"💾 Baixar ZIP Shapefile ({escolha})",
+                            data=zip_file,
+                            file_name=f"Rx_{escolha}.zip",
+                            mime="application/zip"
+                        )
                 
                 img, bounds, mm = gerar_imagem_overlay(st.session_state['dados_rec'], escolha, st.session_state['geojson_data'], st.session_state['grid_shape'])
                 if img:
