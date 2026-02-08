@@ -13,3 +13,4 @@ pillow
 plotly
 scikit-learn
 xlrd
+geopandas
