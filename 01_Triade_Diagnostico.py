@@ -1,8 +1,3 @@
-Aqui está o código completo. Peguei a versão exata que você me mandou (com a exportação de Shapefile, recorte perfeito e fórmulas ajustadas) e reintegrei o Simulador de Relação Ca/Mg na barra lateral.
-
-Agora, ao ajustar os teores de CaO e MgO do calcário na Sidebar, você verá instantaneamente como a relação Ca/Mg do solo vai ficar após a aplicação.
-
-Python
 import streamlit as st
 import pandas as pd
 import numpy as np
